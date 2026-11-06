@@ -7,6 +7,7 @@ dotted key.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -203,9 +204,15 @@ class _Section:
 
     def positive(self, name: str) -> float:
         value = self._get(name)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ConfigError(self._key(name), "expected a positive number")
-        return float(value)
+        try:
+            number = float(value)
+        except OverflowError:
+            number = math.inf
+        if not math.isfinite(number) or number <= 0:
+            raise ConfigError(self._key(name), "expected a finite positive number")
+        return number
 
     def positive_int(self, name: str) -> int:
         value = self._get(name)

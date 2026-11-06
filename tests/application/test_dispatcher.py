@@ -1,6 +1,10 @@
+import signal
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from pathlib import Path
 
 import pytest
 
@@ -234,3 +238,51 @@ def test_stub_verifier_reproduces_imu_only_actuation(
         h.dispatcher.handle(h.detect(tag))
 
     assert h.meta.executed == [STRONG_META, STRONG_META, MILD_META, MILD_META]
+
+
+HUNG_VERIFIER_PROCESS = """
+import sys, threading
+from cpsa.application.dispatcher import Dispatcher
+from cpsa.application.slot import LatestSlot
+from cpsa.board.__main__ import install_signal_handlers
+from cpsa.domain.model import Detection, Tag
+from tests.fakes import FakeClock, MemorySink, RecordingGui, ScriptedVerifier
+
+entered = threading.Event()
+def hang(_):
+    entered.set()
+    threading.Event().wait()  # never returns
+
+clock = FakeClock()
+slot = LatestSlot()
+dispatcher = Dispatcher(slot, ScriptedVerifier(behavior=hang), [], MemorySink(), RecordingGui(),
+                        clock, cooldown_s=5.0, deadline_s=0.05)
+stop = threading.Event()
+install_signal_handlers(stop)
+dispatcher.start()
+slot.put(Detection(Tag.DANGEROUS, clock.now(), 0.0, ()))
+entered.wait(5)
+print("ready", flush=True)
+stop.wait()
+dispatcher.stop()
+sys.exit(0)
+"""
+
+
+def test_hung_verifier_does_not_prevent_process_exit_on_sigterm() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    process = subprocess.Popen(
+        [sys.executable, "-c", HUNG_VERIFIER_PROCESS],
+        cwd=repo_root,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == "ready"
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=10) == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()

@@ -67,8 +67,8 @@ class MetaMotionThread(threading.Thread):
         self.vibration_lock = threading.Lock()
 
         self.fast_retry_attempts = int(fast_attempts)
-        self.retry_interval = int(interval_s)
-        self.retry_sleep = int(sleep_s)
+        self.retry_interval = interval_s
+        self.retry_sleep = sleep_s
 
     def run(self):
         logger.info("[MetaMotion %s] Thread started", self.mac_address)
@@ -211,10 +211,8 @@ class MetaMotionThread(threading.Thread):
                     self.fast_retry_attempts,
                     e,
                 )
-                for _ in range(self.retry_interval):
-                    if self.stop_event.is_set():
-                        return
-                    time.sleep(1)
+                if self.stop_event.wait(self.retry_interval):
+                    return
 
         # Phase 2: slow retries
         logger.info(
@@ -231,7 +229,5 @@ class MetaMotionThread(threading.Thread):
                 return
             except Exception as e:
                 logger.warning("[MetaMotion %s] Slow retry failed: %s", self.mac_address, e)
-                for _ in range(self.retry_interval):
-                    if self.stop_event.is_set():
-                        return
-                    time.sleep(1)
+                if self.stop_event.wait(self.retry_interval):
+                    return

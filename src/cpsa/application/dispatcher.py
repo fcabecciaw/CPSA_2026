@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import concurrent.futures
 import logging
 import threading
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 
 from cpsa.application.slot import LatestSlot
 from cpsa.domain import gating, policy
@@ -19,6 +19,56 @@ _REASON_FOR_VERDICT = {
     Verdict.UNDECIDED: GateReason.UNDECIDED,
     Verdict.REJECTED: GateReason.REJECTED,
 }
+
+
+@dataclass
+class _Request:
+    detection: Detection
+    done: threading.Event = field(default_factory=threading.Event)
+    verdict: object = None
+    error: BaseException | None = None
+    abandoned: bool = False
+
+
+class _VerificationWorker:
+    """Runs verifier calls one at a time on a daemon thread.
+
+    The caller waits for each result only up to its deadline. A daemon thread (not a
+    ``ThreadPoolExecutor``, whose workers are joined at interpreter exit) is used so a
+    verifier that never returns cannot keep the process alive after shutdown. While
+    the verifier hangs, later requests time out and fail open; an abandoned request
+    still waiting is replaced by the newest one, so requests never pile up.
+    """
+
+    def __init__(self, verifier: Verifier) -> None:
+        self._verifier = verifier
+        self._requests: LatestSlot[_Request] = LatestSlot()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="verifier", daemon=True)
+        self._start_lock = threading.Lock()
+
+    def submit(self, detection: Detection) -> _Request:
+        with self._start_lock:
+            if not self._thread.is_alive() and not self._stop.is_set():
+                self._thread.start()
+        request = _Request(detection)
+        self._requests.put(request)
+        return request
+
+    def stop(self) -> None:
+        """Ask the worker to exit; a call in progress is not waited for."""
+        self._stop.set()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            request = self._requests.get(timeout=0.5)
+            if request is None or request.abandoned:
+                continue
+            try:
+                request.verdict = self._verifier.verify(request.detection)
+            except BaseException as exc:
+                request.error = exc
+            request.done.set()
 
 
 class Dispatcher:
@@ -54,11 +104,7 @@ class Dispatcher:
         self._last_actuation: float | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="dispatcher", daemon=True)
-        # A single worker keeps verifier calls sequential. A verifier that hangs keeps
-        # occupying it, so later verifications time out and fail open (documented risk).
-        self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="verifier"
-        )
+        self._worker = _VerificationWorker(verifier)
 
     def start(self) -> None:
         self._thread.start()
@@ -67,7 +113,7 @@ class Dispatcher:
         self._stop.set()
         if self._thread.is_alive():
             self._thread.join()
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        self._worker.stop()
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -128,16 +174,15 @@ class Dispatcher:
         return Decision(verdict, reason, bool(actuations), tuple(actuations))
 
     def _verify_with_deadline(self, detection: Detection) -> tuple[Verdict, GateReason]:
-        future = self._executor.submit(self._verifier.verify, detection)
-        try:
-            verdict = future.result(timeout=self._deadline_s)
-        except concurrent.futures.TimeoutError:
-            future.cancel()
+        request = self._worker.submit(detection)
+        if not request.done.wait(timeout=self._deadline_s):
+            request.abandoned = True
             logger.warning("Verifier exceeded the %.3f s deadline; failing open", self._deadline_s)
             return Verdict.UNDECIDED, GateReason.TIMEOUT
-        except Exception:
-            logger.exception("Verifier failed; failing open")
+        if request.error is not None:
+            logger.error("Verifier failed; failing open", exc_info=request.error)
             return Verdict.UNDECIDED, GateReason.VERIFIER_ERROR
+        verdict = request.verdict
         if not isinstance(verdict, Verdict):
             logger.error("Verifier returned %r, not a Verdict; failing open", verdict)
             return Verdict.UNDECIDED, GateReason.VERIFIER_ERROR

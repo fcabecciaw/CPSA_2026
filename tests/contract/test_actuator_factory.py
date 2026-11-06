@@ -1,7 +1,11 @@
+import itertools
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from cpsa import ports
 from cpsa.adapters.actuators.factory import start_actuators
@@ -104,3 +108,26 @@ def test_policy_audio_assets_are_bundled(vendor: Vendor) -> None:
     for tag in (Tag.NON_DANGEROUS, Tag.DANGEROUS):
         (actuation,) = actuations_for(tag, ["speaker_X"])
         assert resolve_audio(str(actuation.params["file"])).name == actuation.params["file"]
+
+
+def test_metamotion_reconnection_honors_subsecond_intervals(
+    vendor: Vendor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cpsa.adapters.actuators import metamotion
+
+    attempts: list[float] = []
+    thread = metamotion.MetaMotionThread("aa:bb", fast_attempts=2, interval_s=0.2, sleep_s=0.2)
+
+    class Unreachable(metamotion.MetaWear):  # type: ignore[misc,name-defined]
+        def connect(self) -> None:
+            attempts.append(time.monotonic())
+            if len(attempts) == 3:
+                thread.stop_event.set()
+            raise OSError("device unreachable")
+
+    monkeypatch.setattr(metamotion, "MetaWear", Unreachable)
+    thread._reconnection_attempts()
+
+    gaps = [later - earlier for earlier, later in itertools.pairwise(attempts)]
+    assert len(attempts) == 3
+    assert all(gap >= 0.19 for gap in gaps), gaps

@@ -102,3 +102,11 @@ def test_unreadable_and_malformed_files_name_the_path(tmp_path: Path) -> None:
     broken.write_text("log: [unclosed\n")
     with pytest.raises(ConfigError, match="broken.yaml"):
         load(broken)
+
+
+@pytest.mark.parametrize("literal", [".nan", ".inf", "-.inf", "1.0e+400"])
+def test_nonfinite_numbers_are_rejected(literal: str) -> None:
+    text = SHIPPED.read_text().replace("max_skew_ms: 30", f"max_skew_ms: {literal}")
+    with pytest.raises(ConfigError) as info:
+        parse(yaml.safe_load(text))
+    assert info.value.key == "sync.max_skew_ms"

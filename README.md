@@ -79,7 +79,7 @@ Only `cpsa.adapters` and `cpsa.board` may use `ctypes` or the hardware libraries
   `src/cpsa/board/__main__.py`, its single construction site. The dispatcher
   already enforces the deadline and fail-open behavior; a verifier may block or
   raise. A verifier that hangs keeps the single verification worker busy, so later
-  verifications time out and fail open.
+  verifications time out and fail open; it does not delay shutdown.
 - **GUI:** implement `cpsa.ports.Gui` and construct it instead of `NullGui()` in
   the same function. `publish` is called from the dispatcher thread for every
   event-log record.
