@@ -32,6 +32,5 @@ def _is_forbidden(path: PurePosixPath) -> bool:
     )
 
 
-@pytest.mark.xfail(strict=True, reason="legacy trees are removed in PLAN.md Task 8")
 def test_no_forbidden_artifacts_are_tracked() -> None:
     assert [str(p) for p in _tracked_files() if _is_forbidden(p)] == []
