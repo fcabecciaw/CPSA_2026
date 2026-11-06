@@ -16,31 +16,42 @@ logger = logging.getLogger(__name__)
 
 
 class _Retry(Protocol):
-    scan_timeout_s: float
-    fast_attempts: int
-    interval_s: float
-    sleep_s: float
+    @property
+    def scan_timeout_s(self) -> float: ...
+    @property
+    def fast_attempts(self) -> int: ...
+    @property
+    def interval_s(self) -> float: ...
+    @property
+    def sleep_s(self) -> float: ...
 
 
 class _Enable(Protocol):
-    enable: bool
+    @property
+    def enable(self) -> bool: ...
 
 
 class _Speaker(_Enable, Protocol):
-    mac: str
+    @property
+    def mac(self) -> str: ...
 
 
 class _LedStrip(_Enable, Protocol):
-    duration_ms: int
+    @property
+    def duration_ms(self) -> int: ...
 
 
 class ActuatorSettings(Protocol):
-    """Structure of the ``actuators`` configuration section."""
+    """Read-only structure of the ``actuators`` configuration section."""
 
-    retry: _Retry
-    metamotion: _Enable
-    speaker: _Speaker
-    led_strip: _LedStrip
+    @property
+    def retry(self) -> _Retry: ...
+    @property
+    def metamotion(self) -> _Enable: ...
+    @property
+    def speaker(self) -> _Speaker: ...
+    @property
+    def led_strip(self) -> _LedStrip: ...
 
 
 def start_actuators(settings: ActuatorSettings) -> list[Actuator]:
