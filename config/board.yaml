@@ -1,0 +1,34 @@
+# CPSA board configuration. Every key is required; see README.md "Configuration".
+log:
+  base_path: ~/Desktop/CPSA_logs   # system.log and events.jsonl go under <base_path>/<YYYY-MM-DD>/
+  level: INFO                      # DEBUG, INFO, WARNING, ERROR or CRITICAL
+
+bluecoins:
+  left: CPSA_L2                    # BLE name of the left-wrist BlueCoin
+  right: CPSA_R2                   # BLE name of the right-wrist BlueCoin
+  scan_timeout_s: 5                # duration of each discovery scan
+  discovery_retries: 5             # extra scans before giving up (exit code 2)
+  retry_interval_s: 5              # wait between scans
+
+sync:
+  max_skew_ms: 30                  # max L/R timestamp difference to combine samples
+  stale_ms: 50                     # discard a wrist's samples older than this
+
+dispatch:
+  cooldown_s: 5                    # min time between actuations for the same tag
+  verification_deadline_s: 1.0     # placeholder (Q-01): measure with a real verifier
+
+actuators:
+  retry:                           # shared reconnection behavior of every actuator
+    scan_timeout_s: 5
+    fast_attempts: 5
+    interval_s: 5
+    sleep_s: 60
+  metamotion:
+    enable: true
+  speaker:
+    enable: false
+    mac: "D4:8C:49:C9:DC:9A"
+  led_strip:
+    enable: false
+    duration_ms: 2500              # LED turns itself off after this time
