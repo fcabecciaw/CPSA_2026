@@ -1,4 +1,4 @@
-# feature_mems_sensor_fusion_compact.py
+# fusion_feature.py
 # Quaternion (compact) feature: firmware sends qx,qy,qz as int16 scaled by 10000.
 # Reconstruct qw >= 0 as sqrt(1 - x^2 - y^2 - z^2) in the same raw domain.
 #
@@ -9,14 +9,16 @@
 # Repository: https://github.com/frarvo/CPSA_2026
 # License: MIT
 
-from blue_st_sdk.feature import Feature, Sample, ExtractedData
-from blue_st_sdk.features.field import Field, FieldType
-from blue_st_sdk.utils.number_conversion import LittleEndian
-from blue_st_sdk.utils.blue_st_exceptions import (
-    BlueSTInvalidOperationException,
-    BlueSTInvalidDataException,
-)
 import math
+
+from blue_st_sdk.feature import ExtractedData, Feature, Sample
+from blue_st_sdk.features.field import Field, FieldType
+from blue_st_sdk.utils.blue_st_exceptions import (
+    BlueSTInvalidDataException,
+    BlueSTInvalidOperationException,
+)
+from blue_st_sdk.utils.number_conversion import LittleEndian
+
 
 class FeatureMemsSensorFusionCompact(Feature):
     """
@@ -29,8 +31,8 @@ class FeatureMemsSensorFusionCompact(Feature):
     FEATURE_DATA_NAME = ["QX", "QY", "QZ", "QW"]
 
     # Raw domain settings
-    RAW_SCALE = 10000.0          # raw = float * 10000
-    DATA_LENGTH_BYTES = 6        # 3 × int16 (2 bytes each)
+    RAW_SCALE = 10000.0  # raw = float * 10000
+    DATA_LENGTH_BYTES = 6  # 3 × int16 (2 bytes each)
 
     QX_INDEX = 0
     QY_INDEX = 1
@@ -43,10 +45,15 @@ class FeatureMemsSensorFusionCompact(Feature):
     FEATURE_QW_FIELD = Field(FEATURE_DATA_NAME[QW_INDEX], FEATURE_UNIT, FieldType.Float, +1.0, -1.0)
 
     def __init__(self, node):
-        super(FeatureMemsSensorFusionCompact, self).__init__(
+        super().__init__(
             self.FEATURE_NAME,
             node,
-            [self.FEATURE_QX_FIELD, self.FEATURE_QY_FIELD, self.FEATURE_QZ_FIELD, self.FEATURE_QW_FIELD],
+            [
+                self.FEATURE_QX_FIELD,
+                self.FEATURE_QY_FIELD,
+                self.FEATURE_QZ_FIELD,
+                self.FEATURE_QW_FIELD,
+            ],
         )
 
     def extract_data(self, timestamp, data, offset):
@@ -62,7 +69,9 @@ class FeatureMemsSensorFusionCompact(Feature):
         qz_raw = LittleEndian.bytes_to_int16(data, offset + 4)
 
         # Reconstruct |qw| in raw (×10000) domain; clamp tiny negatives to 0
-        t_raw = self.RAW_SCALE * self.RAW_SCALE - (qx_raw * qx_raw + qy_raw * qy_raw + qz_raw * qz_raw)
+        t_raw = self.RAW_SCALE * self.RAW_SCALE - (
+            qx_raw * qx_raw + qy_raw * qy_raw + qz_raw * qz_raw
+        )
         if t_raw < 0:
             t_raw = 0
         qw_raw = int(math.sqrt(t_raw))

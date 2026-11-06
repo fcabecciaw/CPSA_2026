@@ -6,86 +6,89 @@
 # Repository: https://github.com/frarvo/CPSA_2026
 # License: MIT
 
+import contextlib
+import logging
 import threading
 import time
-from typing import Optional, Tuple, List
+from collections.abc import Mapping
+from typing import Any
 
 import flux_led
 from flux_led import BulbScanner
 
-from utils.logger import log_system
-from utils.config import get_led_strip_config
-from utils.lock import device_reconnection_lock
+from cpsa.adapters.ble_lock import ble_reconnection_lock
+from cpsa.domain.model import ACTUATOR_ID_PREFIX, ActuatorKind
 
-# Device scanning function
+logger = logging.getLogger(__name__)
 
-def scan_led_devices(timeout: int = 5) -> List[str]:
-    """
-    Scans for Wi-Fi LED devices using flux_led and returns their IP addresses.
 
-    Args:
-        timeout (int): Duration of the network scan in seconds.
-
-    Returns:
-        List[str]: A list of IP addresses corresponding to discovered LED devices.
-    """
-    log_system(f"[LED Scanner] Starting WiFi scan for {timeout} seconds...")
-    ip_list: List[str] = []
+def scan_led_devices(timeout_s: float) -> list[str]:
+    """Scan the network for flux_led Wi-Fi LED devices and return their IP addresses."""
+    logger.info("Starting Wi-Fi LED scan for %s seconds...", timeout_s)
+    ip_list: list[str] = []
 
     try:
         scanner = BulbScanner()
-        devices = scanner.scan(timeout)
+        devices = scanner.scan(timeout_s)
 
         for device in devices:
-            ipaddr = device.get('ipaddr')
-            model = device.get('model')
+            ipaddr = device.get("ipaddr")
+            model = device.get("model")
             if ipaddr:
-                log_system(f"[LED Scanner] Found device: {ipaddr} (model: {model})")
+                logger.info("Found LED device: %s (model: %s)", ipaddr, model)
                 ip_list.append(ipaddr)
 
         if not ip_list:
-            log_system("[LED Scanner] No LED devices found.", level="WARNING")
+            logger.warning("No LED devices found")
 
-    except Exception as exc:
-        log_system(f"[LED Scanner] Scan error: {exc}", level="ERROR")
+    except Exception:
+        logger.exception("LED scan error")
 
     return ip_list
 
-#LedStripThread
 
 class LedThread(threading.Thread):
     """
-    Thread for managing a Wi-Fi LED strip using flux_led.
+    Actuator managing a Wi-Fi LED strip using flux_led.
 
-    Args:
-        ip_address (str): The IP address of the target LED strip.
+    A color or pattern request turns the strip on; it turns itself off after
+    ``duration_ms`` unless the request carries its own ``duration``.
     """
 
-    def __init__(self, ip_address: str):
+    kind = ActuatorKind.LED_STRIP
+
+    def __init__(
+        self,
+        ip_address: str,
+        duration_ms: int,
+        fast_attempts: int,
+        interval_s: float,
+        sleep_s: float,
+    ):
         super().__init__(daemon=True)
         self.ip_address = ip_address
+        self.id = f"{ACTUATOR_ID_PREFIX[self.kind]}{ip_address}"
 
         self._stop_event = threading.Event()
         self._event = threading.Event()
         self._disconnect_event = threading.Event()
 
-        self._pattern: Optional[int] = None
-        self._color: Optional[Tuple[int, int, int, int]] = None
+        self._pattern: int | None = None
+        self._color: tuple[int, int, int, int] | None = None
         self._speed: int = 100
         self._intensity: int = 100
-        self._off_timer = None
+        self._off_timer: threading.Timer | None = None
         self._pending_duration_ms = 0
 
-        self._bulb: Optional[flux_led.WifiLedBulb] = None
+        self._bulb: Any = None  # flux_led.WifiLedBulb once connected
 
-        cfg = get_led_strip_config()
-        self._fast_retry_attempts = int(cfg.get("fast_retry_attempts", 5))
-        self._retry_interval = int(cfg.get("retry_interval", 5))
-        self._retry_sleep = int(cfg.get("retry_sleep", 60))
-        self._duration = int(cfg.get("duration", 5000))
+        self._fast_retry_attempts = int(fast_attempts)
+        self._retry_interval = interval_s
+        self._retry_sleep = sleep_s
+        self._duration = int(duration_ms)
 
     def run(self) -> None:
-        log_system(f"[LedStrip: {self.ip_address}] Thread started")
+        logger.info(f"[LedStrip {self.ip_address}] Thread started")
         self._connect()
         self._wait_for_event()
 
@@ -96,7 +99,7 @@ class LedThread(threading.Thread):
 
                 if self._disconnect_event.is_set():
                     self._disconnect_event.clear()
-                    with device_reconnection_lock:
+                    with ble_reconnection_lock:
                         self._reconnection_attempts()
 
                 if self._bulb:
@@ -111,10 +114,10 @@ class LedThread(threading.Thread):
                 self._bulb = flux_led.WifiLedBulb(self.ip_address)
                 self._bulb.refreshState()
                 self._connection_feedback()
-                log_system(f"[LedStrip: {self.ip_address}] Connected successfully")
+                logger.info(f"[LedStrip {self.ip_address}] Connected successfully")
                 return
             except Exception as exc:
-                log_system(f"[LedStrip: {self.ip_address}] Connection error: {exc}", level="ERROR")
+                logger.error(f"[LedStrip {self.ip_address}] Connection error: {exc}")
                 time.sleep(self._retry_interval)
 
     def _connection_feedback(self) -> None:
@@ -130,21 +133,28 @@ class LedThread(threading.Thread):
             pass
 
     def _reconnection_attempts(self) -> None:
-        log_system(f"[LedStrip: {self.ip_address}] Starting reconnection attempts...")
+        logger.info(f"[LedStrip {self.ip_address}] Starting reconnection attempts...")
 
         for attempt in range(1, self._fast_retry_attempts + 1):
             if self._stop_event.is_set():
                 return
             if self._try_reconnect():
                 return
-            log_system(f"[LedStrip: {self.ip_address}] Fast retry {attempt}/{self._fast_retry_attempts} failed", level="WARNING")
+            logger.warning(
+                "[LedStrip %s] Fast retry %d/%d failed",
+                self.ip_address,
+                attempt,
+                self._fast_retry_attempts,
+            )
             time.sleep(self._retry_interval)
 
-        log_system(f"[LedStrip: {self.ip_address}] Switching to slow retries every {self._retry_sleep}s", level="WARNING")
+        logger.warning(
+            f"[LedStrip {self.ip_address}] Switching to slow retries every {self._retry_sleep}s"
+        )
         while not self._stop_event.is_set():
             if self._try_reconnect():
                 return
-            log_system(f"[LedStrip: {self.ip_address}] Slow retry failed", level="WARNING")
+            logger.warning(f"[LedStrip {self.ip_address}] Slow retry failed")
             time.sleep(self._retry_sleep)
 
     def _try_reconnect(self) -> bool:
@@ -152,21 +162,25 @@ class LedThread(threading.Thread):
             self._bulb = flux_led.WifiLedBulb(self.ip_address)
             self._bulb.refreshState()
             self._connection_feedback()
-            log_system(f"[LedStrip: {self.ip_address}] Reconnected successfully")
+            logger.info(f"[LedStrip {self.ip_address}] Reconnected successfully")
             return True
         except Exception:
             return False
 
-    def execute(
-        self,
-        *,
-        pattern: Optional[int] = None,
-        color: Optional[Tuple[int, int, int, int]] = None,
-        intensity: int = 100,
-        speed: int = 100,
-        duration: Optional[int] = None,
-    ) -> None:
-        """Trigger an effect or solid color on the LED strip."""
+    def execute(self, params: Mapping[str, object]) -> None:
+        """Show ``color`` (r, g, b, w) or effect ``pattern`` at ``intensity`` and ``speed``.
+
+        Optional ``duration`` (ms) overrides the configured auto-off delay.
+        """
+        self._configure(
+            pattern=params.get("pattern"),
+            color=params.get("color"),
+            intensity=params.get("intensity", 100),
+            speed=params.get("speed", 100),
+            duration=params.get("duration"),
+        )
+
+    def _configure(self, *, pattern, color, intensity, speed, duration) -> None:
         self._pattern = pattern
         # Clamp color channels to 0..255
         if color is not None:
@@ -191,21 +205,29 @@ class LedThread(threading.Thread):
         try:
             if self._color:
                 r, g, b, w = self._color
-                if self._intensity <= 0 or (r==0 and g==0 and b==0 and w==0):
+                if self._intensity <= 0 or (r == 0 and g == 0 and b == 0 and w == 0):
                     self._turn_off()
                     return
-                log_system(f"[LedStrip: {self.ip_address}] Setting color ({r},{g},{b},{w}) intensity={self._intensity}%")
+                logger.info(
+                    f"[LedStrip {self.ip_address}] Setting color ({r},{g},{b},{w}) "
+                    f"intensity={self._intensity}%"
+                )
                 self._bulb.setRgbw(r, g, b, w, brightness=self._intensity)
                 self._schedule_off_timer(self._pending_duration_ms)
             elif self._pattern is not None:
                 if self._intensity <= 0:
                     self._turn_off()
-                log_system(f"[LedStrip: {self.ip_address}] Setting pattern {self._pattern} speed={self._speed}% intensity={self._intensity}%")
-                self._bulb.set_effect(effect=self._pattern, speed=self._speed, brightness=self._intensity)
+                logger.info(
+                    f"[LedStrip {self.ip_address}] Setting pattern {self._pattern} "
+                    f"speed={self._speed}% intensity={self._intensity}%"
+                )
+                self._bulb.set_effect(
+                    effect=self._pattern, speed=self._speed, brightness=self._intensity
+                )
                 self._schedule_off_timer(self._pending_duration_ms)
 
         except Exception as exc:
-            log_system(f"[LedStrip: {self.ip_address}] Action error: {exc}", level="ERROR")
+            logger.error(f"[LedStrip {self.ip_address}] Action error: {exc}")
             self._disconnect_event.set()
             self._event.set()
 
@@ -215,14 +237,12 @@ class LedThread(threading.Thread):
                 try:
                     self._bulb.turnOff()
                 except Exception as e:
-                    log_system(f"[LedStrip: {self.ip_address}] turnOff() failed: {e}")
-                try:
-                    self._bulb.setRgbw(0,0,0,0, brightness=0)
-                except Exception:
-                    pass
-                log_system(f"[LedStrip: {self.ip_address}] Turned off")
+                    logger.info(f"[LedStrip {self.ip_address}] turnOff() failed: {e}")
+                with contextlib.suppress(Exception):
+                    self._bulb.setRgbw(0, 0, 0, 0, brightness=0)
+                logger.info(f"[LedStrip {self.ip_address}] Turned off")
         except Exception as exc:
-            log_system(f"[LedStrip: {self.ip_address}] TurnOff error: {exc}", level="ERROR")
+            logger.error(f"[LedStrip {self.ip_address}] TurnOff error: {exc}")
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -234,9 +254,9 @@ class LedThread(threading.Thread):
             pass
         if threading.current_thread() is not self and self.is_alive():
             self.join()
-        log_system(f"[LedStrip: {self.ip_address}] Thread stopped")
+        logger.info(f"[LedStrip {self.ip_address}] Thread stopped")
 
-    def _schedule_off_timer(self, ms:int) -> None:
+    def _schedule_off_timer(self, ms: int) -> None:
         try:
             if self._off_timer:
                 self._off_timer.cancel()
@@ -244,7 +264,7 @@ class LedThread(threading.Thread):
             pass
         self._off_timer = None
         if ms > 0 and not self._stop_event.is_set():
-            self._off_timer = threading.Timer(ms/1000.0, self._auto_off)
+            self._off_timer = threading.Timer(ms / 1000.0, self._auto_off)
             self._off_timer.daemon = True
             self._off_timer.start()
 
@@ -254,6 +274,6 @@ class LedThread(threading.Thread):
         try:
             if self._bulb:
                 self._bulb.turnOff()
-                log_system(f"[LedStrip: {self.ip_address}] Auto OFF")
+                logger.info(f"[LedStrip {self.ip_address}] Auto OFF")
         except Exception as e:
-            log_system(f"[LedStrip: {self.ip_address}] Auto OFF error: {e}", level="WARNING")
+            logger.warning(f"[LedStrip {self.ip_address}] Auto OFF error: {e}")
