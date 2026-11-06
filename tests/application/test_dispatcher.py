@@ -4,6 +4,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 
 import pytest
 
+from cpsa.adapters.verifier_stub import StubVerifier
 from cpsa.application.dispatcher import Dispatcher
 from cpsa.application.slot import LatestSlot
 from cpsa.domain.model import (
@@ -211,3 +212,25 @@ def test_blocked_verifier_never_blocks_producers_and_newest_detection_wins(
         time.sleep(0.01)
     assert [d.window_end_ts for d in h.verifier.calls] == [1.0, 3.0]
     assert [r.window_end_ts for r in h.sink.records] == [1.0, 3.0]
+
+
+def test_stub_verifier_reproduces_imu_only_actuation(
+    harness_factory: Callable[..., Harness],
+) -> None:
+    h = harness_factory(StubVerifier())  # type: ignore[arg-type]
+    # (seconds since previous detection, tag); IMU-only rule: actuate stereotypy tags
+    # on a tag change or once the 5 s cooldown has elapsed.
+    sequence = [
+        (0.0, Tag.DANGEROUS),  # actuate strong
+        (1.0, Tag.DANGEROUS),  # cooldown
+        (4.0, Tag.DANGEROUS),  # cooldown elapsed: strong
+        (0.5, Tag.NON_DANGEROUS),  # tag change: mild
+        (0.5, Tag.NON_STEREOTIPY),  # not a stereotypy
+        (1.0, Tag.NON_DANGEROUS),  # tag change: mild
+        (1.0, Tag.NO_CLASS),  # not a stereotypy
+    ]
+    for elapsed, tag in sequence:
+        h.clock.advance(elapsed)
+        h.dispatcher.handle(h.detect(tag))
+
+    assert h.meta.executed == [STRONG_META, STRONG_META, MILD_META, MILD_META]
