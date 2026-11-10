@@ -8,7 +8,21 @@ from pathlib import Path
 import pytest
 
 NOTEBOOK_DIR = Path(__file__).resolve().parents[1] / "notebooks"
-NOTEBOOKS = ("01_build_halfbust", "03_train_fp32", "05_qat")
+NOTEBOOKS = ("01_build_halfbust", "03_train_fp32", "04_variant_study", "05_qat")
+
+#: Kaggle datasets attached to each notebook.
+EXPECTED_DATASETS = {
+    "01_build_halfbust": ["awsaf49/coco-2017-dataset"],
+    "03_train_fp32": ["fabiocabeccia/cpsa-halfbust"],
+    "04_variant_study": [
+        "fabiocabeccia/cpsa-halfbust",
+        "fabiocabeccia/cpsa-checkpoints",
+    ],
+    "05_qat": ["fabiocabeccia/cpsa-halfbust", "fabiocabeccia/cpsa-checkpoints"],
+}
+
+#: Notebooks that train on a GPU (notebook 01 only builds the dataset).
+GPU_NOTEBOOKS = ("03_train_fp32", "04_variant_study", "05_qat")
 
 
 def _load(path: Path) -> dict:
@@ -57,6 +71,7 @@ def test_first_code_cell_pins_and_installs_cpsa_ml() -> None:
     [
         ("01_build_halfbust", "build_halfbust_dataset"),
         ("03_train_fp32", "train"),
+        ("04_variant_study", "train_study"),
         ("05_qat", "quantize_model"),
     ],
 )
@@ -67,26 +82,33 @@ def test_notebooks_are_thin_wrappers(stem: str, entry_point: str) -> None:
     assert "def " not in source  # no local reimplementation
 
 
+def test_notebook_04_uses_the_variant_study_module() -> None:
+    notebook = _load(NOTEBOOK_DIR / "04_variant_study.ipynb")
+    source = "".join("".join(cell["source"]) for cell in notebook["cells"])
+    assert "from cpsa_ml.variant_study import" in source
+    assert "DEFAULT_VARIANTS" in source
+    assert "StudyConfig" in source
+
+
 def test_kernel_metadata_is_complete_and_valid() -> None:
-    expected_datasets = {
-        "01_build_halfbust": ["fcabecciaw/coco-2017-dataset", "fcabecciaw/coco-wholebody-json"],
-        "03_train_fp32": ["fcabecciaw/cpsa-halfbust"],
-        "05_qat": ["fcabecciaw/cpsa-halfbust", "fcabecciaw/cpsa-checkpoints"],
-    }
     for stem in NOTEBOOKS:
         folder = NOTEBOOK_DIR / stem
         metadata = _load(folder / "kernel-metadata.json")
-        assert metadata["id"].startswith("fcabecciaw/")
+        assert metadata["id"].startswith("fabiocabeccia/")
         assert metadata["code_file"] == f"{stem}.ipynb"
         assert metadata["language"] == "python"
         assert metadata["kernel_type"] == "notebook"
         assert metadata["is_private"] is True
-        assert metadata["enable_gpu"] is True
         assert metadata["enable_internet"] is True
-        assert metadata["machine_shape"] == "NvidiaTeslaT4"
-        assert metadata["dataset_sources"] == expected_datasets[stem]
+        assert metadata["dataset_sources"] == EXPECTED_DATASETS[stem]
         assert metadata["competition_sources"] == []
         assert metadata["kernel_sources"] == []
+        if stem in GPU_NOTEBOOKS:
+            assert metadata["enable_gpu"] is True
+            assert metadata["machine_shape"] == "NvidiaTeslaT4"
+        else:
+            assert metadata["enable_gpu"] is False
+            assert "machine_shape" not in metadata
         assert (folder / metadata["code_file"]).is_file()
 
 

@@ -18,6 +18,7 @@ Optional extras:
 ```bash
 uv sync --extra dev --extra qat       # Brevitas QAT
 uv sync --extra dev --extra teacher   # rtmlib + onnxruntime (Task 5b)
+uv sync --extra dev --extra sources   # gdown for the COCO-WholeBody download
 ```
 
 ## Pinned versions
@@ -30,6 +31,7 @@ uv sync --extra dev --extra teacher   # rtmlib + onnxruntime (Task 5b)
 | `brevitas` | `0.13.4` | verified `Int8WeightPerTensorFixedPoint`, `Int8ActPerTensorFixedPoint`, `QuantConv2d`, `QuantHardSwish` |
 | `onnx` | `>=1.16,<2` | Ultralytics 8.4.203 export range |
 | `rtmlib` | `0.0.16` | teacher extra only (Task 5b) |
+| `gdown` | `>=5` | `sources` extra only; notebook 01 downloads the COCO-WholeBody annotations from the official Google Drive ids |
 | `numpy` | `>=1.23` | Ultralytics minimum |
 | `pyyaml` | `>=6` | dataset/model YAML |
 | `pillow` | `>=10` | image crops and synthetic hand paste |
@@ -53,10 +55,11 @@ mouth 48<->54; chin (jaw 8) and lip centres 51/57 self-map.
 ## Build the half-bust dataset
 
 COCO-WholeBody uses the COCO 2017 images plus
-`coco_wholebody_{train,val}_v1.0.json`. The builder keeps persons with visible
-head and shoulders, crops from above the head to the hip line (with a 3:4
-aspect limit), drops out-of-crop keypoints (`v=0`) and optionally pastes a
-seeded synthetic hand over the face.
+`coco_wholebody_{train,val}_v1.0.json`; `cpsa_ml.datasets.sources` locates
+attached files or downloads the official ones (see the Kaggle protocol).
+The builder keeps persons with visible head and shoulders, crops from above
+the head to the hip line (with a 3:4 aspect limit), drops out-of-crop
+keypoints (`v=0`) and optionally pastes a seeded synthetic hand over the face.
 
 ```bash
 uv run python -m cpsa_ml.datasets.halfbust \
@@ -98,6 +101,9 @@ uv run python -m cpsa_ml.train \
 * `resume=/path/to/last.pt` loads the checkpoint and restores optimizer, epoch
   and training arguments. Keep the original data/model settings when resuming.
 * `seed` and `deterministic=True` are passed to Ultralytics.
+* `--activation {hswish,relu,lrelu,silu}` selects
+  `configs/yolov8n-pose-<activation>.yaml`: `relu` and `lrelu` are the DPU
+  variants of the activation study, `silu` is the negative control.
 
 A CPU smoke run is available but skipped by default:
 
@@ -135,21 +141,31 @@ controls for the operator check.
 Kaggle credentials are not available from the development host; the notebooks
 and metadata are validated locally and pushed by the user.
 
-### 1. Upload data once
+### 1. Build and publish the dataset
 
-* Attach the public COCO 2017 Kaggle dataset as
-  `/kaggle/input/coco-2017-dataset/coco2017`.
-* Create/upload `coco-wholebody-json` once with the two annotation files.
-* Build the dataset in notebook 01, then publish `/kaggle/working/halfbust62`
-  as a private dataset named `cpsa-halfbust`. Add a
-  `dataset-metadata.json` next to the built files, for example
-  `{"title": "CPSA half-bust", "id": "YOUR_USER/cpsa-halfbust",
-  "licenses": [{"name": "CC-BY-4.0"}]}`, then run
-  `kaggle datasets create -p halfbust62` the first time and
-  `kaggle datasets version -p halfbust62 -m "..."` afterwards. The helper is
-  `ml/scripts/kaggle_push_dataset.sh`.
-* Download checkpoints with `kaggle kernels output <kernel> -p <dir>` and
-  publish them as the `cpsa-checkpoints` dataset version.
+Notebook 01 obtains both inputs itself:
+
+* **Images** — attach the public `awsaf49/coco-2017-dataset` (any tree with
+  `train2017/` and `val2017/`); `cpsa_ml.datasets.sources.find_coco_root`
+  locates it anywhere under `/kaggle/input`.
+* **COCO-WholeBody v1.0 annotations** — `wholebody_annotations` uses attached
+  `coco_wholebody_<split>_v1.0.json` files when a dataset provides them, and
+  otherwise downloads the official Google Drive files
+  (https://github.com/jin-s13/COCO-WholeBody) into `/tmp/coco_wholebody` so
+  they are not published with the output. The notebook installs the
+  `cpsa-ml[sources]` extra for `gdown`; with Internet disabled, attach a
+  dataset containing the two JSON files instead. Every file is checked for
+  `info.description == "COCO-WholeBody"`.
+
+Then publish `/kaggle/working/halfbust62` as a private dataset named
+`cpsa-halfbust`. Add a `dataset-metadata.json` next to the built files, for
+example `{"title": "CPSA half-bust", "id": "YOUR_USER/cpsa-halfbust",
+"licenses": [{"name": "CC-BY-4.0"}]}`, then run
+`kaggle datasets create -p halfbust62` the first time and
+`kaggle datasets version -p halfbust62 -m "..."` afterwards. The helper is
+`ml/scripts/kaggle_push_dataset.sh`. Download checkpoints with
+`kaggle kernels output <kernel> -p <dir>` and publish them as the
+`cpsa-checkpoints` dataset version.
 
 ### 2. Push notebooks
 
@@ -158,15 +174,17 @@ Each notebook has a Kaggle CLI folder:
 ```bash
 kaggle kernels push -p ml/notebooks/01_build_halfbust
 kaggle kernels push -p ml/notebooks/03_train_fp32
+kaggle kernels push -p ml/notebooks/04_variant_study
 kaggle kernels push -p ml/notebooks/05_qat
 ```
 
 Before pushing, set:
 
-* `COMMIT_SHA` in the first code cell (the install is
-  `pip install "git+https://github.com/fcabecciaw/CPSA_2026@<sha>#subdirectory=ml"`).
-* The Kaggle username and dataset slugs in `kernel-metadata.json`
-  (`fcabecciaw/...` is a placeholder).
+* `COMMIT_SHA` in the first code cell (notebook 01 installs
+  `cpsa-ml[sources]`; the others install the plain package, all from
+  `git+https://github.com/fcabecciaw/CPSA_2026@<sha>#subdirectory=ml`).
+* The Kaggle username and dataset slugs in `kernel-metadata.json` (the CPSA
+  notebooks use `fabiocabeccia/...`).
 * The `/kaggle/input/...` paths in the notebook parameters.
 
 `kernel-metadata.json` follows the Kaggle CLI format with
@@ -179,7 +197,7 @@ issues #490 and #821, August 2026) show that
 without it `enable_gpu: true` defaults to P100. The newer CLI
 `--accelerator NvidiaTeslaT4` flag has mixed reports. If a push still lands on
 P100, select **GPU T4 x2** in the Kaggle UI before running; the metadata key is
-already present.
+already present in the GPU notebooks.
 
 ### 3. Checkpoints and resume
 
@@ -213,6 +231,99 @@ Batch norms, residual adds and the Ultralytics decode stay in float; the adapted
 float weights are then fed to the same Vitis AI 3.5 PTQ flow. Brevitas is never
 used for deployment export. `QuantHardTanh` is also available in Brevitas if a
 ReLU6-style activation is preferred.
+
+## Variant study
+
+The study measures how activation choice and training/deployment size trade
+accuracy for speed on the DPU. Notebook 04 takes a list of
+`(activation, train_imgsz, deploy HxW)` rows. The default matrix is a
+**proposal pending approval**:
+
+| variant | activation | train imgsz | deploy input |
+| --- | --- | ---: | --- |
+| `hswish_640` | Hard-Swish | 640 | 480x640 (baseline) |
+| `lrelu_640` | LeakyReLU(0.1015625) | 640 | 480x640 |
+| `lrelu_512` | LeakyReLU(0.1015625) | 512 | 384x512 |
+| `lrelu_384` | LeakyReLU(0.1015625) | 384 | 288x384 |
+
+Every row trains square at its own `train_imgsz`, then validates and exports
+`deploy.onnx` at its deployment size, so a smaller row also trains on fewer
+pixels. Seed, schedule and augmentations are shared and pinned in
+`cpsa_ml.variant_study.AUGMENTATIONS`. Configs are
+`configs/yolov8n-pose-{hswish,relu,lrelu}.yaml` (exact names), selected through
+`cpsa_ml.models.model_yaml_path`; `relu` remains available for the speed matrix
+even though the default accuracy matrix uses `lrelu`.
+
+1. **Train the matrix on Kaggle.** Download the dataset once
+   (`kaggle datasets download -d fabiocabeccia/cpsa-halfbust -p ~/data`), push
+   notebook 04, then publish its output as a new `cpsa-checkpoints` version:
+
+   ```bash
+   kaggle kernels push -p ml/notebooks/04_variant_study
+   kaggle kernels output fabiocabeccia/cpsa-04-variant-study -p variant_study
+   ```
+
+   Notebook 04 starts every row from the official COCO `yolov8n-pose.pt`,
+   copies every shape-matching backbone/neck tensor, keeps the freshly
+   initialised 62-keypoint head, logs the transfer in
+   `transfer_report.json`, and writes `best.pt`, `last.pt`, `results.csv`,
+   `metrics_fp32.json`, `transfer_report.json` and `deploy.onnx` under
+   `/kaggle/working/variant_study/<activation>_<train_imgsz>/`. `RESUME` in the
+   notebook is a dict keyed by that folder name, for example
+   `{"lrelu_512": ".../lrelu_512/last.pt"}`.
+
+2. **Quantize and dump the INT8 head tensors for every row.** Calibration uses
+   train images preprocessed exactly like `DpuPoseEstimator`; the dump stores
+   the int8 head values, the `.xmodel` `fix_point` of every output and the
+   letterbox parameters. The deployment size of each row is recorded as
+   `deploy_size` in its `metrics_fp32.json`; for `hswish_640` (480x640):
+
+   ```bash
+   tools/vitis/run_vitis.sh python tools/vitis/dump_quant_outputs.py \
+     --weights variant_study/hswish_640/best.pt --data ~/data/cpsa-halfbust \
+     --calib-split train --test-split val --calib-count 64 --test-count 64 \
+     --height 480 --width 640 --threads 1 \
+     --out build/variant_study/hswish_640/quant
+   ```
+
+   Repeat with `--height 384 --width 512` for `lrelu_512` and
+   `--height 288 --width 384` for `lrelu_384` (`lrelu_640` uses 480x640).
+   `--artifacts <host deploy bundle>` quantizes from a pre-built bundle instead
+   of `best.pt` and adds the container/host reference check.
+
+3. **Score INT8 and FP32 with the same metric code** (person AP50, pose
+   mAP50-95 by OKS, per-group PCK@0.1/0.2 face-width normalized, hand and face
+   centroid errors, per-group missing-detection rate):
+
+   ```bash
+   PYTHONPATH=src python tools/vitis/eval_quant.py \
+     --dump build/variant_study/hswish_640/quant/quant_outputs.npz \
+     --weights variant_study/hswish_640/best.pt --data ~/data/cpsa-halfbust \
+     --test-split val \
+     --baseline build/variant_study/hswish_640/eval/metrics_int8.json \
+     --out build/variant_study/hswish_640/eval
+   ```
+
+   `eval_quant.py` decodes with the runtime decoder
+   (`cpsa.vision.pose_decode.QuantizedRawHeadDecoder`), rebuilds the same graph
+   in float for `metrics_fp32_host.json`, and writes `metrics_int8.json` plus
+   `comparison.json` / `comparison.md`. The baseline is the INT8 metrics file
+   of the `hswish_640` row.
+
+4. **Apply the decision rule (proposal) below** to the `decision` block of
+   every `comparison.json`. It reports each group's INT8 PCK@0.2fw against the
+   baseline and returns `pass`, `fail` or `unknown`.
+
+5. **Record the study.** Keep each row's `comparison.md` with its build
+   artifacts and cite the accepted pairing in the study report; the JSON keeps
+   the per-group deltas so the choice can be audited later.
+
+**Decision rule (proposal, not a project requirement).** Accept a faster
+activation/input pairing only when its INT8 wrist, hand and face PCK@0.2fw are
+each within 2 points of the INT8 baseline, that is `delta >= -0.02` against
+`hswish_640` 480x640; a missing or zero baseline PCK yields `unknown` instead
+of a pass. Person AP50, pose mAP50-95 and the centroid errors are reported next
+to the rule for context but do not decide it.
 
 ## What was verified locally
 

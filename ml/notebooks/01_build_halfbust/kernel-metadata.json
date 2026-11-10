@@ -1,17 +1,15 @@
 {
-  "id": "fcabecciaw/cpsa-01-build-halfbust",
+  "id": "fabiocabeccia/cpsa-01-build-halfbust",
   "title": "CPSA 01 build half-bust",
   "code_file": "01_build_halfbust.ipynb",
   "language": "python",
   "kernel_type": "notebook",
   "is_private": true,
-  "enable_gpu": true,
+  "enable_gpu": false,
   "enable_tpu": false,
-  "machine_shape": "NvidiaTeslaT4",
   "enable_internet": true,
   "dataset_sources": [
-    "fcabecciaw/coco-2017-dataset",
-    "fcabecciaw/coco-wholebody-json"
+    "awsaf49/coco-2017-dataset"
   ],
   "competition_sources": [],
   "kernel_sources": []

@@ -94,6 +94,42 @@ Observed for the randomly initialised `HALFBUST_62` model (see
 | Host decoder check | float graph matches Ultralytics within `3.1e-5 px`; int8 outputs decode with the same candidate counts |
 | Board | 289 ms/frame end to end, 3.46 fps; DPU runner alone 25.3 ms/frame |
 
+## Variant speed matrix
+
+`tools/vitis/variants.sh` builds the activation x input-size matrix used to
+choose the training configuration. Latency does not depend on the weights, so
+the matrix uses the seeded random initialisation; accuracy is measured
+separately with trained weights.
+
+```sh
+# hswish/relu/lrelu x 480x640/384x512/288x384, 40 calibration frames per size.
+tools/vitis/variants.sh
+# One cell, rebuilding calibration and artifacts.
+tools/vitis/variants.sh --activations relu --sizes 288x384 --force
+```
+
+Per cell the script exports the deploy bundle from
+`ml/configs/yolov8n-pose-<act>.yaml` at the requested `--height/--width`,
+quantizes with `--threads 1`, compiles with the pinned fingerprint, and inspects
+the artifact. It fails unless the graph has exactly one DPU subgraph, no compute
+on the CPU (only the `data-fix`/`fix2float` dtype boundaries) and fingerprint
+`0x101000016010407`. Calibration frames depend only on the input size, so they
+are generated once per size (`build/vitis/variants/calib_<H>x<W>/`) and shared
+by the three activations.
+
+Outputs land in `build/vitis/variants/<act>_<H>x<W>/` (`artifacts/`, `quant/`,
+`compiled/`, `report/`, `logs/`); `build/vitis/variants/matrix.tsv` collects one
+row per built variant. Board latency per compiled model:
+
+```sh
+# On the board, with the matching `bench_pose.py` and `src/cpsa`:
+PYTHONPATH=src python3 scripts/bench_pose.py \
+  --xmodel pose_<act>.xmodel --layout halfbust62 \
+  --frames 200 --warmup 10 --conf-thr 0.25 --json
+```
+
+`docs/notes/vitis-compile.md` records the measured matrix.
+
 ## Running with trained weights
 
 The pipeline takes the Kaggle `best.pt` unchanged:

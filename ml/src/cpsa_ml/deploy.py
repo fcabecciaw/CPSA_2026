@@ -207,7 +207,9 @@ def build_deploy_model(
     Args:
         schema: Keypoint schema name (``halfbust62`` or ``coco17``).
         variant: Ultralytics scale (``n`` or ``s``).
-        activation: ``hswish`` (DPU-friendly) or ``silu``.
+        activation: ``hswish`` (DPU-friendly) or ``silu``; the extra DPU
+            speed-matrix activations (``relu``, ``lrelu``) are selected by
+            passing their config through ``cfg``.
         nc: Number of classes.
         cfg: Optional model YAML overriding the packaged config.
         seed: Seed for the random initialisation; ``None`` keeps the factory

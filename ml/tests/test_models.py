@@ -61,6 +61,51 @@ def test_silu_control_has_silu() -> None:
     assert any(isinstance(module, torch.nn.SiLU) for module in model.modules())
 
 
+@pytest.mark.parametrize(
+    ("activation", "expected", "module_type"),
+    [
+        ("hswish", "nn.Hardswish()", torch.nn.Hardswish),
+        ("relu", "nn.ReLU()", torch.nn.ReLU),
+        ("lrelu", "nn.LeakyReLU(0.1015625)", torch.nn.LeakyReLU),
+    ],
+)
+def test_dpu_activation_configs_exist(
+    activation: str, expected: str, module_type: type[torch.nn.Module]
+) -> None:
+    path = model_yaml_path("n", activation)
+    assert path.name == f"yolov8n-pose-{activation}.yaml"
+    assert yaml.safe_load(path.read_text())["activation"] == expected
+
+    model = build_model("halfbust62", variant="n", activation=activation)
+    assert tuple(model.model[-1].kpt_shape) == (62, 3)
+    assert any(isinstance(module, module_type) for module in model.modules())
+    assert not any(isinstance(module, torch.nn.SiLU) for module in model.modules())
+
+
+def test_lrelu_variant_keeps_the_dpu_slope() -> None:
+    model = build_model("coco17", variant="n", activation="lrelu")
+    slopes = {
+        float(module.negative_slope)
+        for module in model.modules()
+        if isinstance(module, torch.nn.LeakyReLU)
+    }
+    assert slopes == {0.1015625}
+
+
+def test_relu_config_without_activation_is_rejected(tmp_path) -> None:
+    config = yaml.safe_load(model_yaml_path("n", "relu").read_text())
+    config.pop("activation")
+    path = tmp_path / "yolov8n-pose-relu.yaml"
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    with pytest.raises(ValueError, match="must define the activation"):
+        build_model("coco17", variant="n", activation="relu", cfg=path)
+
+
+def test_unknown_activation_is_rejected() -> None:
+    with pytest.raises(ValueError, match="activation must be one of"):
+        model_yaml_path("n", "mish")
+
+
 @pytest.mark.parametrize("variant", ["n", "s"])
 def test_load_yolo_wrapper_builds_for_schema(variant: str) -> None:
     yolo = load_yolo("coco17", variant=variant, activation="hswish")

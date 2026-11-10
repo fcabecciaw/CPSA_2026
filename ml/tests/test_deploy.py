@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
+import yaml
 
 from cpsa_ml.deploy import (
     RawHeadDeploy,
@@ -14,6 +16,7 @@ from cpsa_ml.deploy import (
     deploy_from_yolo,
     export_onnx,
     load_deploy_weights,
+    main,
     output_names,
     random_input,
     write_spec,
@@ -148,3 +151,52 @@ def test_write_spec_and_onnx_export(tmp_path: Path) -> None:
     assert [value.name for value in graph.output] == output_names([8, 16, 32])
     first = graph.output[0].type.tensor_type.shape.dim
     assert tuple(dim.dim_value for dim in first) == (1, 251, 20, 24)
+
+
+@pytest.mark.parametrize(
+    ("activation", "activation_spec"),
+    [
+        ("relu", "nn.ReLU()"),
+        ("lrelu", "nn.LeakyReLU(0.1015625)"),
+    ],
+)
+def test_cli_exports_activation_config_at_requested_size(
+    tmp_path: Path, activation: str, activation_spec: str
+) -> None:
+    """The speed-matrix configs drive the deploy CLI with ``--cfg --height --width``."""
+
+    cfg = Path(__file__).resolve().parents[1] / "configs" / f"yolov8n-pose-{activation}.yaml"
+    assert (
+        main(
+            [
+                "--schema",
+                "halfbust62",
+                "--activation",
+                activation,
+                "--cfg",
+                str(cfg),
+                "--height",
+                str(SMALL_INPUT[0]),
+                "--width",
+                str(SMALL_INPUT[1]),
+                "--seed",
+                "0",
+                "--out",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+
+    spec = json.loads((tmp_path / "deploy_spec.json").read_text())
+    assert spec["input_size"] == list(SMALL_INPUT)
+    assert spec["output_names"] == output_names([8, 16, 32])
+    # The container rebuilds the graph from this YAML, so the activation has to
+    # survive into the bundle.
+    config = yaml.safe_load((tmp_path / "model.yaml").read_text())
+    assert config["activation"] == activation_spec
+
+    reference = np.load(tmp_path / "deploy_reference.npz")
+    assert reference["images"].shape == (1, 3, *SMALL_INPUT)
+    for name, shape in zip(spec["output_names"], [(20, 24), (10, 12), (5, 6)], strict=True):
+        assert reference[name].shape == (1, 251, *shape)
