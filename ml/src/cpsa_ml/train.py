@@ -30,6 +30,7 @@ class TrainConfig:
     schema: str = "halfbust62"
     variant: str = "n"
     activation: str = "hswish"
+    model_cfg: Path | None = None
     epochs: int = 100
     batch: int = 32
     imgsz: int | tuple[int, int] = 640
@@ -51,6 +52,8 @@ class TrainConfig:
         object.__setattr__(self, "project", Path(self.project))
         if self.resume is not None:
             object.__setattr__(self, "resume", Path(self.resume))
+        if self.model_cfg is not None:
+            object.__setattr__(self, "model_cfg", Path(self.model_cfg))
         if self.epochs <= 0:
             raise ValueError("epochs must be positive")
         if self.batch == 0:
@@ -90,6 +93,7 @@ def train(config: TrainConfig) -> Path:
             config.schema,
             variant=config.variant,
             activation=config.activation,
+            cfg=config.model_cfg,
         )
         resume = False
 
@@ -143,6 +147,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="hswish",
         help="Conv activation: DPU study variants (hswish, relu, lrelu) or the SiLU control",
     )
+    parser.add_argument("--model-cfg", type=Path, default=None, help="model YAML override")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch", type=int, default=32)
     parser.add_argument("--imgsz", type=int, default=640)
@@ -167,6 +172,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             schema=args.schema,
             variant=args.variant,
             activation=args.activation,
+            model_cfg=args.model_cfg,
             epochs=args.epochs,
             batch=args.batch,
             imgsz=args.imgsz,

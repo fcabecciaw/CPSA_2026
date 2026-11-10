@@ -22,10 +22,12 @@ dependencies = [
 [project.optional-dependencies]
 qat = ["brevitas==0.13.4"]
 teacher = ["rtmlib==0.0.16", "onnxruntime>=1.17"]
+pseudolabel = ["rtmlib==0.0.16", "onnxruntime>=1.17"]
 sources = ["gdown>=5"]
 dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]
+cpsa-ml-autolabel = "cpsa_ml.pseudolabel:main"
 cpsa-ml-halfbust = "cpsa_ml.datasets.halfbust:main"
 cpsa-ml-onnx-check = "cpsa_ml.onnx_check:main"
 cpsa-ml-train = "cpsa_ml.train:main"

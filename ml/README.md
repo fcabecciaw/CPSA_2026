@@ -47,6 +47,9 @@ install gets the CUDA build needed by the T4 workers.
 * `COCO17` — COCO body keypoints 0–16.
 * `HALFBUST_62` — body 0–10, face `23,39,31,42,47,71,77,74,80`, left hand
   91–111 and right hand 112–132.
+* `HAND_21` — the left-hand WholeBody block 91–111 on its own, i.e. the
+  MediaPipe 21-landmark order of the stage-2 hand model. `flip_idx` is the
+  identity: a mirrored crop keeps every landmark on the same finger joint.
 
 `flip_idx` is derived from the names (explicit left/right pairs), so it is an
 involution by construction. The face pairs are jaw 0<->16, brow 19<->24,
@@ -120,6 +123,105 @@ mapping and `flip_idx`, because the mapping and writers are imported from
   extent, so its pixels stay untouched.
 * **Framing check** — open `build/fullframe_check.jpg` (or run the builder with
   `--preview`) to confirm boxes hug the feet and heads before publishing.
+
+## Build the hand-crop dataset (stage 2)
+
+The two-stage design trains a dedicated hand model on square hand crops: the
+body model finds the person and the hands, and the hand model returns 21
+MediaPipe landmarks on a 192 px crop. `cpsa_ml.datasets.hands` builds that set
+from the public sources in one pass:
+
+```bash
+uv run python -m cpsa_ml.datasets.hands \
+  --hagrid-images /data/hagrid/hagrid_30k \
+  --hagrid-annotations /data/hagrid/annotations \
+  --ultralytics-root /data/hand-keypoints \
+  --out /data/hand21 --imgsz 192 --val-ratio 0.05 --seed 0
+```
+
+* **Sources** — HaGRIDv2 `annotations_with_landmarks` (normalized hand boxes
+  plus 21 normalized MediaPipe landmarks per hand) with the 384p image sample
+  (`cj-mills/hagrid-sample-30k-384p`; its image ids match the official
+  annotations, only the sample's own gesture JSONs lack landmarks), and the
+  Ultralytics hand-keypoints YOLO-pose set (26,768 images, 21 keypoints). Both
+  are re-cropped to the same geometry so the sources stay visually consistent.
+* **Crop geometry** — the hand box is enlarged 1.6–2.2x, the centre is shifted
+  up to 6% and the side jittered by ±10%, the window is kept square, clamped
+  inside the image (no padding artefacts) and resized to 192 px with LANCZOS.
+  The jitter seed is derived from the sample identity, so a rerun reproduces
+  every crop and an interrupted build resumes by skipping existing files.
+* **Labels** — class `0` (`hand`), the hand box inside the crop and 21
+  keypoints; landmarks outside the crop get `v=0`. `flip_idx` is the identity
+  (see above). Left and right hands share the class and the handedness is
+  counted in `stats.json` only.
+* **HaGRID boxes** — the official gesture boxes do not always contain every
+  fingertip, so the crop box is the union of the box and the landmark extent.
+* **Splits** — `train`/`val` follow the source split (`val` and `test` go to
+  validation) and `--val-ratio` additionally holds out a seeded hash share of
+  the training images, so validation is never empty when a source only ships
+  training images.
+* **Provenance** — `stats.json` records the per-split counters, gesture labels,
+  handedness, crop geometry and the source licences; `data.yaml` and
+  `schema.json` describe the 21x3 schema.
+
+`configs/yolov8n-hand-lrelu.yaml` is the DPU-friendly model (LeakyReLU 26/256,
+`kpt_shape [21, 3]`); `TrainConfig(model_cfg=...)` selects it:
+
+```python
+from cpsa_ml.models import config_path
+from cpsa_ml.train import TrainConfig, train
+
+train(
+    TrainConfig(
+        data="/data/hand21/data.yaml",
+        schema="hand21",
+        activation="lrelu",
+        model_cfg=config_path("yolov8n-hand-lrelu.yaml"),
+        imgsz=192,
+        batch=64,
+        device="0,1",
+        name="hand21-yolov8n-lrelu",
+    )
+)
+```
+
+Notebook 07 runs the same build plus the training on Kaggle.
+
+### Auto-label the booth recordings
+
+`cpsa_ml.pseudolabel` turns frames recorded with `scripts/record_frames.py`
+(or a video) into both datasets with one RTMW teacher pass:
+
+```bash
+uv sync --extra pseudolabel  # rtmlib + onnxruntime
+uv run python -m cpsa_ml.pseudolabel \
+  --frames data/booth/P01_20260901T100000Z --out data/labeled/P01
+uv run python -m cpsa_ml.pseudolabel --video clip.mp4 --stride 5 --out data/labeled/clip
+```
+
+* `<out>/halfbust` is a full-frame `HALFBUST_62` dataset for the body model:
+  YOLOX gives the person box, RTMW-x gives 133 keypoints, points below their
+  group threshold or outside the frame get `v=0` and the rest `v=2`, so a
+  teacher point is never mistaken for a human annotation.
+* `<out>/hand21` is the stage-2 crop set built by the same crop code as the
+  public data; the handedness is known here (WholeBody 91–111 left, 112–132
+  right) and recorded in `stats.json`.
+* A hand block becomes a crop only when at least `--min-hand-keypoints` (10)
+  points reach `--hand-point-score` (2.0, stricter than the 1.0 group
+  threshold), its extent is at most `--max-hand-fraction` (0.6) of the larger
+  person-box side, and its wrist→middle-MCP / middle-MCP→middle-tip ratio is
+  anatomically plausible. When a hand is not visible the teacher often fires a
+  second block over the torso or the background; on the four HaGRID frames used
+  for the local check these gates kept all five real hands (21 confident
+  points each) and removed the three hallucinated blocks (at most 7 confident
+  points, extents 0.61–1.07 of the person box). The reason counters
+  (`low_score_left_hand`, `too_large_left_hand`, ...) are kept in `stats.json`.
+* The split is a seeded hash of the relative path and the run is resumable: a
+  frame whose label exists is skipped, and `stats.json` is rewritten atomically
+  after every chunk. `--min-hand-keypoints` (default 10) and `--hand-score`
+  decide which teacher hands become crops.
+* The recordings contain faces: keep them local, record only people who agreed,
+  and do not publish the frames.
 
 ## Training
 
@@ -283,6 +385,14 @@ the attached `cpsa-halfbust` dataset (it reads `n_half` from its
 03/04; a missing `cpsa-fullframe` is loud but not fatal (training falls back to
 half-body images only).
 
+**Notebook 07** needs no attached dataset: it downloads the HaGRID 384p sample
+and its `annotations_with_landmarks`, plus the Ultralytics hand-keypoints zip
+(~2.1 GB) into `/tmp/hand_data`, builds `/kaggle/working/hand21` and trains the
+192 px hand model. Publish the crops as `cpsa-hand21` (only if the
+non-commercial hand-keypoints source is acceptable; set
+`USE_ULTRALYTICS = False` for a HaGRID-only set) and the weights plus metadata
+from `/kaggle/working/hand-model` as `cpsa-hand-model`.
+
 ### 2. Push notebooks
 
 Each notebook has a Kaggle CLI folder:
@@ -293,6 +403,7 @@ kaggle kernels push -p ml/notebooks/02_build_fullframe
 kaggle kernels push -p ml/notebooks/03_train_fp32
 kaggle kernels push -p ml/notebooks/04_variant_study
 kaggle kernels push -p ml/notebooks/05_qat
+kaggle kernels push -p ml/notebooks/07_hand_pose
 ```
 
 Before pushing, set:
@@ -475,7 +586,7 @@ to the rule for context but do not decide it.
 No Kaggle credentials were available on the development host, so the Kaggle
 runs are left to the user. Locally:
 
-* `uv run --extra dev pytest -q` passes: 154 passed, 2 skipped (Brevitas and
+* `uv run --extra dev pytest -q` passes: 231 passed, 2 skipped (Brevitas and
   the one-epoch smoke test). The root `tests/unit/test_eval_quant.py` passes
   too.
 * A real-data full-frame smoke test ran on five COCO val images and the real
@@ -483,6 +594,29 @@ runs are left to the user. Locally:
   annotation, four images with six labelled people were written, and
   `build/fullframe_check.jpg` shows the GT boxes/heads/hands over the original
   pixels (boxes reach the feet).
+* The hand builder ran on the real HaGRIDv2 peace data (the 384p sample plus
+  `annotations/train/peace.json`) and wrote 1,529 crops in 3.8 s: train 1,466
+  (1,235 `peace` + 231 `no_gesture`, from 1,236 images) and val 63 (55 + 8,
+  from 55 images), 23 MB of images and 6.2 MB of labels. `build/hand_check.jpg`
+  shows six crops with the hand box and all 21 landmarks on the real pixels.
+  The 1,075 peace entries whose `hand_landmarks` list is empty are skipped, and
+  the official gesture box is unioned with the landmark extent.
+* A 12-crop build from the real Ultralytics hand-keypoints tree (18,777 train /
+  7,993 val images) produced valid `data.yaml` (`kpt_shape [21, 3]`, identity
+  flip_idx) and 21x3 labels, so both sources share one geometry.
+* The teacher auto-labeler ran end-to-end with the real RTMW-x + YOLOX
+  checkpoints on four HaGRID peace frames: all four persons got full-frame
+  `HALFBUST_62` lines (teacher points `v=2`), and five hand crops were accepted
+  while the three hallucinated blocks were rejected as `low_score` (at most 7
+  of their 21 landmarks reached the 2.0 crop gate, against 21/21 for every real
+  hand). `build/autolabel_check.jpg` shows every accepted crop: a real hand with
+  coherent MediaPipe landmarks. Frames, `hand21` dataset and `stats.json` are
+  under `build/hand_samples/batch_04/labeled_final/`.
+* A 1-epoch CPU smoke run trained the hand config on the 1,529-crop local set:
+  `yolov8n-hand-lrelu`, 3,385,074 parameters, 9.7 GFLOPs at 192 px, 46
+  iterations in 31 s plus validation, `best.pt`/`last.pt` and `results.csv`
+  under `build/hand_runs/smoke_1ep`. The metrics after one epoch are not
+  meaningful; the run proves the config, schema and dataset load and train.
 * Ultralytics 8.4.203 loads the generated mixed `data.yaml` with a two-root
   `train` list plus `val` and `val_full` (`YOLODataset` only, no training);
   every split reports 62x3 keypoints.
@@ -495,12 +629,24 @@ runs are left to the user. Locally:
   opset 17; the stock SiLU export fails with `Sigmoid`/`Mul` violations.
 * The top-level `activation: nn.Hardswish()` YAML key is honoured by
   Ultralytics 8.4.203: the built model contains Hard-Swish and no SiLU.
+* `uv lock --check` passes after adding the `pseudolabel` extra and the
+  `cpsa-ml-autolabel` script; `ruff check .` is clean and the touched Python
+  files and notebook 07 are formatted.
 
 ## Licences
 
 * Ultralytics is **AGPL-3.0**. It is isolated in `ml/`; trained weights are
   subject to its terms.
+* HaGRIDv2 (images plus `annotations_with_landmarks`) is **CC BY-SA 4.0
+  variant** (attribution, share-alike). Hand crops derived from it inherit the
+  share-alike terms.
+* The Ultralytics hand-keypoints dataset is **CC BY-NC-SA 4.0 —
+  non-commercial**. Mixing it into `hand21` makes the crops non-commercial and
+  not redistributable for commercial use; notebook 07 prints the warning and
+  `USE_ULTRALYTICS = False` builds a HaGRID-only set instead.
 * UBody is **research-only**; it is optional and must not ship in the product.
 * COCO 2017 and COCO-WholeBody images/annotations keep their original COCO
   terms; check them before redistribution.
-* Brevitas is BSD-3-Clause; `rtmlib`/RTMW follow their upstream licences.
+* Brevitas is BSD-3-Clause. `rtmlib` is Apache-2.0; the RTMW whole-body and
+  YOLOX person checkpoints are Apache-2.0 via MMPose; ONNX Runtime is MIT.
+  The teacher models are downloaded at run time and recorded in `stats.json`.

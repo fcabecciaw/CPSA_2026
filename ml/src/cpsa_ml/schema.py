@@ -15,6 +15,10 @@ Range                   Group
 91-111                  left hand (21)
 112-132                 right hand (21)
 ======================  =================
+
+The hand blocks use the MediaPipe 21-landmark order, so ``HAND_21`` (the
+left-hand block) is also the schema of the standalone hand model fed by
+MediaPipe-style labels (HaGRID, Ultralytics hand-keypoints).
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from numpy.typing import NDArray
 __all__ = [
     "COCO17",
     "HALFBUST_62",
+    "HAND_21",
     "SCHEMAS",
     "KeypointSchema",
     "get_schema",
@@ -200,11 +205,28 @@ HALFBUST_62 = KeypointSchema(
     flip_idx=_derive_flip_idx(HALFBUST_62_NAMES),
 )
 
+# The standalone hand model sees exactly one hand per crop, so the 21 keypoints
+# are the left-hand WholeBody block with MediaPipe ordering (wrist, then
+# thumb/index/middle/ring/pinky chains of 4).  A crop is mirrored as a whole,
+# which keeps each landmark on the same finger joint, so ``flip_idx`` is the
+# identity rather than a left/right swap.  Handedness is not a model output; it
+# is recorded in the dataset statistics only.
+HAND_21_NAMES = tuple(f"hand_{i}" for i in range(21))
+
+HAND_21 = KeypointSchema(
+    name="hand21",
+    wholebody_index=HALFBUST_LEFT_HAND_INDICES,
+    names=HAND_21_NAMES,
+    flip_idx=tuple(range(21)),
+)
+
 SCHEMAS: dict[str, KeypointSchema] = {
     "halfbust62": HALFBUST_62,
     "halfbust_62": HALFBUST_62,
     "coco17": COCO17,
     "coco17_3d": COCO17,
+    "hand21": HAND_21,
+    "hand_21": HAND_21,
 }
 
 
