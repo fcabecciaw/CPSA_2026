@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from cpsa.domain.model import Actuation, ActuatorKind, Tag, actuator_kind_of
+from cpsa.domain.model import (
+    Actuation,
+    ActuatorKind,
+    Tag,
+    Verdict,
+    VisionAssessment,
+    actuator_kind_of,
+)
 
 _PARAMS: Mapping[Tag, Mapping[ActuatorKind, Mapping[str, object]]] = {
     Tag.NON_DANGEROUS: {
@@ -31,3 +38,18 @@ def actuations_for(tag: Tag, actuator_ids: Sequence[str]) -> list[Actuation]:
         if kind is not None:
             actuations.append(Actuation(actuator_id, dict(params_by_kind[kind])))
     return actuations
+
+
+def effective_severity(tag: Tag, assessment: VisionAssessment | None) -> Tag:
+    """Return the tag that drives actuation for one detection (FR-017, AC-009).
+
+    A confirmed assessment carrying a stereotypy grade overrides the IMU tag, so
+    vision can upgrade or downgrade the actuation. Without that grade the IMU tag
+    is used, which keeps the fail-open and IMU-only paths unchanged.
+    """
+    if assessment is None or assessment.verdict is not Verdict.CONFIRMED:
+        return tag
+    severity = assessment.severity
+    if severity is Tag.NON_DANGEROUS or severity is Tag.DANGEROUS:
+        return severity
+    return tag

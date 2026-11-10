@@ -23,6 +23,16 @@ board = [
     "playsound==1.2.2",  # 1.3.0 ships a broken sdist that cannot be built or locked
     "dbus-fast",
 ]
+camera = [
+    "linuxpy>=0.25",
+]
+recorder = [
+    "pillow",
+]
+vision = [
+    "onnxruntime",
+    "opencv-python-headless",
+]
 dev = [
     "pytest",
     "ruff",
@@ -31,6 +41,9 @@ dev = [
 
 [project.scripts]
 cpsa-board = "cpsa.board.__main__:main"
+cpsa-record = "cpsa.recorder.__main__:main"
+cpsa-replay-imu = "cpsa.board.replay:main"
+cpsa-replay-vision = "cpsa.board.vision_replay:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cpsa"]
@@ -71,5 +84,6 @@ module = [
     "playsound",
     "dbus_fast", "dbus_fast.*",
     "yaml",
+    "linuxpy", "linuxpy.*",
 ]
 ignore_missing_imports = true

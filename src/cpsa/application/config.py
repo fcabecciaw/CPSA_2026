@@ -10,11 +10,26 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
+from typing import TypeVar
 
 import yaml
 
+from cpsa.domain.model import FaceRegion, HandShape
+from cpsa.vision.assessment import AnalysisConfig, SeverityConfig
+from cpsa.vision.contacts2d import ContactConfig2D
+from cpsa.vision.handface import FeatureConfig
+from cpsa.vision.handshape import HandShapeConfig
+from cpsa.vision.layouts import get_layout
+from cpsa.vision.oscillation import OscillationConfig
+from cpsa.vision.skeleton import SkeletonConfig
+from cpsa.vision.subject import SubjectConfig
+from cpsa.vision.tracker2d import Tracker2DConfig
+
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+VISION_MODEL_KINDS = ("onnx", "xmodel")
+EnumT = TypeVar("EnumT", bound=Enum)
 
 
 class ConfigError(Exception):
@@ -87,12 +102,120 @@ class ActuatorsConfig:
 
 
 @dataclass(frozen=True)
+class XuConfig:
+    laser_power: int
+    accuracy: int
+    filter: int
+    confidence: int
+
+
+@dataclass(frozen=True)
+class CameraConfig:
+    rgb_device: str
+    depth_device: str
+    width: int
+    height: int
+    fps: float
+    rgb_exposure: int
+    xu: XuConfig
+
+
+@dataclass(frozen=True)
+class VisionModelConfig:
+    """Pose-model settings: an ONNX export or a compiled DPU ``.xmodel``."""
+
+    kind: str
+    path: Path
+    input_width: int
+    input_height: int
+    conf_thr: float
+    iou_thr: float
+
+
+@dataclass(frozen=True)
+class VisionCameraConfig:
+    """RGB-only UVC camera settings used by the vision pipeline."""
+
+    device: str
+    width: int
+    height: int
+    fps: float
+    exposure: int
+
+
+@dataclass(frozen=True)
+class VisionEvidenceConfig:
+    """Evidence location, clip length and retention."""
+
+    enabled: bool
+    base_path: Path
+    clip_s: float
+    retention_days: int
+
+
+@dataclass(frozen=True)
+class VisionConfig:
+    """2D vision pipeline settings (FR-001..FR-025).
+
+    ``tracker`` and ``analysis`` are the validated Task B/C dataclasses, so the
+    YAML is the single source of the feature, contact and severity thresholds.
+    ``fast_budget_s`` must stay below ``dispatch.verification_deadline_s``; that
+    cross-section check lives in :func:`parse`.
+    """
+
+    enabled: bool
+    layout: str
+    model: VisionModelConfig
+    camera: VisionCameraConfig
+    preroll_s: float
+    lookback_s: float
+    fast_after_s: float
+    fast_budget_s: float
+    idle_timeout_s: float
+    stale_after_s: float
+    analysis_fps: float
+    queue_max: int
+    imu_buffer_s: float
+    evidence: VisionEvidenceConfig
+    tracker: Tracker2DConfig
+    analysis: AnalysisConfig
+
+    def __post_init__(self) -> None:
+        if self.model.kind not in VISION_MODEL_KINDS:
+            raise ValueError(f"model kind must be one of {', '.join(VISION_MODEL_KINDS)}")
+        if not 0.0 <= self.model.conf_thr <= 1.0:
+            raise ValueError("model conf_thr must be in [0, 1]")
+        if not 0.0 <= self.model.iou_thr <= 1.0:
+            raise ValueError("model iou_thr must be in [0, 1]")
+        for name in (
+            "preroll_s",
+            "lookback_s",
+            "fast_budget_s",
+            "idle_timeout_s",
+            "stale_after_s",
+            "analysis_fps",
+            "imu_buffer_s",
+        ):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be a finite positive number")
+        if not math.isfinite(self.fast_after_s) or self.fast_after_s < 0.0:
+            raise ValueError("fast_after_s must be a finite number >= 0")
+        if self.analysis_fps <= 0.0:
+            raise ValueError("analysis_fps must be positive")
+        if self.evidence.retention_days < 0:
+            raise ValueError("evidence retention_days must be >= 0")
+
+
+@dataclass(frozen=True)
 class Config:
     log: LogConfig
     bluecoins: BlueCoinsConfig
     sync: SyncConfig
     dispatch: DispatchConfig
     actuators: ActuatorsConfig
+    camera: CameraConfig
+    vision: VisionConfig
 
 
 def load(path: Path) -> Config:
@@ -120,6 +243,16 @@ def parse(data: object) -> Config:
     metamotion = actuators.section("metamotion")
     speaker = actuators.section("speaker")
     led_strip = actuators.section("led_strip")
+    camera = root.section("camera")
+    xu = camera.section("xu")
+    vision = _vision_config(root.section("vision"))
+    verification_deadline_s = dispatch.positive("verification_deadline_s")
+
+    if vision.fast_budget_s >= verification_deadline_s:
+        raise ConfigError(
+            "vision.fast_budget_s",
+            "must be less than dispatch.verification_deadline_s",
+        )
 
     config = Config(
         log=LogConfig(
@@ -139,7 +272,7 @@ def parse(data: object) -> Config:
         ),
         dispatch=DispatchConfig(
             cooldown_s=dispatch.positive("cooldown_s"),
-            verification_deadline_s=dispatch.positive("verification_deadline_s"),
+            verification_deadline_s=verification_deadline_s,
         ),
         actuators=ActuatorsConfig(
             retry=RetryConfig(
@@ -155,11 +288,211 @@ def parse(data: object) -> Config:
                 duration_ms=led_strip.positive_int("duration_ms"),
             ),
         ),
+        camera=CameraConfig(
+            rgb_device=camera.text("rgb_device"),
+            depth_device=camera.text("depth_device"),
+            width=camera.positive_int("width"),
+            height=camera.positive_int("height"),
+            fps=camera.positive("fps"),
+            rgb_exposure=camera.integer("rgb_exposure", 83, 10000),
+            xu=XuConfig(
+                laser_power=xu.integer("laser_power", 0, 16),
+                accuracy=xu.integer("accuracy", 1, 3),
+                filter=xu.integer("filter", 0, 7),
+                confidence=xu.integer("confidence", 0, 15),
+            ),
+        ),
+        vision=vision,
     )
-    sections = (root, log, bluecoins, sync, dispatch, actuators, retry, metamotion, speaker)
-    for section in (*sections, led_strip):
+    sections = (
+        root,
+        log,
+        bluecoins,
+        sync,
+        dispatch,
+        actuators,
+        retry,
+        metamotion,
+        speaker,
+        led_strip,
+        camera,
+        xu,
+    )
+    for section in sections:
         section.reject_unknown()
     return config
+
+
+def _vision_config(vision: _Section) -> VisionConfig:
+    """Build the validated vision configuration from its YAML section."""
+    layout_name = vision.text("layout")
+    try:
+        get_layout(layout_name)
+    except ValueError as exc:
+        raise ConfigError("vision.layout", str(exc)) from exc
+    model = vision.section("model")
+    camera = vision.section("camera")
+    evidence = vision.section("evidence")
+    tracker = vision.section("tracker")
+    subject = tracker.section("subject")
+    skeleton = tracker.section("skeleton")
+    analysis = vision.section("analysis")
+    features = analysis.section("features")
+    contacts = analysis.section("contacts")
+    hand_shape = analysis.section("hand_shape")
+    oscillation = analysis.section("oscillation")
+    severity = analysis.section("severity")
+
+    try:
+        tracker_config = Tracker2DConfig(
+            subject=SubjectConfig(
+                rule=subject.choice("rule", ("largest", "central")),
+                full_body_ratio=subject.positive("full_body_ratio"),
+                face_anchor_conf=subject.fraction("face_anchor_conf"),
+                wrist_conf=subject.fraction("wrist_conf"),
+                face_width_source=subject.choice(
+                    "face_width_source", ("ears", "eyes", "jaw", "auto")
+                ),
+                eye_to_face_ratio=subject.positive("eye_to_face_ratio"),
+                face_width_window=subject.positive_int("face_width_window"),
+            ),
+            skeleton=SkeletonConfig(
+                max_ratio=skeleton.positive("max_ratio"),
+                ref_conf=skeleton.fraction("ref_conf"),
+                ref_frames=skeleton.positive_int("ref_frames"),
+                ref_min_frames=skeleton.positive_int("ref_min_frames"),
+                check_conf=skeleton.fraction("check_conf"),
+            ),
+            min_conf=tracker.fraction("min_conf"),
+            gate_chi2=tracker.positive("gate_chi2"),
+            max_predict_frames=tracker.count("max_predict_frames"),
+            meas_std_px=tracker.positive("meas_std_px"),
+            jerk_std_pxps3=tracker.positive("jerk_std_pxps3"),
+            init_pos_std_px=tracker.positive("init_pos_std_px"),
+            init_vel_std_pxps=tracker.positive("init_vel_std_pxps"),
+            init_acc_std_pxps2=tracker.positive("init_acc_std_pxps2"),
+        )
+        analysis_config = AnalysisConfig(
+            features=FeatureConfig(
+                hand_conf=features.fraction("hand_conf"),
+                face_conf=features.fraction("face_conf"),
+                occlusion_conf=features.fraction("occlusion_conf"),
+                forehead_margin_fw=features.positive("forehead_margin_fw"),
+            ),
+            contacts=ContactConfig2D(
+                contact_enter_fw=contacts.positive("contact_enter_fw"),
+                contact_exit_fw=contacts.positive("contact_exit_fw"),
+                occlusion_contact=contacts.fraction("occlusion_contact"),
+                occlusion_near_fw=contacts.positive("occlusion_near_fw"),
+                min_duration_s=contacts.non_negative("min_duration_s"),
+                approach_window_s=contacts.positive("approach_window_s"),
+                recoil_window_s=contacts.positive("recoil_window_s"),
+            ),
+            hand_shape=HandShapeConfig(
+                extended_ratio=hand_shape.positive("extended_ratio"),
+                pinch_ratio=hand_shape.positive("pinch_ratio"),
+                min_conf=hand_shape.fraction("min_conf"),
+                min_keypoints=hand_shape.count("min_keypoints"),
+            ),
+            oscillation=OscillationConfig(
+                rocking_band_hz=oscillation.pair("rocking_band_hz"),
+                flapping_band_hz=oscillation.pair("flapping_band_hz"),
+                rocking_min_strength=oscillation.fraction("rocking_min_strength"),
+                rocking_min_amp_fw=oscillation.positive("rocking_min_amp_fw"),
+                flapping_min_strength=oscillation.fraction("flapping_min_strength"),
+                flapping_height_margin_fw=oscillation.positive("flapping_height_margin_fw"),
+                min_conf=oscillation.fraction("min_conf"),
+                min_samples=oscillation.positive_int("min_samples"),
+            ),
+            severity=SeverityConfig(
+                dangerous_regions=frozenset(
+                    _enum_values(
+                        FaceRegion, severity.texts("dangerous_regions"), "dangerous_regions"
+                    )
+                ),
+                dangerous_shapes=frozenset(
+                    _enum_values(HandShape, severity.texts("dangerous_shapes"), "dangerous_shapes")
+                ),
+                shape_speed_fwps=severity.positive("shape_speed_fwps"),
+                strike_speed_fwps=severity.positive("strike_speed_fwps"),
+                strike_decel_fwps2=severity.positive("strike_decel_fwps2"),
+                recoil_fw=severity.positive("recoil_fw"),
+            ),
+            approach_fw=analysis.positive("approach_fw"),
+            approach_speed_fwps=analysis.positive("approach_speed_fwps"),
+            min_framed_fraction=analysis.fraction("min_framed_fraction"),
+            max_gap_s=analysis.positive("max_gap_s"),
+            activity_window_s=analysis.positive("activity_window_s"),
+            repetition_band_hz=analysis.pair("repetition_band_hz"),
+        )
+        config = VisionConfig(
+            enabled=vision.flag("enabled"),
+            layout=layout_name,
+            model=VisionModelConfig(
+                kind=model.choice("kind", VISION_MODEL_KINDS),
+                path=Path(model.text("path")).expanduser(),
+                input_width=model.positive_int("input_width"),
+                input_height=model.positive_int("input_height"),
+                conf_thr=model.fraction("conf_thr"),
+                iou_thr=model.fraction("iou_thr"),
+            ),
+            camera=VisionCameraConfig(
+                device=camera.text("device"),
+                width=camera.positive_int("width"),
+                height=camera.positive_int("height"),
+                fps=camera.positive("fps"),
+                exposure=camera.integer("exposure", 1, 10000),
+            ),
+            preroll_s=vision.positive("preroll_s"),
+            lookback_s=vision.positive("lookback_s"),
+            fast_after_s=vision.non_negative("fast_after_s"),
+            fast_budget_s=vision.positive("fast_budget_s"),
+            idle_timeout_s=vision.positive("idle_timeout_s"),
+            stale_after_s=vision.positive("stale_after_s"),
+            analysis_fps=vision.positive("analysis_fps"),
+            queue_max=vision.positive_int("queue_max"),
+            imu_buffer_s=vision.positive("imu_buffer_s"),
+            evidence=VisionEvidenceConfig(
+                enabled=evidence.flag("enabled"),
+                base_path=Path(evidence.text("base_path")).expanduser(),
+                clip_s=evidence.positive("clip_s"),
+                retention_days=evidence.count("retention_days"),
+            ),
+            tracker=tracker_config,
+            analysis=analysis_config,
+        )
+    except ValueError as exc:
+        raise ConfigError("vision", str(exc)) from exc
+    sections = (
+        vision,
+        model,
+        camera,
+        evidence,
+        tracker,
+        subject,
+        skeleton,
+        analysis,
+        features,
+        contacts,
+        hand_shape,
+        oscillation,
+        severity,
+    )
+    for section in sections:
+        section.reject_unknown()
+    return config
+
+
+def _enum_values(enum: type[EnumT], names: tuple[str, ...], key: str) -> list[EnumT]:
+    """Map YAML names to enum members, naming the offending key on error."""
+    values: list[EnumT] = []
+    for name in names:
+        try:
+            values.append(enum[name.upper()])
+        except KeyError:
+            message = f"unknown value {name!r}"
+            raise ConfigError(f"vision.analysis.severity.{key}", message) from None
+    return values
 
 
 class _Section:
@@ -214,6 +547,47 @@ class _Section:
             raise ConfigError(self._key(name), "expected a finite positive number")
         return number
 
+    def non_negative(self, name: str) -> float:
+        value = self._get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(self._key(name), "expected a non-negative number")
+        try:
+            number = float(value)
+        except OverflowError:
+            number = math.inf
+        if not math.isfinite(number) or number < 0.0:
+            raise ConfigError(self._key(name), "expected a finite non-negative number")
+        return number
+
+    def fraction(self, name: str) -> float:
+        number = self.non_negative(name)
+        if number > 1.0:
+            raise ConfigError(self._key(name), "expected a number between 0 and 1")
+        return number
+
+    def pair(self, name: str) -> tuple[float, float]:
+        value = self._get(name)
+        if not isinstance(value, list) or len(value) != 2:
+            raise ConfigError(self._key(name), "expected a list of two numbers")
+        first, second = value
+        numbers: list[float] = []
+        for item in (first, second):
+            if isinstance(item, bool) or not isinstance(item, (int, float)):
+                raise ConfigError(self._key(name), "expected a list of two numbers")
+            number = float(item)
+            if not math.isfinite(number):
+                raise ConfigError(self._key(name), "expected finite numbers")
+            numbers.append(number)
+        if numbers[0] >= numbers[1]:
+            raise ConfigError(self._key(name), "expected low < high")
+        return (numbers[0], numbers[1])
+
+    def texts(self, name: str) -> tuple[str, ...]:
+        value = self._get(name)
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ConfigError(self._key(name), "expected a list of strings")
+        return tuple(value)
+
     def positive_int(self, name: str) -> int:
         value = self._get(name)
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -224,6 +598,16 @@ class _Section:
         value = self._get(name)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ConfigError(self._key(name), "expected an integer >= 0")
+        return value
+
+    def integer(self, name: str, minimum: int, maximum: int) -> int:
+        value = self._get(name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ConfigError(self._key(name), "expected an integer")
+        if not minimum <= value <= maximum:
+            raise ConfigError(
+                self._key(name), f"expected an integer between {minimum} and {maximum}"
+            )
         return value
 
     def reject_unknown(self) -> None:

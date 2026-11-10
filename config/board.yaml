@@ -32,3 +32,111 @@ actuators:
   led_strip:
     enable: false
     duration_ms: 2500              # LED turns itself off after this time
+
+camera:                            # Creative VF0800 (Intel RealSense F200) over V4L2
+  rgb_device: /dev/video0          # RGB node, YUYV 640x480 @ 30 fps
+  depth_device: /dev/video2        # depth node, Z16 640x480 @ 30 fps
+  width: 640                       # frames are captured at the model input size
+  height: 480
+  fps: 30
+  rgb_exposure: 300                # manual exposure_time_absolute in 83..10000
+  xu:                              # depth extension-unit values, applied on every open
+    laser_power: 16                # 0..16
+    accuracy: 2                    # 1..3
+    filter: 6                      # 0..7
+    confidence: 1                  # 0..15
+
+vision:                            # 2D pose episode analysis; off until a trained model exists
+  enabled: false                   # when false the board runs the stub verifier, exactly as before
+  layout: HALFBUST_62              # pose keypoint layout: HALFBUST_62 or COCO17
+  model:
+    kind: onnx                     # onnx (CPU stand-in) or xmodel (KV260 DPU)
+    path: models/pose_halfbust62.onnx  # export from ml/; weights are not shipped
+    input_width: 640               # model input size, pixels (width x height)
+    input_height: 480
+    conf_thr: 0.25                 # minimum person score
+    iou_thr: 0.45                  # NMS IoU threshold
+  camera:                          # RGB-only UVC node used by the vision pipeline
+    device: /dev/video0
+    width: 640
+    height: 480
+    fps: 30
+    exposure: 300                  # manual exposure_time_absolute in 1..10000
+  preroll_s: 3.0                   # bounded RAM ring of raw camera frames
+  lookback_s: 1.0                  # pre-roll included in an assessment window
+  fast_after_s: 0.2                # live analysis after the detection window end
+  fast_budget_s: 0.8               # stage-1 budget; must be < dispatch.verification_deadline_s
+  idle_timeout_s: 3.0              # end an episode after this long without a detection
+  stale_after_s: 0.5               # a frame older than this makes the source unhealthy
+  analysis_fps: 10                 # deterministic analyzed-frame grid (P-06)
+  queue_max: 8                     # bounded analysis queue; oldest frame dropped when full
+  imu_buffer_s: 10.0               # per-side ACC magnitude buffer used by the episode report
+  evidence:
+    enabled: true
+    base_path: ~/Desktop/CPSA_evidence
+    clip_s: 2.0                    # clip centred on the peak-severity contact
+    retention_days: 7              # day folders older than this are purged
+  tracker:
+    min_conf: 0.3
+    gate_chi2: 9.21
+    max_predict_frames: 5
+    meas_std_px: 3.0
+    jerk_std_pxps3: 1000.0
+    init_pos_std_px: 20.0
+    init_vel_std_pxps: 1000.0
+    init_acc_std_pxps2: 10000.0
+    subject:
+      rule: largest                # largest or central
+      full_body_ratio: 9.0         # person-box height / face width
+      face_anchor_conf: 0.3
+      wrist_conf: 0.3
+      face_width_source: auto      # jaw, ears, eyes or auto
+      eye_to_face_ratio: 2.2
+      face_width_window: 15
+    skeleton:
+      max_ratio: 1.4               # reject bones longer than this times the reference
+      ref_conf: 0.5
+      ref_frames: 60
+      ref_min_frames: 30
+      check_conf: 0.3
+  analysis:
+    approach_fw: 0.4               # hand-to-face approach distance in face-widths
+    approach_speed_fwps: 1.0
+    min_framed_fraction: 0.6       # framed share required for a REJECTED verdict
+    max_gap_s: 0.2                 # largest allowed hole in the analyzed window
+    activity_window_s: 3.0         # episode activity window for follow-ups and labels
+    repetition_band_hz: [0.2, 5.0]
+    features:
+      hand_conf: 0.3
+      face_conf: 0.3
+      occlusion_conf: 0.3
+      forehead_margin_fw: 0.1
+    contacts:
+      contact_enter_fw: 0.15
+      contact_exit_fw: 0.25
+      occlusion_contact: 0.6
+      occlusion_near_fw: 0.5
+      min_duration_s: 0.1
+      approach_window_s: 0.3
+      recoil_window_s: 0.3
+    hand_shape:
+      extended_ratio: 1.4
+      pinch_ratio: 0.3
+      min_conf: 0.3
+      min_keypoints: 15
+    oscillation:
+      rocking_band_hz: [0.5, 2.0]
+      flapping_band_hz: [2.0, 6.0]
+      rocking_min_strength: 0.5
+      rocking_min_amp_fw: 0.05
+      flapping_min_strength: 0.5
+      flapping_height_margin_fw: 0.5
+      min_conf: 0.3
+      min_samples: 8
+    severity:
+      dangerous_regions: [eyes]           # FaceRegion names
+      dangerous_shapes: [fist, point_pinch]  # HandShape names
+      shape_speed_fwps: 1.0
+      strike_speed_fwps: 2.0
+      strike_decel_fwps2: 4.0
+      recoil_fw: 0.05

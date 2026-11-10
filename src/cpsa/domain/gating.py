@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from cpsa.domain.model import Tag, Verdict
+from cpsa.domain.model import Tag, Verdict, VisionAssessment
 
 
 def should_evaluate(
@@ -21,3 +21,16 @@ def should_evaluate(
 def allows_actuation(verdict: Verdict) -> bool:
     """Fail-open gate: only an explicit rejection prevents actuation."""
     return verdict is not Verdict.REJECTED
+
+
+def as_assessment(result: object) -> VisionAssessment | None:
+    """Normalize a verifier result to an assessment, or ``None`` when it is unusable.
+
+    The verifier port allows a bare :class:`Verdict`, which counts as an assessment
+    with no severity. Any other type is a contract violation; the caller fails open.
+    """
+    if isinstance(result, VisionAssessment):
+        return result
+    if isinstance(result, Verdict):
+        return VisionAssessment(result)
+    return None

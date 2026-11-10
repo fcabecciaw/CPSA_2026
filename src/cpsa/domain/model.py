@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, IntEnum
 
@@ -24,6 +24,34 @@ class Tag(IntEnum):
 class Side(Enum):
     LEFT = "left"
     RIGHT = "right"
+
+
+class FaceRegion(Enum):
+    """Face region touched by a hand, mapped from the face-anchor keypoints."""
+
+    EYES = "eyes"
+    MOUTH = "mouth"
+    NOSE_CHEEK = "nose_cheek"
+    FOREHEAD_TEMPLE = "forehead_temple"
+    EAR = "ear"
+    HEAD_TOP = "head_top"
+
+
+class HandShape(Enum):
+    """Hand configuration at a hand-to-face contact."""
+
+    FIST = "fist"
+    POINT_PINCH = "point_pinch"
+    OPEN_PALM = "open_palm"
+    UNKNOWN = "unknown"
+
+
+class StereotypyLabel(Enum):
+    """Stereotypy type observed by the vision pipeline during an episode."""
+
+    HAND_TO_FACE = "hand_to_face"
+    ROCKING = "rocking"
+    HAND_FLAPPING = "hand_flapping"
 
 
 class SampleKind(Enum):
@@ -95,13 +123,35 @@ class Actuation:
 
 
 @dataclass(frozen=True)
+class VisionAssessment:
+    """Result of the vision verifier for one detection.
+
+    ``severity`` is the vision grade (``NON_DANGEROUS`` or ``DANGEROUS``) and is
+    meaningful only with ``Verdict.CONFIRMED``. ``features`` holds the stage-1
+    numbers behind the verdict, keyed by feature name. ``episode_id`` links the
+    decision to the vision episode report and evidence.
+    """
+
+    verdict: Verdict
+    severity: Tag | None = None
+    features: Mapping[str, float] = field(default_factory=dict)
+    episode_id: str | None = None
+
+
+@dataclass(frozen=True)
 class Decision:
-    """Result of evaluating one detection through the verification gate."""
+    """Result of evaluating one detection through the verification gate.
+
+    ``severity`` is the tag that drove the actuation policy (the vision severity
+    for a confirmed assessment, else the IMU tag); ``None`` when nothing actuated.
+    """
 
     verdict: Verdict
     reason: GateReason
     actuated: bool
     actuations: tuple[Actuation, ...]
+    severity: Tag | None = None
+    assessment: VisionAssessment | None = None
 
 
 @dataclass(frozen=True)
@@ -113,3 +163,16 @@ class DecisionRecord:
     tag: Tag
     tag_changed: bool
     decision: Decision | None
+
+
+@dataclass(frozen=True)
+class ContactEvent:
+    """One hand-to-face contact detected by the IMU-vision fusion."""
+
+    t: float
+    side: Side
+    region: FaceRegion
+    min_distance_m: float
+    approach_speed_mps: float
+    impact_peak_g: float | None
+    occluder: bool
