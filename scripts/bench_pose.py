@@ -9,6 +9,9 @@ Examples::
 Without ``--image`` the script uses random uint8 frames, which is enough to
 time the model and the decode path; a real image better reflects detector
 content but not throughput.  ``--image`` needs Pillow (the ``recorder`` extra).
+For the DPU estimator the output also breaks the end-to-end latency into
+preprocess/quantize, DPU, dequantize+decode and NMS stages, and reports how many
+candidates survived the raw-domain threshold.
 """
 
 from __future__ import annotations
@@ -89,15 +92,27 @@ def make_frame(args: argparse.Namespace, size: tuple[int, int]) -> np.ndarray:
         return np.asarray(image.convert("RGB"), dtype=np.uint8)
 
 
+def _p95(values: list[float]) -> float:
+    return statistics.quantiles(values, n=20)[18] if len(values) >= 20 else max(values)
+
+
 def summarise(times: list[float]) -> dict[str, float]:
     mean = statistics.fmean(times)
-    p95 = statistics.quantiles(times, n=20)[18] if len(times) >= 20 else max(times)
     return {
         "mean_ms": mean * 1000.0,
         "median_ms": statistics.median(times) * 1000.0,
-        "p95_ms": p95 * 1000.0,
+        "p95_ms": _p95(times) * 1000.0,
         "fps": 1.0 / mean if mean > 0.0 else float("inf"),
         "frames": float(len(times)),
+    }
+
+
+def summarise_stages(samples: dict[str, list[float]]) -> dict[str, dict[str, float]]:
+    """Summarise the estimator's per-stage millisecond samples."""
+
+    return {
+        name: {"mean_ms": statistics.fmean(values), "p95_ms": _p95(values)}
+        for name, values in samples.items()
     }
 
 
@@ -115,16 +130,24 @@ def main() -> int:
 
     times: list[float] = []
     detections = 0
+    candidates = 0
+    stage_samples: dict[str, list[float]] = {}
     for _ in range(args.frames):
         started = time.perf_counter()
         persons = estimator.estimate(frame)
         times.append(time.perf_counter() - started)
         detections += len(persons)
+        for name, value in getattr(estimator, "stage_ms", {}).items():
+            stage_samples.setdefault(name, []).append(value)
+        candidates += getattr(estimator, "last_candidate_count", 0)
 
-    result = summarise(times)
+    result: dict[str, Any] = summarise(times)
     result["detections_per_frame"] = detections / args.frames
     result["layout"] = args.layout
     result["model"] = str(args.onnx or args.xmodel)
+    if stage_samples:
+        result["stages"] = summarise_stages(stage_samples)
+        result["candidates_per_frame"] = candidates / args.frames
     if args.json:
         print(json.dumps(result, sort_keys=True))
     else:
@@ -134,6 +157,10 @@ def main() -> int:
             f"p95={result['p95_ms']:.2f} ms  fps={result['fps']:.1f}  "
             f"detections/frame={result['detections_per_frame']:.2f}"
         )
+        for name, stage in result.get("stages", {}).items():
+            print(f"  {name:<12s} mean={stage['mean_ms']:7.2f} ms  p95={stage['p95_ms']:7.2f} ms")
+        if "candidates_per_frame" in result:
+            print(f"  candidates/frame={result['candidates_per_frame']:.1f}")
     return 0
 
 

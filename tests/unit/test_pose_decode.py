@@ -11,10 +11,13 @@ from numpy.typing import NDArray
 
 from cpsa.adapters.pose.dpu import (
     dequantize_fix_point,
+    input_quantization_lut,
     order_outputs_by_stride,
     quantize_fix_point,
+    quantize_rgb_lut,
 )
 from cpsa.vision.pose_decode import (
+    QuantizedRawHeadDecoder,
     decode_raw_heads,
     decode_ultralytics,
     letterbox,
@@ -395,3 +398,249 @@ def test_order_outputs_by_stride() -> None:
     assert [int(output[0, 0, 0, 0]) for _, output in ordered] == [8, 16, 32]
     with pytest.raises(ValueError, match="strides"):
         order_outputs_by_stride([fine], [8, 16])
+
+
+def _raw_shapes(n_kpt: int, n_class: int) -> list[tuple[int, int, int]]:
+    channels = 4 * 16 + n_class + 3 * n_kpt
+    return [(12, 16, channels), (6, 8, channels), (3, 4, channels)]
+
+
+def _reference_persons(
+    outputs: list[NDArray[np.int8]],
+    strides: list[int],
+    fix_points: list[int],
+    n_kpt: int,
+    conf_thr: float,
+    iou_thr: float,
+) -> list[PersonPose]:
+    """Run the reference path: dequantize every tensor, then decode."""
+
+    dequantized = [
+        dequantize_fix_point(output, fix_point)
+        for output, fix_point in zip(outputs, fix_points, strict=True)
+    ]
+    return decode_raw_heads(dequantized, strides, n_kpt, conf_thr, iou_thr)
+
+
+def _assert_same_persons(fast: list[PersonPose], reference: list[PersonPose]) -> None:
+    assert len(fast) == len(reference)
+    for actual, expected in zip(fast, reference, strict=True):
+        assert np.allclose(actual.box, expected.box, atol=1e-4, rtol=0.0)
+        assert actual.score == pytest.approx(expected.score, abs=1e-6)
+        assert np.allclose(actual.xy, expected.xy, atol=1e-4, rtol=0.0)
+        assert np.allclose(actual.conf, expected.conf, atol=1e-6, rtol=0.0)
+
+
+@pytest.mark.parametrize("fix_point", [-3, 0, 4, 7])
+@pytest.mark.parametrize("n_class", [1, 3])
+def test_quantized_decoder_matches_the_reference_on_random_outputs(
+    fix_point: int,
+    n_class: int,
+) -> None:
+    rng = np.random.default_rng(20261110)
+    n_kpt = 4
+    strides = [8, 16, 32]
+    shapes = _raw_shapes(n_kpt, n_class)
+    outputs = [
+        rng.integers(-128, 127, size=shape, endpoint=True, dtype=np.int8) for shape in shapes
+    ]
+    fix_points = [fix_point] * len(shapes)
+    decoder = QuantizedRawHeadDecoder(shapes, strides, fix_points, n_kpt)
+
+    fast = decoder.decode(outputs, conf_thr=0.25, iou_thr=0.45)
+    reference = _reference_persons(outputs, strides, fix_points, n_kpt, 0.25, 0.45)
+
+    assert len(reference) > 0
+    assert decoder.last_candidate_count >= len(reference)
+    _assert_same_persons(fast, reference)
+    _assert_same_persons(
+        decoder.decode([output[np.newaxis] for output in outputs], 0.25, 0.45),
+        reference,
+    )
+
+
+@pytest.mark.parametrize("fix_point", [-3, 0, 4, 7])
+def test_quantized_decoder_matches_when_every_candidate_is_below_threshold(
+    fix_point: int,
+) -> None:
+    rng = np.random.default_rng(20261110)
+    n_kpt = 3
+    n_class = 1
+    strides = [8, 16, 32]
+    shapes = _raw_shapes(n_kpt, n_class)
+    outputs = [
+        rng.integers(-128, 127, size=shape, endpoint=True, dtype=np.int8) for shape in shapes
+    ]
+    class_start = 4 * 16
+    for output in outputs:
+        output[..., class_start : class_start + n_class] = -128
+    fix_points = [fix_point] * len(shapes)
+    decoder = QuantizedRawHeadDecoder(shapes, strides, fix_points, n_kpt)
+
+    fast = decoder.decode(outputs, conf_thr=0.5, iou_thr=0.45)
+    reference = _reference_persons(outputs, strides, fix_points, n_kpt, 0.5, 0.45)
+
+    assert fast == []
+    assert reference == []
+    assert decoder.last_candidate_count == 0
+
+
+@pytest.mark.parametrize("n_kpt", [17, 62])
+@pytest.mark.parametrize("fix_point", [0, 4])
+def test_quantized_decoder_matches_the_golden_with_many_survivors(
+    n_kpt: int,
+    fix_point: int,
+) -> None:
+    fixture = np.load(GOLDEN)
+    prefix = f"kpt{n_kpt}_"
+    strides = [int(value) for value in fixture[f"{prefix}strides"]]
+    reg_max = int(fixture[f"{prefix}reg_max"])
+    conf_thr = float(fixture[f"{prefix}conf_thr"])
+    iou_thr = float(fixture[f"{prefix}iou_thr"])
+    outputs = [
+        quantize_fix_point(fixture[f"{prefix}raw_{index}"], fix_point)[0]
+        for index in range(len(strides))
+    ]
+    for output in outputs:
+        output[..., 4 * reg_max] = 127
+    shapes = [
+        (int(output.shape[0]), int(output.shape[1]), int(output.shape[2])) for output in outputs
+    ]
+    fix_points = [fix_point] * len(strides)
+    decoder = QuantizedRawHeadDecoder(shapes, strides, fix_points, n_kpt, reg_max)
+
+    fast = decoder.decode(outputs, conf_thr, iou_thr)
+    reference = _reference_persons(outputs, strides, fix_points, n_kpt, conf_thr, iou_thr)
+
+    assert decoder.last_candidate_count == sum(shape[0] * shape[1] for shape in shapes)
+    assert len(reference) > 0
+    _assert_same_persons(fast, reference)
+
+
+@pytest.mark.parametrize("n_kpt", [17, 62])
+@pytest.mark.parametrize("fix_point", [0, 4])
+def test_quantized_decoder_matches_the_golden_threshold_path(
+    n_kpt: int,
+    fix_point: int,
+) -> None:
+    fixture = np.load(GOLDEN)
+    prefix = f"kpt{n_kpt}_"
+    strides = [int(value) for value in fixture[f"{prefix}strides"]]
+    reg_max = int(fixture[f"{prefix}reg_max"])
+    conf_thr = float(fixture[f"{prefix}conf_thr"])
+    iou_thr = float(fixture[f"{prefix}iou_thr"])
+    outputs = [
+        quantize_fix_point(fixture[f"{prefix}raw_{index}"], fix_point)[0]
+        for index in range(len(strides))
+    ]
+    shapes = [
+        (int(output.shape[0]), int(output.shape[1]), int(output.shape[2])) for output in outputs
+    ]
+    fix_points = [fix_point] * len(strides)
+    decoder = QuantizedRawHeadDecoder(shapes, strides, fix_points, n_kpt, reg_max)
+
+    fast = decoder.decode(outputs, conf_thr, iou_thr)
+    reference = _reference_persons(outputs, strides, fix_points, n_kpt, conf_thr, iou_thr)
+
+    _assert_same_persons(fast, reference)
+
+
+def test_quantized_decoder_handles_a_threshold_on_a_quantization_step() -> None:
+    n_kpt = 2
+    n_class = 1
+    channel_count = 4 * 16 + n_class + 3 * n_kpt
+    shape = (4, 4, channel_count)
+    raw = np.full(shape, -128, dtype=np.int8)
+    raw[..., 4 * 16 + n_class :] = -1
+    raw.reshape(-1, channel_count)[5, 4 * 16] = -19
+    raw.reshape(-1, channel_count)[5, : 4 * 16] = 0
+    outputs = [raw]
+    fix_points = [4]
+    decoder = QuantizedRawHeadDecoder([shape], [8], fix_points, n_kpt)
+
+    step_score = float(1.0 / (1.0 + np.exp(19.0 / 16.0)))
+    just_below = float(np.nextafter(step_score, 0.0))
+
+    assert _reference_persons(outputs, [8], fix_points, n_kpt, step_score, 0.45) == []
+    assert len(_reference_persons(outputs, [8], fix_points, n_kpt, just_below, 0.45)) == 1
+    for conf_thr in (step_score, just_below):
+        fast = decoder.decode(outputs, conf_thr, 0.45)
+        reference = _reference_persons(outputs, [8], fix_points, n_kpt, conf_thr, 0.45)
+        _assert_same_persons(fast, reference)
+
+
+def test_input_quantization_lut_reproduces_the_reference_formula() -> None:
+    image = np.random.default_rng(20261110).integers(0, 256, size=(37, 53, 3), dtype=np.uint8)
+
+    for fix_point in (-3, 0, 4, 7):
+        lut = input_quantization_lut(fix_point)
+        assert lut.shape == (256,)
+        assert lut.dtype == np.int8
+        expected = quantize_fix_point(image.astype(np.float32) / 255.0, fix_point)
+        assert np.array_equal(lut[image], expected)
+        every_value = np.arange(256, dtype=np.uint8)
+        assert np.array_equal(
+            lut[every_value],
+            quantize_fix_point(every_value.astype(np.float32) / 255.0, fix_point),
+        )
+
+
+def test_quantize_rgb_lut_matches_the_reference_formula() -> None:
+    image = np.random.default_rng(20261110).integers(0, 256, size=(37, 53, 3), dtype=np.uint8)
+    buffer = np.empty(image.size, dtype=np.int8)
+
+    for fix_point in (-3, 0, 4, 7):
+        lut = input_quantization_lut(fix_point)
+        quantized = quantize_rgb_lut(image, lut, buffer)
+        assert quantized.shape == image.shape
+        assert np.shares_memory(quantized, buffer)
+        assert np.array_equal(
+            quantized,
+            quantize_fix_point(image.astype(np.float32) / 255.0, fix_point),
+        )
+
+    with pytest.raises(ValueError, match="uint8"):
+        quantize_rgb_lut(image.astype(np.float32), lut, buffer)
+    with pytest.raises(ValueError, match="256-element"):
+        quantize_rgb_lut(image, np.zeros(255, dtype=np.int8), buffer)
+    with pytest.raises(ValueError, match="out must hold"):
+        quantize_rgb_lut(image, lut, np.empty(image.size - 1, dtype=np.int8))
+
+
+def test_letterbox_is_a_no_op_for_the_model_input_size() -> None:
+    image = np.random.default_rng(20261110).integers(0, 256, size=(480, 640, 3), dtype=np.uint8)
+
+    letterboxed, scale, pad = letterbox(image, (480, 640))
+
+    assert letterboxed is image
+    assert scale == 1.0
+    assert pad == (0.0, 0.0)
+
+
+def test_quantized_decoder_rejects_bad_configuration_and_inputs() -> None:
+    shape = (4, 4, 4 * 16 + 1 + 3 * 2)
+    with pytest.raises(ValueError, match="n_kpt"):
+        QuantizedRawHeadDecoder([shape], [8], [0], 0)
+    with pytest.raises(ValueError, match="reg_max"):
+        QuantizedRawHeadDecoder([shape], [8], [0], 2, reg_max=0)
+    with pytest.raises(ValueError, match="must not be empty"):
+        QuantizedRawHeadDecoder([], [], [], 2)
+    with pytest.raises(ValueError, match="fix points"):
+        QuantizedRawHeadDecoder([shape], [8], [0, 0], 2)
+    with pytest.raises(ValueError, match=r"\(H, W, C\)"):
+        QuantizedRawHeadDecoder([(4, 4)], [8], [0], 2)
+    with pytest.raises(ValueError, match="positive"):
+        QuantizedRawHeadDecoder([(0, 4, shape[2])], [8], [0], 2)
+    with pytest.raises(ValueError, match="strides"):
+        QuantizedRawHeadDecoder([shape], [0], [0], 2)
+    with pytest.raises(ValueError, match="channels"):
+        QuantizedRawHeadDecoder([(4, 4, 4 * 16 + 3 * 2)], [8], [0], 2)
+
+    decoder = QuantizedRawHeadDecoder([shape], [8], [4], 2)
+    valid = np.zeros(shape, dtype=np.int8)
+    with pytest.raises(ValueError, match="expects"):
+        decoder.decode([valid, valid], 0.25, 0.45)
+    with pytest.raises(ValueError, match="int8"):
+        decoder.decode([valid.astype(np.float64)], 0.25, 0.45)
+    with pytest.raises(ValueError, match="must be"):
+        decoder.decode([np.zeros((8, 8, shape[2]), dtype=np.int8)], 0.25, 0.45)

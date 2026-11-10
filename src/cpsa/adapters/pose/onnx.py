@@ -49,7 +49,7 @@ class OnnxPoseEstimator:
         iou_thr: float = 0.45,
     ) -> None:
         try:
-            import onnxruntime as ort  # type: ignore[import-not-found]
+            import onnxruntime as ort  # type: ignore[import-not-found, import-untyped, unused-ignore]
         except ImportError as exc:  # pragma: no cover - depends on the installed extra
             raise RuntimeError(
                 "onnxruntime is required for OnnxPoseEstimator; "

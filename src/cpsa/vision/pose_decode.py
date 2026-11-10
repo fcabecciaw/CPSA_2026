@@ -21,20 +21,35 @@ The raw decode matches Ultralytics 8.4.203 ``Pose.kpts_decode`` and
 * keypoints (pixels): ``x = (2 * raw_x + gx) * s``,
   ``y = (2 * raw_y + gy) * s``, ``conf = sigmoid(raw_conf)``.
 
+:class:`QuantizedRawHeadDecoder` is the DPU fast path.  It thresholds the raw
+int8 class logits before any activation, then runs DFL, sigmoid, grid and
+keypoint decode only on the surviving candidates, and precomputes the grids and
+scratch buffers.  Its output is identical to dequantizing the tensors and
+calling :func:`decode_raw_heads`.
+
 The golden fixtures in ``tests/fixtures/pose/`` pin this convention to the
 upstream implementation (P-10).
 """
 
 from __future__ import annotations
 
+import math
+import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
 
 from cpsa.vision.types import PersonPose
 
-__all__ = ["decode_raw_heads", "decode_ultralytics", "letterbox", "unletterbox"]
+__all__ = [
+    "QuantizedRawHeadDecoder",
+    "decode_raw_heads",
+    "decode_ultralytics",
+    "letterbox",
+    "unletterbox",
+]
 
 _DEFAULT_PAD_VALUE = 114
 
@@ -177,7 +192,8 @@ def _softmax(values: NDArray[np.float64], axis: int) -> NDArray[np.float64]:
 
 
 def _sigmoid(values: NDArray[np.float64]) -> NDArray[np.float64]:
-    return 1.0 / (1.0 + np.exp(-values))
+    # Clipping avoids exp overflow warnings; outside +/-500 the result is 0 or 1 to float64.
+    return 1.0 / (1.0 + np.exp(-np.clip(values, -500.0, 500.0)))
 
 
 def _nhwc(output: NDArray[np.generic], index: int) -> NDArray[np.float64]:
@@ -284,6 +300,294 @@ def decode_raw_heads(
     )
 
 
+def _class_threshold_int(conf_thr: float, fix_point: int) -> int:
+    """Return the smallest int8 class logit that the fast path must decode.
+
+    With ``q`` the raw class-logit value, the reference path scores a candidate
+    with ``sigmoid(q * 2 ** -fix_point)`` and keeps ``score > conf_thr``.  Since
+    sigmoid is monotonic that is ``q > logit(conf_thr) * 2 ** fix_point``, whose
+    integer equivalent is ``floor(threshold) + 1``.  This returns one integer
+    below it, so float rounding at a quantization step can never drop a
+    candidate that the reference path keeps.  The extra candidate is removed by
+    the exact float comparison in :func:`_select`, so the decoded persons are
+    unchanged.
+    """
+
+    if conf_thr <= 0.0:
+        return -128
+    if conf_thr >= 1.0:
+        return 128
+    logit = math.log(conf_thr) - math.log1p(-conf_thr)
+    scaled = logit * 2.0**fix_point
+    if not math.isfinite(scaled):
+        return 128 if scaled > 0.0 else -128
+    return max(-128, min(128, math.floor(scaled) - 1))
+
+
+@dataclass(frozen=True)
+class _RawScale:
+    """Precomputed state of one raw-head tensor for the quantized decoder."""
+
+    height: int
+    width: int
+    channels: int
+    stride: int
+    fix_point: int
+    dequant_factor: float
+    n_class: int
+    class_start: int
+    kpt_start: int
+    anchor_x: NDArray[np.float64]
+    anchor_y: NDArray[np.float64]
+    grid_x: NDArray[np.float64]
+    grid_y: NDArray[np.float64]
+    keep: NDArray[np.bool_]
+    class_max: NDArray[np.int8] | None
+
+
+def _build_raw_scale(
+    height: int,
+    width: int,
+    channels: int,
+    stride: int,
+    fix_point: int,
+    n_kpt: int,
+    reg_max: int,
+) -> _RawScale:
+    """Build the per-stride grids, slices and scratch buffers."""
+
+    n_class = channels - 4 * reg_max - 3 * n_kpt
+    grid_y, grid_x = np.meshgrid(
+        np.arange(height, dtype=np.float64),
+        np.arange(width, dtype=np.float64),
+        indexing="ij",
+    )
+    return _RawScale(
+        height=height,
+        width=width,
+        channels=channels,
+        stride=stride,
+        fix_point=fix_point,
+        dequant_factor=2.0**-fix_point,
+        n_class=n_class,
+        class_start=4 * reg_max,
+        kpt_start=4 * reg_max + n_class,
+        anchor_x=((grid_x + 0.5) * stride).reshape(-1),
+        anchor_y=((grid_y + 0.5) * stride).reshape(-1),
+        grid_x=grid_x.reshape(-1),
+        grid_y=grid_y.reshape(-1),
+        keep=np.empty(height * width, dtype=np.bool_),
+        class_max=np.empty(height * width, dtype=np.int8) if n_class > 1 else None,
+    )
+
+
+class QuantizedRawHeadDecoder:
+    """Threshold-first decoder for the DPU's quantized raw pose heads.
+
+    Behaviourally identical to dequantizing each tensor and calling
+    :func:`decode_raw_heads`, but the class logits are thresholded in the int8
+    domain first, so the DFL softmax, the sigmoids, the grid decode and the
+    per-candidate dequantization only run on the survivors.  Grids, channel
+    slices, dequantization factors and scratch buffers are precomputed here, so
+    decoding a frame does not allocate them again.  The scratch buffers make one
+    instance non-reentrant: call :meth:`decode` from a single thread at a time.
+
+    Args:
+        shapes: Per-output ``(H, W, C)`` NHWC shapes, in the order in which the
+            DPU returns the tensors.
+        strides: Feature-map stride for each output.
+        fix_points: Output ``fix_point`` for each tensor; values are dequantized
+            with ``value * 2 ** -fix_point``, like
+            :func:`cpsa.adapters.pose.dpu.dequantize_fix_point`.
+        n_kpt: Number of keypoints per person.
+        reg_max: DFL bins per box side.
+
+    Raises:
+        ValueError: If shapes, strides or fix points do not line up.
+    """
+
+    def __init__(
+        self,
+        shapes: Sequence[tuple[int, int, int]],
+        strides: Sequence[int],
+        fix_points: Sequence[int],
+        n_kpt: int,
+        reg_max: int = 16,
+    ) -> None:
+        if n_kpt < 1:
+            raise ValueError(f"n_kpt must be positive, got {n_kpt}")
+        if reg_max < 1:
+            raise ValueError(f"reg_max must be positive, got {reg_max}")
+        if not shapes:
+            raise ValueError("shapes must not be empty")
+        if len(shapes) != len(strides) or len(shapes) != len(fix_points):
+            raise ValueError(
+                f"got {len(shapes)} shapes, {len(strides)} strides and {len(fix_points)} fix points"
+            )
+
+        base = 4 * reg_max + 3 * n_kpt
+        scales: list[_RawScale] = []
+        for index, (shape, raw_stride, fix_point) in enumerate(
+            zip(shapes, strides, fix_points, strict=True)
+        ):
+            if len(shape) != 3:
+                raise ValueError(f"shapes[{index}] must be (H, W, C), got {shape}")
+            height, width, channels = (int(value) for value in shape)
+            stride = int(raw_stride)
+            if height <= 0 or width <= 0:
+                raise ValueError(f"shapes[{index}] must be positive, got {shape}")
+            if stride <= 0:
+                raise ValueError(f"strides[{index}] must be positive, got {stride}")
+            if channels <= base:
+                raise ValueError(
+                    f"shapes[{index}] has {channels} channels; at least {base + 1} are "
+                    f"needed for reg_max={reg_max}, {n_kpt} keypoints and one class"
+                )
+            scales.append(
+                _build_raw_scale(height, width, channels, stride, int(fix_point), n_kpt, reg_max)
+            )
+
+        self._scales = tuple(scales)
+        self._order = tuple(
+            sorted(range(len(scales)), key=lambda position: scales[position].stride)
+        )
+        self._bins = np.arange(reg_max, dtype=np.float64)
+        self._n_kpt = n_kpt
+        self._reg_max = reg_max
+
+        self.last_decode_seconds = 0.0
+        self.last_select_seconds = 0.0
+        self.last_candidate_count = 0
+
+    def decode(
+        self,
+        outputs: Sequence[NDArray[np.int8]],
+        conf_thr: float,
+        iou_thr: float,
+    ) -> list[PersonPose]:
+        """Decode raw int8 heads, thresholding class logits before activation.
+
+        Args:
+            outputs: Per-output int8 ``(H, W, C)`` (or ``(1, H, W, C)``) tensors in
+                constructor order.
+            conf_thr: Minimum class score; keep scores strictly above it.
+            iou_thr: IoU threshold for class-aware NMS.
+
+        Returns:
+            Persons sorted by descending score, matching
+            :func:`decode_raw_heads` on the dequantized tensors.
+
+        Raises:
+            ValueError: If an output is not int8 or does not match the
+                constructor's shape.
+        """
+
+        if len(outputs) != len(self._scales):
+            raise ValueError(
+                f"got {len(outputs)} outputs but this decoder expects {len(self._scales)}"
+            )
+
+        started = time.perf_counter()
+        boxes: list[NDArray[np.float64]] = []
+        scores: list[NDArray[np.float64]] = []
+        classes: list[NDArray[np.intp]] = []
+        keypoints: list[NDArray[np.float64]] = []
+        candidates = 0
+        bins = self._bins
+        reg_max = self._reg_max
+        n_kpt = self._n_kpt
+        box_channels = 4 * reg_max
+
+        # Ascending stride reproduces the anchor order of decode_raw_heads.
+        for position in self._order:
+            scale = self._scales[position]
+            raw = np.asarray(outputs[position])
+            if raw.dtype != np.int8:
+                raise ValueError(f"outputs[{position}] must be int8, got {raw.dtype}")
+            if raw.ndim == 4 and raw.shape[0] == 1:
+                raw = raw[0]
+            if raw.shape != (scale.height, scale.width, scale.channels):
+                raise ValueError(
+                    f"outputs[{position}] must be {(scale.height, scale.width, scale.channels)}, "
+                    f"got {raw.shape}"
+                )
+
+            flat = raw.reshape(scale.height * scale.width, scale.channels)
+            threshold = _class_threshold_int(conf_thr, scale.fix_point)
+            if scale.n_class == 1:
+                np.greater_equal(flat[:, scale.class_start], threshold, out=scale.keep)
+            else:
+                class_max = scale.class_max
+                assert class_max is not None
+                np.maximum.reduce(
+                    flat[:, scale.class_start : scale.class_start + scale.n_class],
+                    axis=1,
+                    out=class_max,
+                )
+                np.greater_equal(class_max, threshold, out=scale.keep)
+
+            index = np.flatnonzero(scale.keep)
+            count = index.size
+            if count == 0:
+                continue
+            candidates += int(count)
+
+            factor = scale.dequant_factor
+            box = flat[index, :box_channels].astype(np.float64) * factor
+            distances = (_softmax(box.reshape(count, 4, reg_max), axis=-1) * bins).sum(
+                axis=-1
+            ) * scale.stride
+            anchor_x = scale.anchor_x[index]
+            anchor_y = scale.anchor_y[index]
+            boxes.append(
+                np.stack(
+                    [
+                        anchor_x - distances[:, 0],
+                        anchor_y - distances[:, 1],
+                        anchor_x + distances[:, 2],
+                        anchor_y + distances[:, 3],
+                    ],
+                    axis=-1,
+                )
+            )
+
+            class_logits = (
+                flat[index, scale.class_start : scale.class_start + scale.n_class].astype(
+                    np.float64
+                )
+                * factor
+            )
+            class_scores = _sigmoid(class_logits)
+            scores.append(class_scores.max(axis=1))
+            classes.append(class_scores.argmax(axis=1).astype(np.intp))
+
+            kpt = (
+                flat[index, scale.kpt_start : scale.kpt_start + 3 * n_kpt].astype(np.float64)
+                * factor
+            ).reshape(count, n_kpt, 3)
+            x = (kpt[..., 0] * 2.0 + scale.grid_x[index][:, None]) * scale.stride
+            y = (kpt[..., 1] * 2.0 + scale.grid_y[index][:, None]) * scale.stride
+            keypoints.append(np.stack([x, y, _sigmoid(kpt[..., 2])], axis=-1))
+
+        self.last_decode_seconds = time.perf_counter() - started
+        self.last_candidate_count = candidates
+        if not boxes:
+            self.last_select_seconds = 0.0
+            return []
+
+        started = time.perf_counter()
+        persons = _select(
+            np.concatenate(boxes, axis=0),
+            np.concatenate(scores, axis=0),
+            np.concatenate(classes, axis=0),
+            np.concatenate(keypoints, axis=0),
+            conf_thr,
+            iou_thr,
+        )
+        self.last_select_seconds = time.perf_counter() - started
+        return persons
+
+
 def _resize_bilinear(
     image: NDArray[np.uint8],
     out_height: int,
@@ -330,7 +634,9 @@ def letterbox(
     Returns:
         ``(image, scale, (pad_x, pad_y))`` where ``image`` is ``(H, W, 3)``
         uint8, ``scale`` is the uniform resize factor and the padding offsets
-        are in pixels.  :func:`unletterbox` inverts the mapping.
+        are in pixels.  :func:`unletterbox` inverts the mapping.  When ``rgb``
+        already has the requested size and is uint8 it is returned unchanged,
+        so the common camera-size-equals-model-size case does not copy.
     """
 
     image = np.asarray(rgb)
@@ -344,6 +650,8 @@ def letterbox(
         raise ValueError(f"size must be positive, got {size}")
     if not 0 <= pad_value <= 255:
         raise ValueError(f"pad_value must be in [0, 255], got {pad_value}")
+    if (height, width) == (out_height, out_width) and image.dtype == np.uint8:
+        return image, 1.0, (0.0, 0.0)
 
     scale = min(out_height / height, out_width / width)
     resized_height = max(1, min(out_height, round(height * scale)))
