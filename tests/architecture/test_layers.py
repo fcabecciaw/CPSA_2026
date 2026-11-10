@@ -17,10 +17,21 @@ ANYTHING = None  # sentinel: no restriction on external imports
 RULES: dict[str, tuple[frozenset[str], frozenset[str] | None]] = {
     "domain": (frozenset(), frozenset()),
     "imu": (frozenset({"domain"}), frozenset({"numpy"})),
-    "ports": (frozenset({"domain"}), frozenset({"numpy"})),
-    "application": (frozenset({"domain", "imu", "ports"}), frozenset({"numpy", "yaml"})),
-    "adapters": (frozenset({"domain", "ports"}), ANYTHING),
-    "board": (frozenset({"domain", "imu", "ports", "application", "adapters"}), ANYTHING),
+    "ports": (frozenset({"domain", "vision"}), frozenset({"numpy"})),
+    "application": (
+        frozenset({"domain", "imu", "ports", "vision"}),
+        frozenset({"numpy", "yaml"}),
+    ),
+    "adapters": (frozenset({"domain", "ports", "vision"}), ANYTHING),
+    "vision": (frozenset({"domain"}), frozenset({"numpy"})),
+    "board": (
+        frozenset({"domain", "imu", "ports", "application", "adapters", "vision"}),
+        ANYTHING,
+    ),
+    "recorder": (
+        frozenset({"domain", "imu", "ports", "application", "adapters", "vision"}),
+        ANYTHING,
+    ),
     "__init__": (frozenset(), frozenset()),
 }
 
@@ -68,7 +79,7 @@ def violations(layer: str, imports: set[str]) -> list[str]:
             target = _layer_of(name)
             if target != layer and target not in allowed_internal:
                 problems.append(f"{name}: layer '{layer}' may not import layer '{target}'")
-        elif layer not in ("adapters", "board") and top in HARDWARE_MODULES:
+        elif layer not in ("adapters", "board", "recorder") and top in HARDWARE_MODULES:
             problems.append(f"{name}: hardware/native module outside adapters/board")
         elif (
             allowed_external is not ANYTHING

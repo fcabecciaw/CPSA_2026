@@ -13,7 +13,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-from cpsa.domain.model import Decision, DecisionRecord
+from cpsa.domain.model import Decision, DecisionRecord, Tag, VisionAssessment
 
 SYSTEM_LOG = "system.log"
 EVENT_LOG = "events.jsonl"
@@ -111,4 +111,21 @@ def _decision_json(decision: Decision | None) -> dict[str, Any] | None:
         "actuations": [
             {"actuator_id": a.actuator_id, "params": dict(a.params)} for a in decision.actuations
         ],
+        "severity": _tag_name(decision.severity),
+        "assessment": _assessment_json(decision.assessment),
     }
+
+
+def _assessment_json(assessment: VisionAssessment | None) -> dict[str, Any] | None:
+    if assessment is None:
+        return None
+    return {
+        "verdict": assessment.verdict.value,
+        "severity": _tag_name(assessment.severity),
+        "features": dict(assessment.features),
+        "episode_id": assessment.episode_id,
+    }
+
+
+def _tag_name(tag: Tag | None) -> str | None:
+    return tag.name if tag is not None else None

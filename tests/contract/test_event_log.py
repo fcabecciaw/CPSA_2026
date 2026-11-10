@@ -7,7 +7,15 @@ from pathlib import Path
 import pytest
 
 from cpsa.adapters.event_log import JsonlEventSink, configure_logging
-from cpsa.domain.model import Actuation, Decision, DecisionRecord, GateReason, Tag, Verdict
+from cpsa.domain.model import (
+    Actuation,
+    Decision,
+    DecisionRecord,
+    GateReason,
+    Tag,
+    Verdict,
+    VisionAssessment,
+)
 
 STAMP = datetime(2026, 11, 6, 10, 30, tzinfo=timezone(timedelta(hours=1)))
 
@@ -43,6 +51,8 @@ def test_records_are_appended_as_json_lines_in_the_day_folder(tmp_path: Path) ->
                         "params": {"color": [255, 0, 0, 0], "intensity": 100},
                     }
                 ],
+                "severity": None,
+                "assessment": None,
             },
         },
         {
@@ -53,6 +63,36 @@ def test_records_are_appended_as_json_lines_in_the_day_folder(tmp_path: Path) ->
             "decision": None,
         },
     ]
+
+
+def test_vision_severity_and_assessment_are_logged(tmp_path: Path) -> None:
+    assessment = VisionAssessment(
+        Verdict.CONFIRMED, Tag.DANGEROUS, {"peak_closing_speed_fwps": 2.5}, "ep-42"
+    )
+    decision = Decision(
+        Verdict.CONFIRMED,
+        GateReason.CONFIRMED,
+        True,
+        (Actuation("meta_AA", {"duty": 100}),),
+        Tag.NON_DANGEROUS,
+        assessment,
+    )
+    JsonlEventSink(tmp_path).write(DecisionRecord(STAMP, 12.5, Tag.DANGEROUS, True, decision))
+
+    logged = read_events(tmp_path / "2026-11-06" / "events.jsonl")
+    assert logged[0]["decision"] == {
+        "verdict": "CONFIRMED",
+        "reason": "CONFIRMED",
+        "actuated": True,
+        "actuations": [{"actuator_id": "meta_AA", "params": {"duty": 100}}],
+        "severity": "NON_DANGEROUS",
+        "assessment": {
+            "verdict": "CONFIRMED",
+            "severity": "DANGEROUS",
+            "features": {"peak_closing_speed_fwps": 2.5},
+            "episode_id": "ep-42",
+        },
+    }
 
 
 def test_records_go_to_the_folder_of_their_own_day(tmp_path: Path) -> None:

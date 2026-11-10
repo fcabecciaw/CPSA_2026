@@ -138,7 +138,7 @@ def test_stop_during_discovery_exits_0(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("contents", "key"),
     [
-        (SHIPPED.read_text().replace("  base_path:", "  base_pth:"), "log.base_path"),
+        (SHIPPED.read_text().replace("\n  base_path:", "\n  base_pth:", 1), "log.base_path"),
         (None, "missing.yaml"),
     ],
     ids=["missing-key", "missing-file"],
@@ -151,6 +151,19 @@ def test_invalid_config_exits_2_naming_the_key(
         path.write_text(contents)
     assert main(["--config", str(path)]) == 2
     assert key in capsys.readouterr().err
+
+
+def test_missing_pose_model_is_a_vision_startup_error(tmp_path: Path) -> None:
+    base = load(SHIPPED)
+    vision = replace(
+        base.vision,
+        enabled=True,
+        model=replace(base.vision.model, path=tmp_path / "missing.onnx"),
+        evidence=replace(base.vision.evidence, enabled=False),
+    )
+
+    with pytest.raises(board.VisionStartupError):
+        board._build_verifier(replace(base, vision=vision), FakeClock())
 
 
 @pytest.fixture

@@ -39,7 +39,9 @@ def test_implements_port(instance: object, port: type) -> None:
 def test_stub_verifier_is_always_undecided() -> None:
     clock = fakes.FakeClock()
     for tag in Tag:
-        assert StubVerifier().verify(Detection(tag, clock.now(), 0.0, ())) is Verdict.UNDECIDED
+        assessment = StubVerifier().verify(Detection(tag, clock.now(), 0.0, ()))
+        assert assessment.verdict is Verdict.UNDECIDED
+        assert assessment.severity is None
 
 
 def test_null_gui_accepts_the_full_lifecycle() -> None:

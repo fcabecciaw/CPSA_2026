@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
@@ -17,7 +18,9 @@ from cpsa.domain.model import (
     Side,
     Tag,
     Verdict,
+    VisionAssessment,
 )
+from cpsa.vision.types import PersonPose, TrackedFrame, VideoFrame
 
 SampleCallback = Callable[[Side, SampleKind, tuple[float, ...], float], None]
 """Receives ``(side, kind, values, monotonic_ts)`` for every IMU sample."""
@@ -42,8 +45,23 @@ class Classifier(Protocol):
 
 @runtime_checkable
 class Verifier(Protocol):
-    def verify(self, detection: Detection) -> Verdict:
-        """Return a verdict. May block or raise; the caller enforces deadline and fail-open."""
+    def verify(self, detection: Detection) -> VisionAssessment | Verdict:
+        """Return an assessment (or a bare verdict, treated as having no severity).
+
+        May block or raise; the caller enforces deadline and fail-open.
+        """
+        ...
+
+
+@runtime_checkable
+class DetectionObserver(Protocol):
+    def observe(self, detection: Detection) -> None:
+        """Receive every stereotypy detection, including those inside the cooldown.
+
+        Must return quickly and never raise into the caller. A verifier may also
+        implement this protocol to extend its episode on detections that are not
+        sent to ``verify``.
+        """
         ...
 
 
@@ -68,6 +86,71 @@ class SensorSource(Protocol):
     def start(self, on_sample: SampleCallback) -> None: ...
 
     def stop(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class RgbdFrame:
+    """One paired RGB/depth frame; both timestamps use ``CLOCK_MONOTONIC`` seconds."""
+
+    seq: int
+    rgb: NDArray[np.uint8]  # (height, width, 3), RGB order
+    depth: NDArray[np.uint16]  # (height, width), raw Z16, 0 = invalid
+    ts_rgb: float
+    ts_depth: float
+
+
+@runtime_checkable
+class FrameSource(Protocol):
+    def start(self, on_frame: Callable[[RgbdFrame], None]) -> None:
+        """Open the device and deliver paired frames from one delivery thread."""
+        ...
+
+    def stop(self) -> None: ...
+
+
+@runtime_checkable
+class VideoSource(Protocol):
+    def start(
+        self,
+        on_frame: Callable[[VideoFrame], None],
+        on_error: Callable[[Exception], None] | None = None,
+    ) -> None:
+        """Open the camera and deliver frames, in order, from one delivery thread.
+
+        A failure after ``start`` returns (device lost, read error) is reported
+        once through ``on_error`` and stops delivery; it is never raised on the
+        delivery thread.
+        """
+        ...
+
+    def stop(self) -> None: ...
+
+
+@runtime_checkable
+class PoseEstimator(Protocol):
+    def estimate(self, rgb: NDArray[np.uint8]) -> Sequence[PersonPose]:
+        """Return the persons in an ``(H, W, 3)`` RGB image, coordinates in its pixels.
+
+        Raises on a model or accelerator failure.
+        """
+        ...
+
+
+@runtime_checkable
+class EvidenceSink(Protocol):
+    def write_episode(
+        self,
+        episode_id: str,
+        frames: Sequence[tuple[NDArray[np.uint8], TrackedFrame | None]],
+        fps: float,
+        keyframe: int,
+    ) -> None:
+        """Save a clip with a skeleton overlay and the keyframe ``frames[keyframe]``."""
+        ...
+
+    def purge(self, now: datetime) -> None:
+        """Remove evidence older than the configured retention."""
+        ...
 
 
 @runtime_checkable

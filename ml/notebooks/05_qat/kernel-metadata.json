@@ -1,0 +1,18 @@
+{
+  "id": "fcabecciaw/cpsa-05-qat",
+  "title": "CPSA 05 QAT",
+  "code_file": "05_qat.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "machine_shape": "NvidiaTeslaT4",
+  "enable_internet": true,
+  "dataset_sources": [
+    "fcabecciaw/cpsa-halfbust",
+    "fcabecciaw/cpsa-checkpoints"
+  ],
+  "competition_sources": [],
+  "kernel_sources": []
+}

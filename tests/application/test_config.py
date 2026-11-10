@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from cpsa.application.config import ConfigError, load, parse
+from cpsa.domain.model import FaceRegion
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SHIPPED = REPO_ROOT / "config" / "board.yaml"
@@ -21,6 +22,19 @@ def test_shipped_config_is_valid() -> None:
     assert config.dispatch.verification_deadline_s == 1.0
     assert config.actuators.retry.fast_attempts == 5
     assert config.actuators.led_strip.duration_ms == 2500
+
+
+def test_shipped_camera_defaults() -> None:
+    config = load(SHIPPED)
+    assert config.camera.rgb_device == "/dev/video0"
+    assert config.camera.depth_device == "/dev/video2"
+    assert (config.camera.width, config.camera.height) == (640, 480)
+    assert config.camera.fps == 30
+    assert config.camera.rgb_exposure == 300
+    assert config.camera.xu.laser_power == 16
+    assert config.camera.xu.accuracy == 2
+    assert config.camera.xu.filter == 6
+    assert config.camera.xu.confidence == 1
 
 
 def test_home_is_expanded_in_log_base_path() -> None:
@@ -47,7 +61,15 @@ def _with(data: dict[str, Any], dotted: str, value: object) -> dict[str, Any]:
 
 @pytest.mark.parametrize(
     "key",
-    ["log", "bluecoins.right", "dispatch.verification_deadline_s", "actuators.retry.sleep_s"],
+    [
+        "log",
+        "bluecoins.right",
+        "dispatch.verification_deadline_s",
+        "actuators.retry.sleep_s",
+        "camera",
+        "camera.depth_device",
+        "camera.xu.laser_power",
+    ],
 )
 def test_missing_key_is_named(key: str) -> None:
     with pytest.raises(ConfigError) as info:
@@ -70,6 +92,20 @@ def test_missing_key_is_named(key: str) -> None:
         ("actuators.speaker.mac", ""),
         ("log.level", "VERBOSE"),
         ("bluecoins", ["CPSA_L2"]),
+        ("camera.width", 0),
+        ("camera.height", -1),
+        ("camera.fps", 0),
+        ("camera.fps", "fast"),
+        ("camera.rgb_exposure", 82),
+        ("camera.rgb_exposure", 10001),
+        ("camera.rgb_exposure", 300.5),
+        ("camera.xu.laser_power", -1),
+        ("camera.xu.laser_power", 17),
+        ("camera.xu.accuracy", 0),
+        ("camera.xu.accuracy", 4),
+        ("camera.xu.filter", 8),
+        ("camera.xu.confidence", 16),
+        ("camera.xu.confidence", True),
     ],
 )
 def test_invalid_value_is_named(key: str, value: object) -> None:
@@ -86,6 +122,12 @@ def test_unknown_key_is_named() -> None:
     with pytest.raises(ConfigError) as info:
         parse(_with(valid(), "sync.max_skew", 30))
     assert info.value.key == "sync.max_skew"
+
+
+def test_unknown_camera_key_is_named() -> None:
+    with pytest.raises(ConfigError) as info:
+        parse(_with(valid(), "camera.xu.gain", 3))
+    assert info.value.key == "camera.xu.gain"
 
 
 def test_non_mapping_document_is_rejected() -> None:
@@ -110,3 +152,90 @@ def test_nonfinite_numbers_are_rejected(literal: str) -> None:
     with pytest.raises(ConfigError) as info:
         parse(yaml.safe_load(text))
     assert info.value.key == "sync.max_skew_ms"
+
+
+def test_shipped_vision_defaults() -> None:
+    config = load(SHIPPED)
+    vision = config.vision
+
+    assert vision.enabled is False
+    assert vision.layout == "HALFBUST_62"
+    assert vision.model.kind == "onnx"
+    assert (vision.model.input_width, vision.model.input_height) == (640, 480)
+    assert vision.camera.device == "/dev/video0"
+    assert (vision.camera.width, vision.camera.height) == (640, 480)
+    assert vision.fast_budget_s == 0.8
+    assert vision.fast_budget_s < config.dispatch.verification_deadline_s
+    assert vision.analysis_fps == 10.0
+    assert vision.evidence.base_path == Path("~/Desktop/CPSA_evidence").expanduser()
+    assert vision.tracker.min_conf == 0.3
+    assert vision.analysis.approach_fw == 0.4
+    assert vision.analysis.severity.dangerous_regions == frozenset({FaceRegion.EYES})
+    assert vision.analysis.repetition_band_hz == (0.2, 5.0)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "vision",
+        "vision.layout",
+        "vision.model",
+        "vision.camera",
+        "vision.fast_budget_s",
+        "vision.tracker",
+        "vision.tracker.subject",
+        "vision.analysis",
+        "vision.analysis.contacts",
+        "vision.evidence.retention_days",
+    ],
+)
+def test_missing_vision_key_is_named(key: str) -> None:
+    with pytest.raises(ConfigError) as info:
+        parse(_without(valid(), key))
+    assert info.value.key == key
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("vision.enabled", "yes"),
+        ("vision.layout", "NO_SUCH_LAYOUT"),
+        ("vision.model.kind", "tflite"),
+        ("vision.model.conf_thr", 1.5),
+        ("vision.model.iou_thr", -0.1),
+        ("vision.camera.width", 0),
+        ("vision.camera.exposure", 0),
+        ("vision.preroll_s", 0),
+        ("vision.lookback_s", -1),
+        ("vision.fast_after_s", -0.1),
+        ("vision.fast_budget_s", 0),
+        ("vision.idle_timeout_s", 0),
+        ("vision.stale_after_s", float("nan")),
+        ("vision.analysis_fps", 0),
+        ("vision.queue_max", 0),
+        ("vision.imu_buffer_s", 0),
+        ("vision.evidence.enabled", "true"),
+        ("vision.evidence.retention_days", -1),
+        ("vision.tracker.min_conf", 1.5),
+        ("vision.tracker.subject.rule", "biggest"),
+        ("vision.analysis.approach_fw", 0),
+        ("vision.analysis.severity.dangerous_regions", ["jaw"]),
+        ("vision.analysis.repetition_band_hz", [5.0, 0.2]),
+    ],
+)
+def test_invalid_vision_value_is_named(key: str, value: object) -> None:
+    with pytest.raises(ConfigError) as info:
+        parse(_with(valid(), key, value))
+    assert info.value.key == key
+
+
+def test_vision_fast_budget_must_fit_the_dispatch_deadline() -> None:
+    with pytest.raises(ConfigError) as info:
+        parse(_with(valid(), "vision.fast_budget_s", 1.0))
+    assert info.value.key == "vision.fast_budget_s"
+
+
+def test_unknown_vision_key_is_named() -> None:
+    with pytest.raises(ConfigError) as info:
+        parse(_with(valid(), "vision.analysis_stride", 2))
+    assert info.value.key == "vision.analysis_stride"

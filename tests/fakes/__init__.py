@@ -14,7 +14,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from cpsa.domain.model import ActuatorKind, DecisionRecord, Detection, Tag, Verdict
-from cpsa.ports import SampleCallback
+from cpsa.ports import RgbdFrame, SampleCallback
 
 EPOCH = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -164,3 +164,32 @@ class RecordingGui:
         self.stopped = True
         if self.journal is not None:
             self.journal.append("gui.stop")
+
+
+class FakeFrameSource:
+    """Delivers scripted ``RgbdFrame`` objects during ``start`` and records the callback."""
+
+    def __init__(self, frames: Iterable[RgbdFrame] = (), journal: list[str] | None = None) -> None:
+        self.frames = list(frames)
+        self.on_frame: Callable[[RgbdFrame], None] | None = None
+        self.started = False
+        self.stopped = False
+        self.journal = journal
+
+    def start(self, on_frame: Callable[[RgbdFrame], None]) -> None:
+        self.started = True
+        self.on_frame = on_frame
+        if self.journal is not None:
+            self.journal.append("camera.start")
+        for frame in self.frames:
+            on_frame(frame)
+
+    def emit(self, frame: RgbdFrame) -> None:
+        if self.on_frame is None:
+            raise RuntimeError("FakeFrameSource is not started")
+        self.on_frame(frame)
+
+    def stop(self) -> None:
+        self.stopped = True
+        if self.journal is not None:
+            self.journal.append("camera.stop")

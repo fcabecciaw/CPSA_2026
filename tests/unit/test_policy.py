@@ -1,7 +1,7 @@
 import pytest
 
-from cpsa.domain.model import Actuation, Tag
-from cpsa.domain.policy import actuations_for
+from cpsa.domain.model import Actuation, Tag, Verdict, VisionAssessment
+from cpsa.domain.policy import actuations_for, effective_severity
 
 IDS = ["meta_AA:BB", "speaker_D4:8C", "led_192.168.1.5"]
 
@@ -35,3 +35,39 @@ def test_returned_params_are_independent_copies() -> None:
     first = actuations_for(Tag.DANGEROUS, ["meta_X"])[0]
     first.params["duty"] = 0  # type: ignore[index]
     assert actuations_for(Tag.DANGEROUS, ["meta_X"])[0].params["duty"] == 100
+
+
+@pytest.mark.parametrize(
+    ("imu_tag", "vision_severity", "expected"),
+    [
+        (Tag.DANGEROUS, Tag.NON_DANGEROUS, Tag.NON_DANGEROUS),
+        (Tag.NON_DANGEROUS, Tag.DANGEROUS, Tag.DANGEROUS),
+        (Tag.NON_DANGEROUS, Tag.NON_DANGEROUS, Tag.NON_DANGEROUS),
+        (Tag.DANGEROUS, Tag.DANGEROUS, Tag.DANGEROUS),
+        (Tag.DANGEROUS, None, Tag.DANGEROUS),
+        (Tag.NON_DANGEROUS, Tag.NON_STEREOTIPY, Tag.NON_DANGEROUS),
+    ],
+    ids=[
+        "downgrade",
+        "upgrade",
+        "mild-both",
+        "strong-both",
+        "no-vision-grade",
+        "not-a-severity",
+    ],
+)
+def test_confirmed_assessment_severity_overrides_the_imu_tag(
+    imu_tag: Tag, vision_severity: Tag | None, expected: Tag
+) -> None:
+    assessment = VisionAssessment(Verdict.CONFIRMED, vision_severity)
+    assert effective_severity(imu_tag, assessment) is expected
+
+
+@pytest.mark.parametrize("verdict", [Verdict.UNDECIDED, Verdict.REJECTED])
+def test_non_confirmed_assessment_keeps_the_imu_tag(verdict: Verdict) -> None:
+    assessment = VisionAssessment(verdict, Tag.DANGEROUS)
+    assert effective_severity(Tag.NON_DANGEROUS, assessment) is Tag.NON_DANGEROUS
+
+
+def test_missing_assessment_keeps_the_imu_tag() -> None:
+    assert effective_severity(Tag.DANGEROUS, None) is Tag.DANGEROUS

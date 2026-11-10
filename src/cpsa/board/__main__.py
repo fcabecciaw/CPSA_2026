@@ -1,8 +1,9 @@
 """``cpsa-board --config PATH``: run the pipeline on the board until SIGINT/SIGTERM.
 
 Exit codes: 0 after an orderly stop, 1 on an unexpected error, 2 when the
-configuration is invalid, the ``board`` extra is not installed, a BlueCoin is
-missing, or the native libraries cannot be loaded.
+configuration is invalid, the ``board`` or ``vision`` extra is not installed, a
+pose model is missing, a BlueCoin is missing, or the native libraries cannot be
+loaded.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from cpsa.adapters.native.classifier import (
     NativeLibraryError,
 )
 from cpsa.adapters.verifier_stub import StubVerifier
-from cpsa.application.config import BlueCoinsConfig, Config, ConfigError, load
+from cpsa.application.config import BlueCoinsConfig, Config, ConfigError, VisionConfig, load
 from cpsa.application.runtime import build_runtime
 from cpsa.ports import (
     Actuator,
@@ -35,15 +36,21 @@ from cpsa.ports import (
     EventSink,
     FeatureExtractor,
     Gui,
+    PoseEstimator,
     SensorSource,
     Verifier,
 )
+from cpsa.vision.types import KeypointLayout
 
 logger = logging.getLogger("cpsa.board")
 
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_STARTUP = 2
+
+
+class VisionStartupError(RuntimeError):
+    """The vision dependencies or pose model cannot be built from the configuration."""
 
 
 @dataclass(frozen=True)
@@ -64,20 +71,81 @@ def _load_native() -> tuple[FeatureExtractor, Classifier]:
     return NativeFeatureExtractor(), NativeClassifier()
 
 
+def _build_pose_estimator(settings: VisionConfig, layout: KeypointLayout) -> PoseEstimator:
+    """Select the DPU or ONNX pose adapter from ``vision.model.kind``."""
+    model = settings.model
+    if model.kind == "onnx":
+        from cpsa.adapters.pose.onnx import OnnxPoseEstimator
+
+        return OnnxPoseEstimator(
+            model.path,
+            layout,
+            (model.input_height, model.input_width),
+            conf_thr=model.conf_thr,
+            iou_thr=model.iou_thr,
+        )
+    from cpsa.adapters.pose.dpu import DpuPoseEstimator
+
+    return DpuPoseEstimator(model.path, layout, conf_thr=model.conf_thr, iou_thr=model.iou_thr)
+
+
+def _build_verifier(config: Config, clock: Clock) -> Verifier:
+    """Return the vision verifier when enabled, else the stub.
+
+    Imports stay local so the runner remains importable without the camera,
+    OpenCV and model-runtime dependencies of the vision pipeline.
+    """
+    if not config.vision.enabled:
+        return StubVerifier()
+
+    from cpsa.adapters.camera.uvc import UvcVideoSource
+    from cpsa.adapters.evidence import FileEvidenceSink
+    from cpsa.application.vision_verifier import VisionVerifier
+    from cpsa.vision.layouts import get_layout
+
+    settings = config.vision
+    layout = get_layout(settings.layout)
+    camera = settings.camera
+    evidence = (
+        FileEvidenceSink(settings.evidence.base_path, settings.evidence.retention_days, layout)
+        if settings.evidence.enabled
+        else None
+    )
+    try:
+        return VisionVerifier(
+            UvcVideoSource(
+                camera.device,
+                width=camera.width,
+                height=camera.height,
+                fps=camera.fps,
+                exposure=camera.exposure,
+            ),
+            _build_pose_estimator(settings, layout),
+            evidence,
+            settings,
+            clock,
+            layout,
+            log_dir=config.log.base_path,
+        )
+    except (RuntimeError, FileNotFoundError, ValueError) as exc:
+        raise VisionStartupError(str(exc)) from exc
+
+
 def board_adapters(config: Config) -> BoardAdapters:
     """Construct the real adapters. The single place where the verifier and GUI are chosen."""
     # Imported here so the runner stays importable (and testable) without the
     # board-only BLE libraries.
     from cpsa.adapters.bluecoin.source import BlueCoinSource
 
+    clock = SystemClock()
     return BoardAdapters(
         source=BlueCoinSource(config.bluecoins.left, config.bluecoins.right),
         load_classifier=_load_native,
         start_actuators=lambda: start_actuators(config.actuators),
-        verifier=StubVerifier(),
+        verifier=_build_verifier(config, clock),
         gui=NullGui(),
         sink=JsonlEventSink(config.log.base_path),
-        clock=SystemClock(),
+        clock=clock,
     )
 
 
@@ -179,6 +247,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_logging(config.log.base_path, config.log.level)
     try:
         adapters = board_adapters(config)
+    except VisionStartupError as exc:
+        logger.error("Vision pipeline cannot start: %s", exc)
+        return EXIT_STARTUP
     except ImportError as exc:
         logger.error("Board dependencies are missing (install the 'board' extra): %s", exc)
         return EXIT_STARTUP
