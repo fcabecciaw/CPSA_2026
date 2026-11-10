@@ -19,6 +19,7 @@ NOTEBOOKS = (
     "03_train_fp32",
     "04_variant_study",
     "05_qat",
+    "07_hand_pose",
 )
 
 

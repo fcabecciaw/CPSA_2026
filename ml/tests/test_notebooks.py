@@ -14,6 +14,7 @@ NOTEBOOKS = (
     "03_train_fp32",
     "04_variant_study",
     "05_qat",
+    "07_hand_pose",
 )
 
 #: Kaggle datasets attached to each notebook.
@@ -33,10 +34,12 @@ EXPECTED_DATASETS = {
         "fabiocabeccia/cpsa-checkpoints",
     ],
     "05_qat": ["fabiocabeccia/cpsa-halfbust", "fabiocabeccia/cpsa-checkpoints"],
+    # Notebook 07 downloads HaGRID and hand-keypoints itself and needs no input.
+    "07_hand_pose": [],
 }
 
 #: Notebooks that train on a GPU (notebook 01 only builds the dataset).
-GPU_NOTEBOOKS = ("03_train_fp32", "04_variant_study", "05_qat")
+GPU_NOTEBOOKS = ("03_train_fp32", "04_variant_study", "05_qat", "07_hand_pose")
 
 
 def _load(path: Path) -> dict:
@@ -88,6 +91,7 @@ def test_first_code_cell_pins_and_installs_cpsa_ml() -> None:
         ("03_train_fp32", "train"),
         ("04_variant_study", "train_study"),
         ("05_qat", "quantize_model"),
+        ("07_hand_pose", "build_hand_dataset"),
     ],
 )
 def test_notebooks_are_thin_wrappers(stem: str, entry_point: str) -> None:
@@ -181,6 +185,20 @@ def test_notebook_04_defaults_to_the_urgent_run() -> None:
     assert "albumentations==" in source  # motion blur is installed best-effort
     assert "min_height=MIN_HEIGHT" in source
     assert "extra_data=EXTRA_DATA" in source
+
+
+def test_notebook_07_builds_and_trains_the_hand_model() -> None:
+    source = _source("07_hand_pose")
+    assert "from cpsa_ml.datasets.hands import" in source
+    assert "HagridSource" in source
+    assert "UltralyticsHandSource" in source
+    assert "USE_ULTRALYTICS" in source  # the CC BY-NC-SA source stays optional
+    assert 'schema="hand21"' in source
+    assert 'ACTIVATION = "lrelu"' in source
+    assert 'config_path("yolov8n-hand-lrelu.yaml")' in source
+    assert "imgsz=IMGSZ" in source and "IMGSZ = 192" in source
+    assert "CC BY-NC-SA" in source  # the non-commercial warning stays visible
+    assert "cpsa_ml.pseudolabel" in source  # recorded frames can extend the set
 
 
 def test_notebook_03_uses_the_curated_list_in_the_mixed_dataset() -> None:

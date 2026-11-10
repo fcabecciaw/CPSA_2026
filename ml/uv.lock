@@ -544,6 +544,11 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
+pseudolabel = [
+    { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "onnxruntime", version = "1.31.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "rtmlib" },
+]
 qat = [
     { name = "brevitas" },
 ]
@@ -562,17 +567,19 @@ requires-dist = [
     { name = "gdown", marker = "extra == 'sources'", specifier = ">=5" },
     { name = "numpy", specifier = ">=1.23" },
     { name = "onnx", specifier = ">=1.16,<2" },
+    { name = "onnxruntime", marker = "extra == 'pseudolabel'", specifier = ">=1.17" },
     { name = "onnxruntime", marker = "extra == 'teacher'", specifier = ">=1.17" },
     { name = "pillow", specifier = ">=10" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pyyaml", specifier = ">=6" },
+    { name = "rtmlib", marker = "extra == 'pseudolabel'", specifier = "==0.0.16" },
     { name = "rtmlib", marker = "extra == 'teacher'", specifier = "==0.0.16" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "torch", specifier = ">=2.2", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torchvision", specifier = ">=0.17", index = "https://download.pytorch.org/whl/cpu" },
     { name = "ultralytics", specifier = "==8.4.203" },
 ]
-provides-extras = ["qat", "teacher", "sources", "dev"]
+provides-extras = ["qat", "teacher", "pseudolabel", "sources", "dev"]
 
 [[package]]
 name = "cycler"
