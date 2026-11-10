@@ -9,12 +9,13 @@ and returns the local root. A completed copy is reused (marker file).
 
 from __future__ import annotations
 
+import os
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-__all__ = ["stage_dataset"]
+__all__ = ["find_inputs", "stage_dataset"]
 
 MARKER = ".staged_complete"
 
@@ -61,3 +62,37 @@ def stage_dataset(source: Path | str, target: Path | str, workers: int = 32) -> 
                 )
     (target / MARKER).write_text(f"{len(pairs)} files\n", encoding="utf-8")
     return target
+
+
+#: Folders never searched by :func:`find_inputs`: they hold the per-image files.
+SKIP_DIRS = frozenset({"images", "train2017", "val2017", "test2017"})
+
+
+def find_inputs(root: Path | str, name: str, max_depth: int = 8) -> list[Path]:
+    """Return the sorted paths named ``name`` under ``root``, searching shallowly.
+
+    ``Path.rglob`` walks every file of every attached dataset, which takes
+    minutes on Kaggle's network mount. Dataset markers (``data.yaml``,
+    weights, ``labels/train``) sit a few folders deep, so this search stops
+    at ``max_depth`` and never enters per-image folders (``SKIP_DIRS``) or
+    the inside of a ``labels`` folder.
+    """
+
+    root = Path(root)
+    found: list[Path] = []
+    frontier = [(root, 0)]
+    while frontier:
+        folder, depth = frontier.pop()
+        try:
+            entries = list(os.scandir(folder))
+        except OSError:
+            continue
+        for entry in entries:
+            path = Path(entry.path)
+            if entry.name == name:
+                found.append(path)
+            if entry.is_dir() and depth + 1 < max_depth:
+                if entry.name in SKIP_DIRS or folder.name == "labels":
+                    continue
+                frontier.append((path, depth + 1))
+    return sorted(found)
