@@ -118,7 +118,8 @@ def test_notebook_02_builds_the_full_frame_set_with_the_module() -> None:
 def test_training_notebooks_use_the_full_frame_dataset(stem: str) -> None:
     notebook = _load(NOTEBOOK_DIR / f"{stem}.ipynb")
     source = "".join("".join(cell["source"]) for cell in notebook["cells"])
-    assert 'FULL_DATA = Path("/kaggle/input/cpsa-fullframe")' in source
+    assert '"cpsa-fullframe" in str(p)' in source  # located by content under /kaggle/input
+    assert '"cpsa-halfbust" in str(p)' in source
     assert "full_data=FULL_DATA" in source or "build_mixed_data_yaml" in source
 
 
