@@ -1,9 +1,11 @@
 """YOLOv8-pose model definitions for the CPSA keypoint schemas.
 
-The shipped configs are plain Ultralytics YAML files.  The Hard-Swish variants
-set the top-level ``activation: nn.Hardswish()`` key that Ultralytics applies to
-every ``Conv`` block.  There are no attention blocks, so the exported backbone
-and neck stay inside the DPUCZDX8G operator set.
+The shipped configs are plain Ultralytics YAML files.  The activation variants
+set the top-level ``activation`` key that Ultralytics applies to every ``Conv``
+block: Hard-Swish (``hswish``), ``relu`` and ``lrelu`` are the DPU-friendly
+variants of the activation study, while SiLU (``silu``) is the negative control.
+There are no attention blocks, so the exported backbone and neck stay inside the
+DPUCZDX8G operator set.
 """
 
 from __future__ import annotations
@@ -28,7 +30,7 @@ __all__ = [
 
 CONFIG_DIR = Path(__file__).resolve().parents[2] / "configs"
 VARIANTS = ("n", "s")
-ACTIVATIONS = ("hswish", "silu")
+ACTIVATIONS = ("hswish", "silu", "relu", "lrelu")
 
 
 def model_yaml_name(variant: str = "n", activation: str = "hswish") -> str:
@@ -82,6 +84,8 @@ def _model_config(
     config["scale"] = variant
     if activation.lower() in {"hswish", "hardswish"} and "activation" not in config:
         config["activation"] = "nn.Hardswish()"
+    if activation.lower() in {"relu", "lrelu"} and "activation" not in config:
+        raise ValueError(f"model config {path} must define the activation for {activation!r}")
     return config
 
 

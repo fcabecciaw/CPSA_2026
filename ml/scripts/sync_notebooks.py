@@ -13,7 +13,7 @@ import shutil
 from pathlib import Path
 
 NOTEBOOK_DIR = Path(__file__).resolve().parents[1] / "notebooks"
-NOTEBOOKS = ("01_build_halfbust", "03_train_fp32", "05_qat")
+NOTEBOOKS = ("01_build_halfbust", "03_train_fp32", "04_variant_study", "05_qat")
 
 
 def main() -> int:

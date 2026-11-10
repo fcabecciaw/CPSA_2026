@@ -137,7 +137,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--schema", default="halfbust62")
     parser.add_argument("--variant", choices=("n", "s"), default="n")
-    parser.add_argument("--activation", choices=("hswish", "silu"), default="hswish")
+    parser.add_argument(
+        "--activation",
+        choices=("hswish", "silu", "relu", "lrelu"),
+        default="hswish",
+        help="Conv activation: DPU study variants (hswish, relu, lrelu) or the SiLU control",
+    )
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch", type=int, default=32)
     parser.add_argument("--imgsz", type=int, default=640)
