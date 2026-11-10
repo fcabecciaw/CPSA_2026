@@ -11,6 +11,7 @@
   "enable_internet": true,
   "dataset_sources": [
     "fabiocabeccia/cpsa-halfbust",
+    "fabiocabeccia/cpsa-fullframe",
     "fabiocabeccia/cpsa-checkpoints"
   ],
   "competition_sources": [],

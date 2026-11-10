@@ -33,6 +33,16 @@ Example::
         --calib-count 64 --test-count 64 --height 480 --width 640 \\
         --out build/variant_study/hswish_480x640/quant --threads 1
 
+To dump the half-body and full-frame val splits into one file, repeat
+``--test-images`` with a group name (``--test-count`` applies per directory);
+``eval_quant.py`` then scores each group side by side::
+
+    ... --calib-images train=/data/halfbust62/images/train \\
+        --calib-images train_full=/data/fullframe62/images/train \\
+        --test-images half=/data/halfbust62/images/val \\
+        --test-images full=/data/fullframe62/images/val \\
+        --calib-count 64 --test-count 64 ...
+
 Python 3.8 (the container interpreter); numpy and PIL only at frame level,
 torch/PIL/NNDCT are imported inside the functions that need them so the
 letterbox can be tested on the host without the Vitis AI stack.
@@ -44,6 +54,7 @@ import argparse
 import json
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -163,6 +174,36 @@ def resolve_images(root: Path, split: str | None, limit: int) -> list[Path]:
     if not images:
         raise SystemExit(f"no images found in {directory}")
     return images[:limit]
+
+
+def parse_image_source(spec: str) -> tuple[str, Path]:
+    """Split ``NAME=DIR`` into ``(name, DIR)``; a plain ``DIR`` uses its folder name.
+
+    The name groups the dumped frames so ``tools/vitis/eval_quant.py`` can score
+    the half-body and full-frame val splits side by side from one dump.  The
+    two sets can contain the same COCO image stems, so membership cannot be
+    recovered from the file names alone.
+    """
+
+    text = str(spec)
+    name, separator, directory = text.partition("=")
+    if separator and name and directory:
+        return name, Path(directory)
+    path = Path(text)
+    return path.name, path
+
+
+def resolve_grouped_images(specs: Sequence[str], limit: int) -> tuple[list[Path], list[str]]:
+    """Resolve repeatable ``NAME=DIR`` sources; ``limit`` applies to each source."""
+
+    images: list[Path] = []
+    groups: list[str] = []
+    for spec in specs:
+        name, directory = parse_image_source(spec)
+        selected = resolve_images(directory, None, limit)
+        images.extend(selected)
+        groups.extend([name] * len(selected))
+    return images, groups
 
 
 def load_image(path: Path) -> np.ndarray:
@@ -341,8 +382,23 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--data", type=Path, default=None, help="half-bust dataset root")
     parser.add_argument("--calib-split", default="train")
     parser.add_argument("--test-split", default="val")
-    parser.add_argument("--calib-images", type=Path, default=None)
-    parser.add_argument("--test-images", type=Path, default=None)
+    parser.add_argument(
+        "--calib-images",
+        action="append",
+        default=None,
+        metavar="[NAME=]DIR",
+        help="calibration images; repeatable, --calib-count applies to each directory",
+    )
+    parser.add_argument(
+        "--test-images",
+        action="append",
+        default=None,
+        metavar="[NAME=]DIR",
+        help=(
+            "test images; repeatable, --test-count applies to each directory. NAME groups "
+            "the dumped frames for side-by-side evaluation (for example half=/path/val)"
+        ),
+    )
     parser.add_argument(
         "--calib-frames",
         type=Path,
@@ -405,30 +461,30 @@ def main(argv: list[str] | None = None) -> int:
         calib_meta: list[dict[str, Any]] = []
     else:
         if args.calib_images is not None:
-            calib_root = args.calib_images
-            calib_split = None
+            calib_images, _ = resolve_grouped_images(args.calib_images, args.calib_count)
         elif args.data is not None:
-            calib_root = args.data / "images"
-            calib_split = args.calib_split
+            calib_images = resolve_images(args.data / "images", args.calib_split, args.calib_count)
         else:
             raise SystemExit("pass --calib-images, --calib-frames or --data")
-        calib_images = resolve_images(calib_root, calib_split, args.calib_count)
         calib_frames, calib_meta = preprocess_frames(calib_images, input_size)
     if not calib_frames:
         raise SystemExit("no calibration frames")
 
     if args.test_images is not None:
-        test_root = args.test_images
         test_split = None
+        test_images, test_groups = resolve_grouped_images(args.test_images, args.test_count)
     elif args.data is not None:
         test_root = args.data / "images"
         test_split = args.test_split
+        test_images = resolve_images(test_root, test_split, args.test_count)
+        test_groups = [args.test_split] * len(test_images)
     else:
         raise SystemExit("pass --test-images or --data for the test images")
-    test_images = resolve_images(test_root, test_split, args.test_count)
     test_frames, test_meta = preprocess_frames(test_images, input_size)
     if not test_frames:
         raise SystemExit("no test frames")
+    for entry, group in zip(test_meta, test_groups):  # noqa: B905 - Python 3.8 container
+        entry["group"] = group
 
     height, width = input_size
     example = torch.zeros((1, 3, height, width), dtype=torch.float32)
@@ -510,6 +566,7 @@ def main(argv: list[str] | None = None) -> int:
     np.savez_compressed(
         args.out / "quant_outputs.npz",
         names=np.asarray([entry["name"] for entry in test_meta]),
+        groups=np.asarray([entry["group"] for entry in test_meta]),
         image_widths=np.asarray([entry["width"] for entry in test_meta], dtype=np.int32),
         image_heights=np.asarray([entry["height"] for entry in test_meta], dtype=np.int32),
         scales=np.asarray([entry["scale"] for entry in test_meta], dtype=np.float64),
@@ -539,10 +596,15 @@ def main(argv: list[str] | None = None) -> int:
         "artifacts": str(args.artifacts) if args.artifacts is not None else None,
         "checkpoint": checkpoint_info,
         "dataset": str(args.data) if args.data is not None else None,
-        "calib_split": args.calib_split,
-        "test_split": args.test_split,
+        "calib_split": None if args.calib_images is not None else args.calib_split,
+        "test_split": None if args.test_images is not None else args.test_split,
         "calib_images": len(calib_frames),
         "test_images": len(test_frames),
+        "test_groups": sorted({entry["group"] for entry in test_meta}),
+        "test_frames_per_group": {
+            group: sum(1 for entry in test_meta if entry["group"] == group)
+            for group in sorted({entry["group"] for entry in test_meta})
+        },
         "calib_meta": calib_meta[:1],
         "torch": torch.__version__,
         "nndct": __import__("pytorch_nndct").__version__,

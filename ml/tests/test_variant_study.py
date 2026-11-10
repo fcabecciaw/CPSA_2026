@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+import yaml
 
 from cpsa_ml import variant_study
 from cpsa_ml.models import load_yolo, model_yaml_path
+from cpsa_ml.schema import HALFBUST_62
 from cpsa_ml.variant_study import (
     AUGMENTATIONS,
     DEFAULT_VARIANTS,
@@ -18,6 +21,7 @@ from cpsa_ml.variant_study import (
     StudyConfig,
     VariantEntry,
     build_metrics_payload,
+    build_mixed_data_yaml,
     publish_artifacts,
     train_study,
     train_variant,
@@ -93,9 +97,30 @@ def test_default_variants_use_packaged_configs() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _dataset(root: Path, *, kpt_shape: tuple[int, int] = (62, 3)) -> Path:
+    """Create the image skeleton and ``data.yaml`` of a built dataset."""
+
+    for split in ("train", "val"):
+        (root / "images" / split).mkdir(parents=True, exist_ok=True)
+        (root / "labels" / split).mkdir(parents=True, exist_ok=True)
+    (root / "data.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "train": "images/train",
+                "val": "images/val",
+                "kpt_shape": list(kpt_shape),
+                "flip_idx": list(HALFBUST_62.flip_idx)[: kpt_shape[0]],
+                "names": {0: "person"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return root
+
+
 def _config(tmp_path: Path, **overrides: object) -> StudyConfig:
     values: dict[str, object] = {
-        "data": tmp_path / "data.yaml",
+        "data": _dataset(tmp_path / "halfbust") / "data.yaml",
         "coco_weights": tmp_path / "yolov8n-pose.pt",
         "project": tmp_path / "runs",
         "publish": tmp_path / "publish",
@@ -115,6 +140,8 @@ def test_study_config_defaults(tmp_path: Path) -> None:
     assert config.batch == 32
     assert config.augmentations == dict(AUGMENTATIONS)
     assert config.resume == {}
+    assert config.full_data is None
+    assert config.mixed_data == config.publish / "data_mixed.yaml"
 
     # Every config owns its augmentation copy.
     config.augmentations["mosaic"] = 0.0
@@ -160,29 +187,128 @@ def test_study_config_rejects_invalid_values(tmp_path: Path, overrides: dict, me
 
 
 # ---------------------------------------------------------------------------
+# Mixed dataset
+# ---------------------------------------------------------------------------
+
+
+def test_mixed_data_yaml_concatenates_both_train_dirs(tmp_path: Path) -> None:
+    half = _dataset(tmp_path / "halfbust")
+    full = _dataset(tmp_path / "fullframe")
+    target = tmp_path / "work" / "data_mixed.yaml"
+
+    payload = build_mixed_data_yaml(half / "data.yaml", full, target)
+
+    assert payload["train"] == [str(half / "images" / "train"), str(full / "images" / "train")]
+    assert payload["val"] == str(half / "images" / "val")
+    assert payload["val_full"] == str(full / "images" / "val")
+    assert payload["kpt_shape"] == [62, 3]
+    assert payload["flip_idx"] == list(HALFBUST_62.flip_idx)
+    assert payload["names"] == {0: "person"}
+    assert yaml.safe_load(target.read_text()) == payload
+
+
+def test_mixed_data_yaml_falls_back_to_half_body_only(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    half = _dataset(tmp_path / "halfbust")
+    target = tmp_path / "data_mixed.yaml"
+
+    with caplog.at_level(logging.WARNING):
+        payload = build_mixed_data_yaml(half, None, target)
+
+    assert payload["train"] == [str(half / "images" / "train")]
+    assert "val_full" not in payload
+    assert "FULL-FRAME DATASET MISSING" in caplog.text
+    assert "FULL-FRAME DATASET MISSING" in capsys.readouterr().out
+
+    missing = build_mixed_data_yaml(half, tmp_path / "absent", target)
+    assert "val_full" not in missing
+
+
+def test_mixed_data_yaml_rejects_a_schema_mismatch(tmp_path: Path) -> None:
+    half = _dataset(tmp_path / "halfbust")
+    full = _dataset(tmp_path / "fullframe", kpt_shape=(17, 3))
+
+    with pytest.raises(ValueError, match="does not match"):
+        build_mixed_data_yaml(half, full, tmp_path / "data_mixed.yaml")
+
+
+def test_mixed_data_yaml_requires_the_half_body_splits(tmp_path: Path) -> None:
+    half = tmp_path / "halfbust"
+    (half / "images" / "train").mkdir(parents=True)
+
+    with pytest.raises(FileNotFoundError, match="split directory"):
+        build_mixed_data_yaml(half, None, tmp_path / "data_mixed.yaml")
+
+
+def test_dataset_root_accepts_a_yaml_or_a_directory(tmp_path: Path) -> None:
+    root = _dataset(tmp_path / "dataset")
+    assert variant_study.dataset_root(root) == root
+    assert variant_study.dataset_root(root / "data.yaml") == root
+
+
+# ---------------------------------------------------------------------------
 # COCO initialisation
 # ---------------------------------------------------------------------------
 
 
-class _TinyHead(torch.nn.Module):
-    """Stand-in for the keypoint head, with the attributes the report reads."""
+class _TinyPoseHead(torch.nn.Module):
+    """Stand-in for the Pose head: ``cv2``/``cv3``/``dfl``/``cv4`` branches."""
 
-    def __init__(self, n_kpt: int, nc: int = 1) -> None:
+    def __init__(
+        self,
+        n_kpt: int,
+        nc: int = 1,
+        *,
+        width: int = 2,
+        init: float | None = None,
+        branches: tuple[str, ...] = ("cv2", "cv3", "dfl", "cv4"),
+    ) -> None:
         super().__init__()
         self.kpt_shape = (n_kpt, 3)
         self.nc = nc
-        self.weight = torch.nn.Parameter(torch.full((n_kpt, 2), float(n_kpt)))
-        self.bias = torch.nn.Parameter(torch.full((n_kpt,), float(n_kpt)))
+        shapes = {
+            "cv2": (4, width),
+            "cv3": (nc, width),
+            "dfl": (1, 1),
+            "cv4": (3 * n_kpt, width),
+        }
+        for branch in branches:
+            rows, columns = shapes[branch]
+            layer = torch.nn.Linear(columns, rows, bias=False)
+            if init is not None:
+                torch.nn.init.constant_(layer.weight, init)
+            setattr(self, branch, torch.nn.ModuleList([layer]))
+
+
+def _head_tensor_names(model: torch.nn.Module, head: str = "model.2.") -> dict[str, torch.Tensor]:
+    return {
+        name: tensor.detach().clone()
+        for name, tensor in model.state_dict().items()
+        if name.startswith(head)
+    }
 
 
 class _TinyModel(torch.nn.Module):
-    def __init__(self, n_kpt: int, *, width: int = 2, body_layers: int = 2) -> None:
+    def __init__(
+        self,
+        n_kpt: int,
+        *,
+        width: int = 2,
+        body_layers: int = 2,
+        nc: int = 1,
+        init: float | None = None,
+        branches: tuple[str, ...] = ("cv2", "cv3", "dfl", "cv4"),
+    ) -> None:
         super().__init__()
         self.yaml_file = f"tiny-{n_kpt}.yaml"
         layers: list[torch.nn.Module] = []
         for _ in range(body_layers):
-            layers.append(torch.nn.Linear(width, width, bias=False))
-        layers.append(_TinyHead(n_kpt))
+            layer = torch.nn.Linear(width, width, bias=False)
+            if init is not None:
+                torch.nn.init.constant_(layer.weight, init)
+            layers.append(layer)
+        layers.append(_TinyPoseHead(n_kpt, nc, width=width, init=init, branches=branches))
         self.model = torch.nn.Sequential(*layers)
 
 
@@ -190,19 +316,12 @@ def _fake_teacher(monkeypatch: pytest.MonkeyPatch, teacher: object) -> None:
     monkeypatch.setattr("ultralytics.YOLO", lambda *args, **kwargs: teacher, raising=True)
 
 
-def test_transfer_coco_weights_copies_matching_tensors_only(
+def test_transfer_coco_weights_copies_the_matching_pose_head_branches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    student_model = _TinyModel(62)
-    teacher_model = _TinyModel(17)
-    head_before = {
-        name: tensor.detach().clone()
-        for name, tensor in student_model.state_dict().items()
-        if name.startswith("model.2.")
-    }
-    teacher_state = {
-        name: tensor.detach().clone() for name, tensor in teacher_model.state_dict().items()
-    }
+    student_model = _TinyModel(62, init=62.0)
+    teacher_model = _TinyModel(17, init=17.0)
+    head_before = _head_tensor_names(student_model)
     _fake_teacher(monkeypatch, SimpleNamespace(model=teacher_model))
 
     report = transfer_coco_weights(
@@ -210,19 +329,31 @@ def test_transfer_coco_weights_copies_matching_tensors_only(
     )
 
     assert report["head_prefix"] == "model.2."
-    assert report["transferred"] == 2
-    assert report["reinitialised"] == 2
+    assert report["transferred"] == 5
+    assert report["backbone_transferred"] == 2
+    assert report["head_transferred"] == 3
+    assert report["reinitialised"] == 1
     assert report["mismatched"] == []
     assert report["teacher_kpt_shape"] == [17, 3]
     assert report["student_kpt_shape"] == [62, 3]
     assert report["teacher_nc"] == 1
     assert report["student_nc"] == 1
     assert report["student_parameters"] == sum(p.numel() for p in student_model.parameters())
+
+    # Every head branch whose shape does not depend on the keypoint count was
+    # copied from COCO; only cv4 keeps its fresh initialisation.
+    assert sorted(report["head_transferred_names"]) == [
+        "model.2.cv2.0.weight",
+        "model.2.cv3.0.weight",
+        "model.2.dfl.0.weight",
+    ]
+    assert report["reinitialised_names"] == ["model.2.cv4.0.weight"]
     student_state = student_model.state_dict()
     for name in ("model.0.weight", "model.1.weight"):
-        assert torch.equal(student_state[name], teacher_state[name])
-    for name, tensor in head_before.items():
-        assert torch.equal(student_state[name], tensor)
+        assert torch.equal(student_state[name], torch.full_like(student_state[name], 17.0))
+    for name in report["head_transferred_names"]:
+        assert torch.equal(student_state[name], torch.full_like(student_state[name], 17.0)), name
+    assert torch.equal(student_state["model.2.cv4.0.weight"], head_before["model.2.cv4.0.weight"])
 
 
 def test_transfer_coco_weights_rejects_shape_mismatches(
@@ -245,13 +376,24 @@ def test_transfer_coco_weights_rejects_a_different_head_index(
         transfer_coco_weights(tmp_path / "yolov8n-pose.pt", student)
 
 
-def test_transfer_coco_weights_requires_something_to_copy(
+def test_transfer_coco_weights_reinitialises_only_the_keypoint_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    student = SimpleNamespace(model=_TinyModel(62, body_layers=0))
+    # A head-only student whose only branch is cv4: nothing can be copied.
+    student = SimpleNamespace(model=_TinyModel(62, body_layers=0, branches=("cv4",)))
     _fake_teacher(monkeypatch, SimpleNamespace(model=_TinyModel(17, body_layers=0)))
 
     with pytest.raises(RuntimeError, match="no tensors transferred"):
+        transfer_coco_weights(tmp_path / "yolov8n-pose.pt", student)
+
+
+def test_transfer_coco_weights_rejects_a_mismatching_non_keypoint_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    student = SimpleNamespace(model=_TinyModel(62, nc=2))
+    _fake_teacher(monkeypatch, SimpleNamespace(model=_TinyModel(17, nc=1)))
+
+    with pytest.raises(RuntimeError, match="cv4 may"):
         transfer_coco_weights(tmp_path / "yolov8n-pose.pt", student)
 
 
@@ -273,8 +415,11 @@ def test_transfer_coco_weights_against_a_real_coco_pose_model(tmp_path: Path) ->
     assert report["student_kpt_shape"] == [62, 3]
     assert report["mismatched"] == []
     assert report["transferred"] > 0
+    assert report["head_transferred"] > 0
     assert report["reinitialised"] > 0
-    assert all(name.startswith("model.22.") for name in report["reinitialised_names"])
+    assert all(name.startswith("model.22.cv4.") for name in report["reinitialised_names"])
+    branches = {name.split(".")[2] for name in report["head_transferred_names"]}
+    assert branches == {"cv2", "cv3", "dfl"}
     student_state = student.model.state_dict()
     for name in report["transferred_names"]:
         assert torch.equal(student_state[name], teacher_state[name]), name
@@ -316,6 +461,7 @@ def test_build_metrics_payload_records_the_variant(tmp_path: Path) -> None:
         artifacts={"best.pt": "/out/best.pt"},
         transfer={"transferred": 270},
         results={"metrics/mAP50-95(P)": 0.4},
+        results_full={"metrics/mAP50-95(P)": 0.3},
         speed={"inference": 1.5},
         onnx="/out/deploy.onnx",
         versions={"ultralytics": "8.4.203"},
@@ -333,10 +479,15 @@ def test_build_metrics_payload_records_the_variant(tmp_path: Path) -> None:
     assert payload["epochs"] == 2
     assert payload["batch"] == 1
     assert payload["transfer"] == {"transferred": 270}
-    assert payload["metrics"] == {"metrics/mAP50-95(P)": 0.4}
+    assert payload["metrics"] == {
+        "half": {"metrics/mAP50-95(P)": 0.4},
+        "full": {"metrics/mAP50-95(P)": 0.3},
+    }
     assert payload["speed_ms"] == {"inference": 1.5}
     assert payload["versions"] == {"ultralytics": "8.4.203"}
     assert payload["augmentations"] == dict(AUGMENTATIONS)
+    assert payload["mixed_data"] == str(config.mixed_data)
+    assert payload["full_data"] is None
 
 
 def test_build_metrics_payload_marks_missing_evidence(tmp_path: Path) -> None:
@@ -351,6 +502,14 @@ def test_build_metrics_payload_marks_missing_evidence(tmp_path: Path) -> None:
     assert payload["metrics"] is None
     assert payload["speed_ms"] is None
     assert payload["transfer"] is None
+    half_only = build_metrics_payload(
+        DEFAULT_VARIANTS[0],
+        _config(tmp_path),
+        artifacts={},
+        transfer=None,
+        results={"metrics/mAP50-95(P)": 0.4},
+    )
+    assert half_only["metrics"] == {"half": {"metrics/mAP50-95(P)": 0.4}, "full": None}
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +522,7 @@ class _FakeYOLO:
 
     resume_save_dir: Path | None = None
     created: list[_FakeYOLO] = []
+    val_calls: list[dict] = []
 
     def __init__(self, source: object, task: str | None = None, verbose: bool = False) -> None:
         self.source = source
@@ -388,8 +548,10 @@ class _FakeYOLO:
 
     def val(self, **kwargs: object) -> SimpleNamespace:
         self.val_kwargs = dict(kwargs)
+        type(self).val_calls.append(dict(kwargs))
+        score = 0.42 if kwargs.get("split") == "val" else 0.31
         return SimpleNamespace(
-            results_dict={"metrics/mAP50-95(P)": 0.42},
+            results_dict={"metrics/mAP50-95(P)": score},
             speed={"inference": 1.5},
         )
 
@@ -405,6 +567,7 @@ def fake_runtime(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     train = importlib.import_module("cpsa_ml.train")
 
     _FakeYOLO.created = []
+    _FakeYOLO.val_calls = []
     _FakeYOLO.resume_save_dir = None
     monkeypatch.setattr(ultralytics, "YOLO", _FakeYOLO)
     monkeypatch.setattr(train, "parse_device", lambda device: device)
@@ -430,6 +593,7 @@ def test_train_variant_trains_at_its_size_then_validates_and_exports_at_deploy_s
     tmp_path: Path, fake_runtime: SimpleNamespace
 ) -> None:
     entry = VariantEntry("lrelu", 384, (288, 384))
+    full = _dataset(tmp_path / "fullframe")
     config = _config(
         tmp_path,
         variants=(entry,),
@@ -439,13 +603,15 @@ def test_train_variant_trains_at_its_size_then_validates_and_exports_at_deploy_s
         val_device="cpu",
         workers=0,
         run_prefix="study",
+        full_data=full,
     )
 
     summary = train_variant(entry, config)
 
     built = fake_runtime.yolo.created[0]
     assert built.train_kwargs["imgsz"] == 384
-    assert built.train_kwargs["data"] == str(config.data)
+    assert built.train_kwargs["data"] == str(config.mixed_data)
+    assert config.mixed_data.is_file()
     assert built.train_kwargs["epochs"] == 2
     assert built.train_kwargs["batch"] == 4
     assert built.train_kwargs["device"] == "cpu"
@@ -458,11 +624,16 @@ def test_train_variant_trains_at_its_size_then_validates_and_exports_at_deploy_s
         assert built.train_kwargs[key] == value
 
     validated = fake_runtime.yolo.created[1]
-    assert validated.val_kwargs["imgsz"] == [288, 384]
-    assert validated.val_kwargs["split"] == "val"
-    assert validated.val_kwargs["conf"] == config.val_conf
-    assert validated.val_kwargs["iou"] == config.val_iou
-    assert validated.val_kwargs["device"] == "cpu"
+    primary, full_call = fake_runtime.yolo.val_calls
+    assert validated is not fake_runtime.yolo.created[0]
+    assert primary["imgsz"] == [288, 384]
+    assert primary["split"] == "val"
+    assert primary["data"] == str(config.mixed_data)
+    assert primary["conf"] == config.val_conf
+    assert primary["iou"] == config.val_iou
+    assert primary["device"] == "cpu"
+    assert full_call["split"] == "val_full"
+    assert full_call["data"] == str(config.mixed_data)
 
     assert fake_runtime.export_calls[0]["imgsz"] == (288, 384)
     assert fake_runtime.export_calls[0]["opset"] == 17
@@ -472,7 +643,10 @@ def test_train_variant_trains_at_its_size_then_validates_and_exports_at_deploy_s
     assert payload["variant"] == "lrelu_384"
     assert payload["train_imgsz"] == 384
     assert payload["deploy_size"] == [288, 384]
-    assert payload["metrics"] == {"metrics/mAP50-95(P)": 0.42}
+    assert payload["metrics"] == {
+        "half": {"metrics/mAP50-95(P)": 0.42},
+        "full": {"metrics/mAP50-95(P)": 0.31},
+    }
     assert payload["speed_ms"] == {"inference": 1.5}
     assert payload["onnx"] == str(published / "deploy.onnx")
     assert payload["transfer"]["transferred"] == 3
@@ -515,6 +689,8 @@ def test_train_variant_resumes_from_the_entry_checkpoint(
     assert summary["run_dir"] == str(tmp_path / "resumed-run")
     payload = json.loads((published / "metrics_fp32.json").read_text(encoding="utf-8"))
     assert payload["transfer"] == {"transferred": 270}
+    assert payload["metrics"]["half"] == {"metrics/mAP50-95(P)": 0.42}
+    assert payload["metrics"]["full"] is None
     assert (published / "transfer_report.json").is_file()
     assert summary["artifacts"]["transfer_report.json"] == str(published / "transfer_report.json")
 

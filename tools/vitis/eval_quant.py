@@ -30,6 +30,25 @@ Example::
         --baseline build/variant_study/baseline/quant/metrics_int8.json \\
         --out build/variant_study/hswish_480x640/eval
 
+Half-body and full-frame accuracy side by side
+----------------------------------------------
+One dump can hold both val splits: ``dump_quant_outputs.py`` tags each frame
+with the group of its ``--test-images NAME=DIR`` source (the two datasets share
+COCO image stems, so file names alone cannot tell them apart).  Repeat
+``--eval-split NAME=IMAGES:LABELS`` to score every group separately and write
+``comparison_splits.md``/``comparison_splits.json`` next to the usual reports::
+
+    PYTHONPATH=src python tools/vitis/eval_quant.py \\
+        --dump quant/quant_outputs.npz --weights best.pt \\
+        --eval-split half=/data/halfbust62/images/val:/data/halfbust62/labels/val \\
+        --eval-split full=/data/fullframe62/images/val:/data/fullframe62/labels/val \\
+        --out eval
+
+The first split keeps the plain ``metrics_int8.json``/``comparison.json``
+names, so the variant-study decision rule and its baseline keep working.  The
+``framing.*`` rows show how many people each split really shows as full body,
+using the runtime threshold.
+
 Runs on the host (Python 3.10); torch is imported only for the FP32 path.
 """
 
@@ -94,6 +113,7 @@ class QuantDump:
 
     path: Path
     names: tuple[str, ...]
+    groups: tuple[str, ...]
     image_widths: NDArray[np.int64]
     image_heights: NDArray[np.int64]
     scales: NDArray[np.float64]
@@ -116,6 +136,31 @@ class QuantDump:
 
     def __len__(self) -> int:
         return len(self.names)
+
+    def subset(self, indices: Sequence[int]) -> QuantDump:
+        """A copy holding only ``indices`` (in that order)."""
+
+        order = np.asarray(list(indices), dtype=np.intp)
+        if order.size == 0:
+            raise ValueError("indices must not be empty")
+        return QuantDump(
+            path=self.path,
+            names=tuple(self.names[int(index)] for index in order),
+            groups=tuple(self.groups[int(index)] for index in order),
+            image_widths=self.image_widths[order],
+            image_heights=self.image_heights[order],
+            scales=self.scales[order],
+            pad_x=self.pad_x[order],
+            pad_y=self.pad_y[order],
+            strides=self.strides,
+            fix_points=self.fix_points,
+            input_size=self.input_size,
+            n_kpt=self.n_kpt,
+            reg_max=self.reg_max,
+            num_classes=self.num_classes,
+            channel_layout=self.channel_layout,
+            heads=tuple(head[order] for head in self.heads),
+        )
 
 
 def _require(data: dict[str, NDArray[np.generic]], key: str, path: Path) -> NDArray[np.generic]:
@@ -141,6 +186,13 @@ def load_dump(path: Path, limit: int | None = None) -> QuantDump:
         data = {key: payload[key] for key in payload.files}
 
     names = tuple(str(name) for name in np.asarray(_require(data, "names", source)).tolist())
+    groups_raw = data.get("groups")
+    if groups_raw is None:
+        groups = tuple("" for _ in names)
+    else:
+        groups = tuple(str(group) for group in np.asarray(groups_raw).tolist())
+        if len(groups) < len(names):
+            raise SystemExit(f"{source}: 'groups' has fewer entries than 'names'")
     strides = tuple(int(value) for value in np.atleast_1d(_require(data, "strides", source)))
     fix_points = tuple(int(value) for value in np.atleast_1d(_require(data, "fix_points", source)))
     if len(strides) != len(fix_points):
@@ -210,6 +262,7 @@ def load_dump(path: Path, limit: int | None = None) -> QuantDump:
     return QuantDump(
         path=source,
         names=names[:count],
+        groups=groups[:count],
         image_widths=np.asarray(data["image_widths"][:count], dtype=np.int64),
         image_heights=np.asarray(data["image_heights"][:count], dtype=np.int64),
         scales=np.asarray(data["scales"][:count], dtype=np.float64),
@@ -301,6 +354,72 @@ def evaluate_samples(
     """Thin wrapper around :func:`cpsa_ml.eval.evaluate` (single metric source)."""
 
     return evaluate(samples, config)
+
+
+def evaluate_int8_subset(
+    dump: QuantDump,
+    indices: Sequence[int],
+    labels_dir: Path,
+    config: EvalConfig,
+    conf_thr: float,
+    iou_thr: float,
+) -> tuple[dict[str, Any], float]:
+    """Decode and score the selected frames of one dump.
+
+    Returns:
+        ``(report, decode_seconds)``.
+    """
+
+    subset = dump.subset(indices)
+    decoder = int8_decoder(subset)
+    started = time.perf_counter()
+    frames = decode_int8(subset, decoder, conf_thr, iou_thr)
+    seconds = time.perf_counter() - started
+    samples = build_samples(
+        frames,
+        subset.names,
+        labels_dir,
+        subset.image_widths,
+        subset.image_heights,
+        subset.n_kpt,
+    )
+    return evaluate_samples(samples, config), seconds
+
+
+def evaluate_fp32_subset(
+    weights: Path,
+    dump: QuantDump,
+    indices: Sequence[int],
+    images_dir: Path,
+    labels_dir: Path,
+    config: EvalConfig,
+    deploy_module_path: Path = DEFAULT_DEPLOY_MODULE,
+    conf_thr: float = 0.25,
+    iou_thr: float = 0.7,
+    progress_every: int = 0,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Rebuild the float deploy graph and score the selected frames."""
+
+    subset = dump.subset(indices)
+    images = resolve_test_images(subset, images_dir)
+    frames, timing = predict_fp32(
+        weights,
+        subset,
+        images,
+        deploy_module_path=deploy_module_path,
+        conf_thr=conf_thr,
+        iou_thr=iou_thr,
+        progress_every=progress_every,
+    )
+    samples = build_samples(
+        frames,
+        subset.names,
+        labels_dir,
+        subset.image_widths,
+        subset.image_heights,
+        subset.n_kpt,
+    )
+    return evaluate_samples(samples, config), timing
 
 
 # ---------------------------------------------------------------------------
@@ -483,6 +602,20 @@ def _metric_specs() -> list[tuple[str, tuple[str, ...]]]:
             ("hand_centroid.mean_fw", ("centroids", "hand", "all", "mean_fw")),
             ("face_centroid.mean_fw", ("centroids", "face", "mean_fw")),
             ("person_missing_rate", ("counts", "person_missing_rate")),
+            ("framing.gt_full_body_fraction", ("framing", "gt_box", "full_body_fraction")),
+            ("framing.gt_half_body_fraction", ("framing", "gt_box", "half_body_fraction")),
+            (
+                "framing.pred_full_body_fraction",
+                ("framing", "predicted_box", "full_body_fraction"),
+            ),
+            (
+                "framing.pred_half_body_fraction",
+                ("framing", "predicted_box", "half_body_fraction"),
+            ),
+            (
+                "framing.pred_unclassified_fraction",
+                ("framing", "predicted_box", "unclassified_fraction"),
+            ),
         ]
     )
     return specs
@@ -599,6 +732,109 @@ def render_markdown(rows: Sequence[dict[str, Any]], labels: dict[str, str]) -> s
     return "\n".join(lines) + "\n"
 
 
+@dataclass(frozen=True)
+class EvalSplit:
+    """One named subset of a dump: ``NAME=IMAGES:LABELS``."""
+
+    name: str
+    images: Path
+    labels: Path
+
+
+def parse_eval_split(spec: str) -> EvalSplit:
+    """Parse ``NAME=IMAGES:LABELS`` into an :class:`EvalSplit`.
+
+    Raises:
+        SystemExit: If the spec does not have exactly that shape.
+    """
+
+    text = str(spec)
+    name, separator, rest = text.partition("=")
+    images, separator2, labels = rest.partition(":")
+    if not (separator and separator2 and name and images and labels):
+        raise SystemExit(f"--eval-split must be NAME=IMAGES:LABELS, got {text!r}")
+    return EvalSplit(name=name, images=Path(images), labels=Path(labels))
+
+
+def parse_eval_splits(specs: Sequence[str]) -> list[EvalSplit]:
+    """Parse repeatable ``--eval-split`` values and reject duplicate names."""
+
+    splits = [parse_eval_split(spec) for spec in specs]
+    names = [split.name for split in splits]
+    if len(set(names)) != len(names):
+        raise SystemExit(f"duplicate --eval-split names: {names}")
+    return splits
+
+
+def split_indices(dump: QuantDump, split: EvalSplit) -> list[int]:
+    """Dump indices that belong to ``split``.
+
+    A dump written with grouped ``--test-images`` (``NAME=DIR``) carries a
+    ``groups`` array, which is authoritative even when two splits contain the
+    same image stem.  Older dumps fall back to "this split has a label file for
+    the frame".
+    """
+
+    if any(dump.groups):
+        return [index for index, group in enumerate(dump.groups) if group == split.name]
+    return [
+        index
+        for index, name in enumerate(dump.names)
+        if (Path(split.labels) / f"{name}.txt").is_file()
+    ]
+
+
+def _split_slug(name: str) -> str:
+    return "".join(
+        character if character.isalnum() or character in "-_." else "_" for character in name
+    )
+
+
+def render_split_markdown(
+    rows_by_split: dict[str, Sequence[dict[str, Any]]],
+    labels: dict[str, str],
+    splits: Sequence[str],
+) -> str:
+    """Side-by-side table with one INT8 (and optional FP32) column per split."""
+
+    if not splits:
+        raise ValueError("splits must not be empty")
+    first = rows_by_split[splits[0]]
+    int8_label = labels.get("int8", "INT8")
+    fp32_label = labels.get("fp32_host", "FP32 host")
+    baseline_label = labels.get("baseline", "baseline")
+    has_fp32 = any(row["fp32_host"] is not None for name in splits for row in rows_by_split[name])
+    has_baseline = any(row["baseline"] is not None for row in first)
+
+    header = ["metric"]
+    if has_baseline:
+        header.append(baseline_label)
+    for name in splits:
+        header.append(f"{name} {int8_label}")
+        if has_fp32:
+            header.append(f"{name} {fp32_label}")
+        if has_baseline:
+            header.append(f"Δ {name}−{baseline_label}")
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| --- " + "| ---: " * (len(header) - 1) + "|",
+    ]
+    indexed = {name: {row["metric"]: row for row in rows_by_split[name]} for name in splits}
+    for row in first:
+        cells = [row["metric"]]
+        if has_baseline:
+            cells.append(_format_value(row["baseline"]))
+        for name in splits:
+            match = indexed[name][row["metric"]]
+            cells.append(_format_value(match["int8"]))
+            if has_fp32:
+                cells.append(_format_value(match["fp32_host"]))
+            if has_baseline:
+                cells.append(_format_delta(match["delta_int8_baseline"]))
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines) + "\n"
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -615,6 +851,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--test-split", default="val")
     parser.add_argument("--test-images", type=Path, default=None)
     parser.add_argument("--labels", type=Path, default=None, help="label directory")
+    parser.add_argument(
+        "--eval-split",
+        action="append",
+        default=[],
+        metavar="NAME=IMAGES:LABELS",
+        help=(
+            "score a named subset of the dump separately (repeat for a side-by-side table); "
+            "membership comes from the dump's groups written by --test-images NAME=DIR"
+        ),
+    )
     parser.add_argument("--baseline", type=Path, default=None, help="baseline metrics JSON")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--variant", default=None, help="variant name for the reports")
@@ -650,26 +896,22 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(sys.argv[1:] if argv is None else argv)
-    if args.limit is not None and args.limit < 1:
-        raise SystemExit("--limit must be positive")
+def _dump_meta(
+    args: argparse.Namespace,
+    dump: QuantDump,
+    images_dir: Path | None,
+    labels_dir: Path | None,
+    frames: int | None = None,
+) -> dict[str, Any]:
+    """Common ``meta`` block recorded next to every metrics report."""
 
-    dump = load_dump(args.dump, limit=args.limit)
-    images_dir, labels_dir = resolve_dirs(args)
-    if dump.n_kpt != EvalConfig().n_kpt:
-        raise SystemExit(
-            f"the dump has {dump.n_kpt} keypoints; the half-bust metrics need {EvalConfig().n_kpt}"
-        )
-    args.out.mkdir(parents=True, exist_ok=True)
-
-    meta: dict[str, Any] = {
+    return {
         "variant": args.variant,
         "dump": str(dump.path),
         "weights": str(args.weights) if args.weights is not None else None,
-        "images": str(images_dir),
-        "labels": str(labels_dir),
-        "frames": len(dump),
+        "images": str(images_dir) if images_dir is not None else None,
+        "labels": str(labels_dir) if labels_dir is not None else None,
+        "frames": len(dump) if frames is None else int(frames),
         "input_size": list(dump.input_size),
         "strides": list(dump.strides),
         "fix_points": list(dump.fix_points),
@@ -681,11 +923,198 @@ def main(argv: list[str] | None = None) -> int:
         "iou_thr": args.iou_thr,
     }
 
-    # -- INT8 --------------------------------------------------------------
+
+def _load_baseline(path: Path | None) -> tuple[dict[str, Any] | None, str]:
+    if path is None:
+        return None, "n/a"
+    baseline_path = Path(path)
+    if not baseline_path.is_file():
+        raise SystemExit(f"baseline metrics not found: {baseline_path}")
+    report = report_of(json.loads(baseline_path.read_text(encoding="utf-8")))
+    return report, baseline_path.parent.name or baseline_path.stem
+
+
+def run_split_evaluation(args: argparse.Namespace, dump: QuantDump, config: EvalConfig) -> int:
+    """Evaluate several named dump subsets and write a side-by-side report."""
+
+    specs = parse_eval_splits(args.eval_split)
+    indices: dict[str, list[int]] = {}
+    covered: set[int] = set()
+    for spec in specs:
+        selected = split_indices(dump, spec)
+        if not selected:
+            raise SystemExit(
+                f"no dumped frame matches --eval-split {spec.name!r}; dump with "
+                "--test-images NAME=DIR using the same name"
+            )
+        indices[spec.name] = selected
+        covered.update(selected)
+    if len(covered) != len(dump):
+        print(
+            f"warning: {len(dump) - len(covered)} dumped frame(s) match no --eval-split",
+            flush=True,
+        )
+
+    baseline_report, baseline_label = _load_baseline(args.baseline)
+    score_fp32 = args.weights is not None and not args.skip_fp32
+    if baseline_report is None and score_fp32:
+        baseline_label = "fp32_host"
+
+    results: dict[str, Any] = {}
+    metas: dict[str, dict[str, Any]] = {}
+    timings: dict[str, dict[str, Any]] = {}
+    for spec in specs:
+        selected = indices[spec.name]
+        meta = _dump_meta(args, dump, spec.images, spec.labels, frames=len(selected))
+        meta["split"] = spec.name
+        int8_report, seconds = evaluate_int8_subset(
+            dump, selected, spec.labels, config, args.conf_thr, args.iou_thr
+        )
+        entry: dict[str, Any] = {
+            "frames": len(selected),
+            "images": str(spec.images),
+            "labels": str(spec.labels),
+            "int8": int8_report,
+        }
+        per_split_timing: dict[str, Any] = {
+            "int8_decode_seconds": seconds,
+            "int8_decode_milliseconds_per_image": 1000.0 * seconds / len(selected),
+        }
+        print(
+            f"[{spec.name}] {len(selected)} frames: AP50 {int8_report['detection']['ap50']:.4f}, "
+            f"pose mAP50-95 {int8_report['pose']['map50_95']:.4f}",
+            flush=True,
+        )
+        if score_fp32:
+            fp32_report, fp32_timing = evaluate_fp32_subset(
+                args.weights,
+                dump,
+                selected,
+                spec.images,
+                spec.labels,
+                config,
+                deploy_module_path=args.deploy_module,
+                conf_thr=args.conf_thr,
+                iou_thr=args.iou_thr,
+                progress_every=args.progress_every,
+            )
+            entry["fp32_host"] = fp32_report
+            per_split_timing["fp32_seconds"] = fp32_timing["seconds"]
+            per_split_timing["fp32_milliseconds_per_image"] = fp32_timing["milliseconds_per_image"]
+            meta["fp32_checkpoint"] = fp32_timing["checkpoint"]
+            _write_json(
+                args.out / f"metrics_fp32_host_{_split_slug(spec.name)}.json",
+                {"meta": dict(meta), "metrics": fp32_report},
+            )
+            print(
+                f"[{spec.name}] FP32 host: AP50 {fp32_report['detection']['ap50']:.4f}, "
+                f"pose mAP50-95 {fp32_report['pose']['map50_95']:.4f}",
+                flush=True,
+            )
+        meta["timings"] = dict(per_split_timing)
+        _write_json(
+            args.out / f"metrics_int8_{_split_slug(spec.name)}.json",
+            {"meta": dict(meta), "metrics": int8_report},
+        )
+        results[spec.name] = entry
+        metas[spec.name] = meta
+        timings[spec.name] = per_split_timing
+
+    names = [spec.name for spec in specs]
+    primary = names[0]
+    _write_json(
+        args.out / "metrics_int8.json",
+        {"meta": dict(metas[primary]), "metrics": results[primary]["int8"]},
+    )
+    if "fp32_host" in results[primary]:
+        _write_json(
+            args.out / "metrics_fp32_host.json",
+            {"meta": dict(metas[primary]), "metrics": results[primary]["fp32_host"]},
+        )
+
+    labels = {
+        "int8": "INT8",
+        "fp32_host": "FP32 host" if score_fp32 else "n/a",
+        "baseline": baseline_label,
+    }
+    rows_by_split = {
+        name: comparison_rows(
+            results[name]["int8"],
+            results[name].get("fp32_host"),
+            baseline_report if baseline_report is not None else results[name].get("fp32_host"),
+        )
+        for name in names
+    }
+    decision_baseline = (
+        baseline_report if baseline_report is not None else results[primary].get("fp32_host")
+    )
+    verdict = decision(results[primary]["int8"], decision_baseline)
+    summary = {
+        "variant": args.variant,
+        "inputs": {
+            "dump": str(dump.path),
+            "weights": str(args.weights) if args.weights is not None else None,
+            "baseline": str(args.baseline) if args.baseline is not None else None,
+            "splits": {
+                name: {"images": results[name]["images"], "labels": results[name]["labels"]}
+                for name in names
+            },
+        },
+        "splits": results,
+        "timings": timings,
+        "decision": verdict,
+        "rows": rows_by_split,
+    }
+    _write_json(args.out / "comparison_splits.json", summary)
+
+    table = render_split_markdown(rows_by_split, labels, names)
+    (args.out / "comparison_splits.md").write_text(table, encoding="utf-8")
+    print(table, flush=True)
+
+    primary_rows = rows_by_split[primary]
+    _write_json(
+        args.out / "comparison.json",
+        {
+            "variant": args.variant,
+            "split": primary,
+            "splits": names,
+            "inputs": summary["inputs"],
+            "frames": results[primary]["frames"],
+            "timings": timings[primary],
+            "decision": verdict,
+            "rows": primary_rows,
+        },
+    )
+    (args.out / "comparison.md").write_text(render_markdown(primary_rows, labels), encoding="utf-8")
+    print(
+        f"decision ({primary}): {verdict['status']} (groups {', '.join(verdict['groups'])}, "
+        f"PCK@{verdict['pck_all']}fw margin {verdict['margin']:.2f})",
+        flush=True,
+    )
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.limit is not None and args.limit < 1:
+        raise SystemExit("--limit must be positive")
+
+    dump = load_dump(args.dump, limit=args.limit)
+    if dump.n_kpt != EvalConfig().n_kpt:
+        raise SystemExit(
+            f"the dump has {dump.n_kpt} keypoints; the half-bust metrics need {EvalConfig().n_kpt}"
+        )
+    args.out.mkdir(parents=True, exist_ok=True)
     config = EvalConfig(kpt_conf_thr=args.kpt_conf_thr)
-    decoder = int8_decoder(dump)
+    if args.eval_split:
+        return run_split_evaluation(args, dump, config)
+
+    images_dir, labels_dir = resolve_dirs(args)
+    meta = _dump_meta(args, dump, images_dir, labels_dir)
+
+    # -- INT8 --------------------------------------------------------------
     started = time.perf_counter()
-    int8_frames = decode_int8(dump, decoder, args.conf_thr, args.iou_thr)
+    int8_frames = decode_int8(dump, int8_decoder(dump), args.conf_thr, args.iou_thr)
     int8_seconds = time.perf_counter() - started
     int8_samples = build_samples(
         int8_frames, dump.names, labels_dir, dump.image_widths, dump.image_heights, dump.n_kpt
@@ -695,6 +1124,7 @@ def main(argv: list[str] | None = None) -> int:
         "int8_decode_seconds": int8_seconds,
         "int8_decode_milliseconds_per_image": 1000.0 * int8_seconds / len(dump),
     }
+
     _write_json(args.out / "metrics_int8.json", {"meta": dict(meta), "metrics": int8_report})
     print(
         f"[int8] {len(dump)} frames: AP50 {int8_report['detection']['ap50']:.4f}, "
@@ -740,15 +1170,8 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     # -- comparison --------------------------------------------------------
-    baseline_report: dict[str, Any] | None = None
-    baseline_label = "n/a"
-    if args.baseline is not None:
-        baseline_path = Path(args.baseline)
-        if not baseline_path.is_file():
-            raise SystemExit(f"baseline metrics not found: {baseline_path}")
-        baseline_report = report_of(json.loads(baseline_path.read_text(encoding="utf-8")))
-        baseline_label = baseline_path.parent.name or baseline_path.stem
-    elif fp32_report is not None:
+    baseline_report, baseline_label = _load_baseline(args.baseline)
+    if baseline_report is None and fp32_report is not None:
         baseline_report = fp32_report
         baseline_label = "fp32_host"
 

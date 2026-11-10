@@ -8,14 +8,28 @@ from pathlib import Path
 import pytest
 
 NOTEBOOK_DIR = Path(__file__).resolve().parents[1] / "notebooks"
-NOTEBOOKS = ("01_build_halfbust", "03_train_fp32", "04_variant_study", "05_qat")
+NOTEBOOKS = (
+    "01_build_halfbust",
+    "02_build_fullframe",
+    "03_train_fp32",
+    "04_variant_study",
+    "05_qat",
+)
 
 #: Kaggle datasets attached to each notebook.
 EXPECTED_DATASETS = {
     "01_build_halfbust": ["awsaf49/coco-2017-dataset"],
-    "03_train_fp32": ["fabiocabeccia/cpsa-halfbust"],
+    "02_build_fullframe": [
+        "awsaf49/coco-2017-dataset",
+        "fabiocabeccia/cpsa-halfbust",
+    ],
+    "03_train_fp32": [
+        "fabiocabeccia/cpsa-halfbust",
+        "fabiocabeccia/cpsa-fullframe",
+    ],
     "04_variant_study": [
         "fabiocabeccia/cpsa-halfbust",
+        "fabiocabeccia/cpsa-fullframe",
         "fabiocabeccia/cpsa-checkpoints",
     ],
     "05_qat": ["fabiocabeccia/cpsa-halfbust", "fabiocabeccia/cpsa-checkpoints"],
@@ -70,6 +84,7 @@ def test_first_code_cell_pins_and_installs_cpsa_ml() -> None:
     ("stem", "entry_point"),
     [
         ("01_build_halfbust", "build_halfbust_dataset"),
+        ("02_build_fullframe", "build_fullframe_dataset"),
         ("03_train_fp32", "train"),
         ("04_variant_study", "train_study"),
         ("05_qat", "quantize_model"),
@@ -88,6 +103,23 @@ def test_notebook_04_uses_the_variant_study_module() -> None:
     assert "from cpsa_ml.variant_study import" in source
     assert "DEFAULT_VARIANTS" in source
     assert "StudyConfig" in source
+
+
+def test_notebook_02_builds_the_full_frame_set_with_the_module() -> None:
+    notebook = _load(NOTEBOOK_DIR / "02_build_fullframe.ipynb")
+    source = "".join("".join(cell["source"]) for cell in notebook["cells"])
+    assert "from cpsa_ml.datasets.fullframe import" in source
+    assert "build_fullframe_dataset" in source
+    assert "half_train_count" in source
+    assert "/kaggle/working/fullframe62" in source
+
+
+@pytest.mark.parametrize("stem", ["03_train_fp32", "04_variant_study"])
+def test_training_notebooks_use_the_full_frame_dataset(stem: str) -> None:
+    notebook = _load(NOTEBOOK_DIR / f"{stem}.ipynb")
+    source = "".join("".join(cell["source"]) for cell in notebook["cells"])
+    assert 'FULL_DATA = Path("/kaggle/input/cpsa-fullframe")' in source
+    assert "full_data=FULL_DATA" in source or "build_mixed_data_yaml" in source
 
 
 def test_kernel_metadata_is_complete_and_valid() -> None:
