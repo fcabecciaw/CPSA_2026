@@ -1,5 +1,5 @@
 {
-  "id": "fcabecciaw/cpsa-03-train-fp32",
+  "id": "fabiocabeccia/cpsa-03-train-fp32",
   "title": "CPSA 03 train FP32",
   "code_file": "03_train_fp32.ipynb",
   "language": "python",
@@ -10,7 +10,7 @@
   "machine_shape": "NvidiaTeslaT4",
   "enable_internet": true,
   "dataset_sources": [
-    "fcabecciaw/cpsa-halfbust"
+    "fabiocabeccia/cpsa-halfbust"
   ],
   "competition_sources": [],
   "kernel_sources": []
