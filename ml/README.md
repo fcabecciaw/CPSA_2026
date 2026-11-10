@@ -84,6 +84,43 @@ Each label line is `0 cx cy w h` followed by `K*(x y v)` normalized to the
 crop. The synthetic hand is taken from the visible hand keypoints of another
 sample; the same seed reproduces both the hand choice and placement.
 
+## Build the full-frame dataset
+
+A model trained only on half-bust crops never sees a standing person, so its
+predicted box hugs the keypoints instead of the true person extent — and the
+runtime uses that box height divided by the face width to decide `full_body`
+vs `half_body`. `cpsa_ml.datasets.fullframe` therefore writes the **original**
+COCO images with the true COCO person box:
+
+```bash
+uv run python -m cpsa_ml.datasets.fullframe \
+  --coco-root /data/coco \
+  --wholebody-json /data/annotations/coco_wholebody_train_v1.0.json \
+  --split train --schema halfbust62 --out /data/fullframe62 \
+  --half-train-root /data/halfbust62 --seed 0
+```
+
+Repeat with `--split val` and the val JSON into the same `--out` folder. The
+layout is the same as the half-bust set; labels use the same `HALFBUST_62`
+mapping and `flip_idx`, because the mapping and writers are imported from
+`cpsa_ml.datasets.halfbust` (one implementation).
+
+* **Mix ratio** — the full-frame training split is sized to make full frames
+  25% of the mixed set: `n_full = round(0.25 / 0.75 * n_half)`, where `n_half`
+  is read from `stats.json` (or pass `--target-count`/`--max-images`). The
+  sample is deterministic for a seed. The val split writes **every** qualifying
+  image so `val_full` is a fair full-frame measure.
+* **Unlabeled people** — a person that fails `--min-visible` (or has a
+  degenerate COCO box) gets no label line, matching Ultralytics'
+  `convert_coco`; the person is counted in `persons_unlabeled`. An image with
+  no labelable person is not written. An image that contains a **crowd**
+  annotation is skipped entirely, because a crowd box would teach the model
+  that those people are background.
+* **No hand-over-face occlusion** — the point of this set is the true person
+  extent, so its pixels stay untouched.
+* **Framing check** — open `build/fullframe_check.jpg` (or run the builder with
+  `--preview`) to confirm boxes hug the feet and heads before publishing.
+
 ## Training
 
 `cpsa_ml.train.train` is a thin wrapper around `YOLO(cfg).train`:
@@ -110,6 +147,78 @@ A CPU smoke run is available but skipped by default:
 ```bash
 CPSA_ML_SLOW=1 uv run pytest -q tests/test_train_smoke.py
 ```
+
+Notebook 03 trains on the **mixed** dataset. `build_mixed_data_yaml` (in
+`cpsa_ml.variant_study`) writes a `data.yaml` whose `train` entry is the curated
+train list plus the full-frame `images/train` directory, keeps `val` on the
+half-bust split (the primary metric Ultralytics uses for early stopping and
+`best.pt`), adds `val_full` for the full-frame split and `val_h160` for the
+size-filtered half-bust val list. Absolute paths are used because the YAML lives
+outside both dataset roots. If the full-frame root is missing, it logs
+`WARNING: FULL-FRAME DATASET MISSING` and trains on half-body images only.
+
+### Training-list curation
+
+The demo sees a seated user at 0.45-0.7 m, where hands and face matter most, but
+the built crops are small (median 86x115 px) and 77% of them show no hand at all.
+`cpsa_ml.datasets.curation.curate_train_list` turns the built dataset into an
+explicit Ultralytics train list (`.txt`, one absolute image path per line):
+
+* keep only crops with `height >= min_height` (default 128 px; sizes come from
+  the JPEG headers, so 104k crops take a few seconds);
+* repeat crops that show a hand with `>= 10` visible keypoints `hand_repeat`
+  times (default 2) and, optionally, crops with `>= 5` visible face keypoints
+  `face_repeat` times (default 1 = off); a crop that qualifies for both is
+  repeated `max()` times, never twice over;
+* mix extra `halfbust62` datasets, each `(root, repeat)`, into the same list;
+* write `curated_train.txt`, `curated_val_h160.txt` and
+  `curated_train_summary.json` (counts before/after, hand and face shares, per
+  extra dataset) into the output directory;
+* with `labels_root` set, mirror the images into
+  `<out>/curated_train_mirror/{images,labels}/train` (one symlinked image
+  directory, one symlink per override label) so Ultralytics resolves the Task P
+  pseudo-labels from the mirrored tree instead of the read-only dataset. A
+  missing override label aborts the build rather than mixing GT and pseudo
+  labels.
+
+Measured on the local `halfbust62` build: 103,996 train crops -> 47,983 kept at
+`min_height=128` -> 69,901 list entries with `hand_repeat=2`; the hand share of
+the kept crops rises from 27% to 46%, the face share from 48% to 64%. The val
+split stays the full 4,335 GT crops, with 1,497 of them in the `h >= 160` demo
+list. Notebooks 03 and 04 expose `MIN_HEIGHT`, `HAND_REPEAT`, `FACE_REPEAT`,
+`LABELS_ROOT` (a dataset named `cpsa-halfbust-pl`, located by content) and
+`EXTRA_DATA` (a dataset named `cpsa-hagrid62`, empty when absent).
+
+### Fine-tuning recipe of the study
+
+`variant_study.AUGMENTATIONS` pins the recipe shared by every row, so a library
+default change cannot make the rows incomparable: explicit `optimizer="SGD"`
+(`auto` silently switches to AdamW for short runs) with `lr0=0.01`, `lrf=0.01`,
+`momentum=0.937`, `weight_decay=0.0005`, `warmup_epochs=3`, `cos_lr=True`,
+`degrees=10`, `translate=0.1`, `scale=0.5`, `fliplr=0.5` with the schema
+`flip_idx`, `mosaic=1.0`, `mixup=0`, `copy_paste=0`, `close_mosaic=15`, the Pose
+loss gain at the Ultralytics default (`pose=12.0`, pinned and not tuned) and
+`patience=30`.
+
+* **Motion blur.** Ultralytics 8.4.203 accepts an `augmentations=` train argument
+  (a list of albumentations transforms, serialised into the checkpoint), so
+  `variant_study.build_albumentations()` passes its own default transform list
+  plus `MotionBlur(blur_limit=(3, 9), p=0.15)`; nothing is monkeypatched. Without
+  albumentations (or with a release older than 1.4.4, which the defaults need)
+  the list is not passed, a `motion blur is SKIPPED` warning is logged and
+  `metrics_fp32.json` records `"custom_augmentations": null`, so the run stays
+  honest about what it did. Notebook 04 installs `albumentations==1.4.21`
+  best-effort (`check=False`).
+* **Multi-scale.** Recommendation: **off** (`multi_scale=0.0`, the Ultra
+  default). It resizes the training batch every iteration, which costs step time
+  on 2x T4, and `scale=0.5` already augments scale on these crops; it was not
+  benchmarked on a T4 here, so revisit only when a run has spare time and the
+  `h160` metric shows a reason.
+
+Notebook 03 keeps the `cpsa_ml.train` defaults for the baseline Hard-Swish
+checkpoint; notebook 04 carries this recipe for the urgency run
+(`VARIANTS = [DEFAULT_VARIANTS[2]]`, `EPOCHS = 30`) and the main run
+(`DEFAULT_VARIANTS`, `EPOCHS = 120`).
 
 ## ONNX export and DPU operator check
 
@@ -141,7 +250,7 @@ controls for the operator check.
 Kaggle credentials are not available from the development host; the notebooks
 and metadata are validated locally and pushed by the user.
 
-### 1. Build and publish the dataset
+### 1. Build and publish the datasets
 
 Notebook 01 obtains both inputs itself:
 
@@ -167,12 +276,20 @@ example `{"title": "CPSA half-bust", "id": "YOUR_USER/cpsa-halfbust",
 `kaggle kernels output <kernel> -p <dir>` and publish them as the
 `cpsa-checkpoints` dataset version.
 
+**Notebook 02** then builds the full-frame set from the same COCO images plus
+the attached `cpsa-halfbust` dataset (it reads `n_half` from its
+`stats.json`): `/kaggle/working/fullframe62` is published the same way as
+`cpsa-fullframe`. Attach both `cpsa-halfbust` and `cpsa-fullframe` to notebooks
+03/04; a missing `cpsa-fullframe` is loud but not fatal (training falls back to
+half-body images only).
+
 ### 2. Push notebooks
 
 Each notebook has a Kaggle CLI folder:
 
 ```bash
 kaggle kernels push -p ml/notebooks/01_build_halfbust
+kaggle kernels push -p ml/notebooks/02_build_fullframe
 kaggle kernels push -p ml/notebooks/03_train_fp32
 kaggle kernels push -p ml/notebooks/04_variant_study
 kaggle kernels push -p ml/notebooks/05_qat
@@ -246,13 +363,20 @@ accuracy for speed on the DPU. Notebook 04 takes a list of
 | `lrelu_512` | LeakyReLU(0.1015625) | 512 | 384x512 |
 | `lrelu_384` | LeakyReLU(0.1015625) | 384 | 288x384 |
 
-Every row trains square at its own `train_imgsz`, then validates and exports
-`deploy.onnx` at its deployment size, so a smaller row also trains on fewer
-pixels. Seed, schedule and augmentations are shared and pinned in
-`cpsa_ml.variant_study.AUGMENTATIONS`. Configs are
-`configs/yolov8n-pose-{hswish,relu,lrelu}.yaml` (exact names), selected through
-`cpsa_ml.models.model_yaml_path`; `relu` remains available for the speed matrix
-even though the default accuracy matrix uses `lrelu`.
+Every row trains square at its own `train_imgsz` on the mixed half-bust +
+full-frame set, then validates and exports `deploy.onnx` at its deployment
+size, so a smaller row also trains on fewer pixels. Seed, schedule and
+augmentations are shared and pinned in `cpsa_ml.variant_study.AUGMENTATIONS`.
+Configs are `configs/yolov8n-pose-{hswish,relu,lrelu}.yaml` (exact names),
+selected through `cpsa_ml.models.model_yaml_path`; `relu` remains available for
+the speed matrix even though the default accuracy matrix uses `lrelu`.
+
+The COCO transfer copies the backbone, neck and the Pose head's box (`cv2`),
+class (`cv3`) and `dfl` branches, whose shapes do not depend on the keypoint
+count; only the keypoint branch `cv4` is freshly initialised. `metrics_fp32.json`
+records `metrics.half` (the half-bust `val` split, the primary metric) and
+`metrics.full` (the full-frame `val_full` split), so the framing decision has
+evidence on both framings.
 
 1. **Train the matrix on Kaggle.** Download the dataset once
    (`kaggle datasets download -d fabiocabeccia/cpsa-halfbust -p ~/data`), push
@@ -264,10 +388,11 @@ even though the default accuracy matrix uses `lrelu`.
    ```
 
    Notebook 04 starts every row from the official COCO `yolov8n-pose.pt`,
-   copies every shape-matching backbone/neck tensor, keeps the freshly
-   initialised 62-keypoint head, logs the transfer in
-   `transfer_report.json`, and writes `best.pt`, `last.pt`, `results.csv`,
-   `metrics_fp32.json`, `transfer_report.json` and `deploy.onnx` under
+   copies every shape-matching backbone/neck tensor plus the Pose head's box,
+   class and DFL branches, and re-initialises only the 62-keypoint `cv4`
+   branch. It logs the transfer in `transfer_report.json` and writes `best.pt`,
+   `last.pt`, `results.csv`, `metrics_fp32.json`, `transfer_report.json` and
+   `deploy.onnx` under
    `/kaggle/working/variant_study/<activation>_<train_imgsz>/`. `RESUME` in the
    notebook is a dict keyed by that folder name, for example
    `{"lrelu_512": ".../lrelu_512/last.pt"}`.
@@ -275,40 +400,60 @@ even though the default accuracy matrix uses `lrelu`.
 2. **Quantize and dump the INT8 head tensors for every row.** Calibration uses
    train images preprocessed exactly like `DpuPoseEstimator`; the dump stores
    the int8 head values, the `.xmodel` `fix_point` of every output and the
-   letterbox parameters. The deployment size of each row is recorded as
-   `deploy_size` in its `metrics_fp32.json`; for `hswish_640` (480x640):
+   letterbox parameters. Repeat `--test-images NAME=DIR` (and
+   `--calib-images`) to put both val splits in one dump; `--calib-count` and
+   `--test-count` apply to each directory and the name tags the frames so the
+   two sets stay distinguishable even though they share COCO image stems. The
+   deployment size of each row is recorded as `deploy_size` in its
+   `metrics_fp32.json`; for `hswish_640` (480x640):
 
    ```bash
    tools/vitis/run_vitis.sh python tools/vitis/dump_quant_outputs.py \
-     --weights variant_study/hswish_640/best.pt --data ~/data/cpsa-halfbust \
-     --calib-split train --test-split val --calib-count 64 --test-count 64 \
+     --weights variant_study/hswish_640/best.pt \
+     --calib-images train=~/data/cpsa-halfbust/images/train \
+     --calib-images train_full=~/data/cpsa-fullframe/images/train \
+     --test-images half=~/data/cpsa-halfbust/images/val \
+     --test-images full=~/data/cpsa-fullframe/images/val \
+     --calib-count 64 --test-count 64 \
      --height 480 --width 640 --threads 1 \
      --out build/variant_study/hswish_640/quant
    ```
 
    Repeat with `--height 384 --width 512` for `lrelu_512` and
    `--height 288 --width 384` for `lrelu_384` (`lrelu_640` uses 480x640).
+   `--data <root> --calib-split/--test-split` still dumps one split per file.
    `--artifacts <host deploy bundle>` quantizes from a pre-built bundle instead
    of `best.pt` and adds the container/host reference check.
 
 3. **Score INT8 and FP32 with the same metric code** (person AP50, pose
    mAP50-95 by OKS, per-group PCK@0.1/0.2 face-width normalized, hand and face
-   centroid errors, per-group missing-detection rate):
+   centroid errors, per-group missing-detection rate, and framing):
 
    ```bash
    PYTHONPATH=src python tools/vitis/eval_quant.py \
      --dump build/variant_study/hswish_640/quant/quant_outputs.npz \
-     --weights variant_study/hswish_640/best.pt --data ~/data/cpsa-halfbust \
-     --test-split val \
+     --weights variant_study/hswish_640/best.pt \
+     --eval-split half=~/data/cpsa-halfbust/images/val:~/data/cpsa-halfbust/labels/val \
+     --eval-split full=~/data/cpsa-fullframe/images/val:~/data/cpsa-fullframe/labels/val \
      --baseline build/variant_study/hswish_640/eval/metrics_int8.json \
      --out build/variant_study/hswish_640/eval
    ```
 
    `eval_quant.py` decodes with the runtime decoder
    (`cpsa.vision.pose_decode.QuantizedRawHeadDecoder`), rebuilds the same graph
-   in float for `metrics_fp32_host.json`, and writes `metrics_int8.json` plus
-   `comparison.json` / `comparison.md`. The baseline is the INT8 metrics file
-   of the `hswish_640` row.
+   in float for the FP32 reference, and writes `metrics_int8.json` plus
+   `comparison.json` / `comparison.md` for the first split (so the baseline
+   workflow is unchanged). The per-split files
+   `metrics_int8_<split>.json`/`metrics_fp32_host_<split>.json` and the
+   side-by-side `comparison_splits.md` / `comparison_splits.json` show both
+   splits next to each other. The `framing.*` rows classify every ground-truth
+   person from its COCO box and from its matched prediction box: a full-frame
+   split must read mostly `full_body` (and a half-body split mostly
+   `half_body`), otherwise the predicted box still does not describe the true
+   person extent. The threshold is read from
+   `cpsa.vision.subject.SubjectConfig.full_body_ratio`; it is never copied into
+   the metric code. The baseline is the INT8 metrics file of the `hswish_640`
+   row.
 
 4. **Apply the decision rule (proposal) below** to the `decision` block of
    every `comparison.json`. It reports each group's INT8 PCK@0.2fw against the
@@ -330,8 +475,17 @@ to the rule for context but do not decide it.
 No Kaggle credentials were available on the development host, so the Kaggle
 runs are left to the user. Locally:
 
-* `uv run --extra dev pytest -q` passes; the slow smoke test and the optional
-  Brevitas tests are skipped.
+* `uv run --extra dev pytest -q` passes: 154 passed, 2 skipped (Brevitas and
+  the one-epoch smoke test). The root `tests/unit/test_eval_quant.py` passes
+  too.
+* A real-data full-frame smoke test ran on five COCO val images and the real
+  `coco_wholebody_val_v1.0.json`: one image was skipped for its crowd
+  annotation, four images with six labelled people were written, and
+  `build/fullframe_check.jpg` shows the GT boxes/heads/hands over the original
+  pixels (boxes reach the feet).
+* Ultralytics 8.4.203 loads the generated mixed `data.yaml` with a two-root
+  `train` list plus `val` and `val_full` (`YOLODataset` only, no training);
+  every split reports 62x3 keypoints.
 * `CPSA_ML_SLOW=1 uv run --extra dev pytest -q` runs the 1-epoch, 2-image CPU
   smoke test and passes.
 * `uv run --extra dev --extra qat pytest -q` passes the Brevitas `QuantConv2d`

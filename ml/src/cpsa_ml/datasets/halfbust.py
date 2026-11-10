@@ -12,6 +12,9 @@ Labels are Ultralytics YOLO-pose text files::
 Coordinates are normalized to the crop.  Keypoints outside the crop get
 ``v=0`` and ``x=y=0``.
 
+The mapping, label formatting and dataset-writing helpers are public because
+:mod:`cpsa_ml.datasets.fullframe` reuses them unchanged for whole images.
+
 Example::
 
     python -m cpsa_ml.datasets.halfbust \
@@ -40,13 +43,28 @@ from PIL import Image, ImageDraw
 
 from cpsa_ml.schema import KeypointSchema, get_schema
 
-__all__ = ["BuildConfig", "BuildReport", "build_halfbust_dataset", "main"]
+__all__ = [
+    "BuildConfig",
+    "BuildReport",
+    "build_halfbust_dataset",
+    "format_label",
+    "load_image",
+    "main",
+    "map_keypoints",
+    "resolve_split_dir",
+    "update_stats",
+    "wholebody_keypoints",
+    "write_dataset_yaml",
+]
 
 LOGGER = logging.getLogger(__name__)
 
 HEAD_KEYPOINTS = (0, 1, 2, 3, 4)  # nose, eyes, ears
 SHOULDER_KEYPOINTS = (5, 6)
 HIP_KEYPOINTS = (11, 12)
+
+#: Normalized ``cx cy w h`` of a label written for a whole-crop person.
+FULL_CROP_BOX = (0.5, 0.5, 1.0, 1.0)
 
 LEFT_HAND_KEYPOINTS = tuple(range(91, 112))
 RIGHT_HAND_KEYPOINTS = tuple(range(112, 133))
@@ -136,7 +154,7 @@ def _as_keypoints(
     return array.reshape(count, 3)
 
 
-def _wholebody_keypoints(annotation: Mapping[str, Any]) -> NDArray[np.float32]:
+def wholebody_keypoints(annotation: Mapping[str, Any]) -> NDArray[np.float32]:
     """Assemble the 133 COCO-WholeBody keypoints for one annotation."""
 
     annotation_id = annotation.get("id", "?")
@@ -286,11 +304,18 @@ def _half_bust_box(
     return int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2))
 
 
-def _map_keypoints(
+def map_keypoints(
     keypoints: NDArray[np.float32],
     schema: KeypointSchema,
     box: tuple[int, int, int, int],
 ) -> NDArray[np.float32]:
+    """Project the 133 keypoints into ``schema`` order, normalized to ``box``.
+
+    Keypoints outside the box (or without visibility) are written as
+    ``x = y = visibility = 0``.  A full-frame caller passes the whole image as
+    ``box`` so nothing is dropped.
+    """
+
     x1, y1, x2, y2 = box
     width = max(1, x2 - x1)
     height = max(1, y2 - y1)
@@ -307,8 +332,24 @@ def _map_keypoints(
     return out
 
 
-def _format_label(class_id: int, keypoints: NDArray[np.float32]) -> str:
-    values = [str(class_id), "0.5", "0.5", "1.0", "1.0"]
+def format_label(
+    class_id: int,
+    keypoints: NDArray[np.float32],
+    box: tuple[float, float, float, float] = (0.5, 0.5, 1.0, 1.0),
+) -> str:
+    """One YOLO-pose label line; ``box`` is normalized ``cx cy w h``.
+
+    The half-bust builder always crops one person to the whole image, so it
+    keeps the default box.  A full-frame caller passes the normalized COCO
+    person box so the box matches the true person extent.
+    """
+
+    values = [str(class_id)]
+    if box == FULL_CROP_BOX:
+        # Keep the half-bust label text byte-identical to earlier releases.
+        values.extend(("0.5", "0.5", "1.0", "1.0"))
+    else:
+        values.extend(f"{value:.6f}" for value in box)
     for x, y, visibility in keypoints:
         if visibility > 0:
             values.extend((f"{x:.6f}", f"{y:.6f}", "1"))
@@ -336,7 +377,9 @@ def _face_box(keypoints: NDArray[np.float32]) -> tuple[float, float, float, floa
     )
 
 
-def _load_image(path: Path) -> Image.Image | None:
+def load_image(path: Path) -> Image.Image | None:
+    """Read ``path`` as an RGB image, or ``None`` when it cannot be decoded."""
+
     try:
         with Image.open(path) as image:
             return image.convert("RGB")
@@ -405,12 +448,12 @@ def _build_hand_pool(
     rng.shuffle(image_ids)
     pool: list[_HandCrop] = []
     for image_id in image_ids:
-        image = _load_image(image_paths[image_id])
+        image = load_image(image_paths[image_id])
         if image is None:
             continue
         for annotation_id, indices in grouped[image_id]:
             annotation = annotations_by_image[image_id][annotation_id]
-            hand = _crop_hand(image, _wholebody_keypoints(annotation), indices)
+            hand = _crop_hand(image, wholebody_keypoints(annotation), indices)
             if hand is not None:
                 pool.append(_HandCrop(image=hand, annotation_id=annotation_id))
                 if len(pool) >= max_crops:
@@ -458,14 +501,18 @@ def _paste_hand_over_face(
     return True
 
 
-def _resolve_split_dir(coco_root: Path, split: str) -> Path:
+def resolve_split_dir(coco_root: Path, split: str) -> Path:
+    """Return the COCO image directory of ``split`` (``*2017`` or plain)."""
+
     for candidate in (coco_root / f"{split}2017", coco_root / split, coco_root):
         if candidate.is_dir():
             return candidate
     return coco_root
 
 
-def _write_dataset_yaml(out: Path, schema: KeypointSchema, split: str) -> None:
+def write_dataset_yaml(out: Path, schema: KeypointSchema, split: str) -> None:
+    """Write ``data.yaml`` with relative split paths (portable on Kaggle)."""
+
     train_exists = (out / "images" / "train").is_dir()
     val_exists = (out / "images" / "val").is_dir()
     current = f"images/{split}"
@@ -482,7 +529,9 @@ def _write_dataset_yaml(out: Path, schema: KeypointSchema, split: str) -> None:
     (out / "data.yaml").write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
 
-def _update_stats(out: Path, report: BuildReport) -> None:
+def update_stats(out: Path, report: BuildReport) -> None:
+    """Merge one split's counters into ``stats.json``."""
+
     path = out / "stats.json"
     stats: dict[str, Any] = {}
     if path.is_file():
@@ -521,7 +570,7 @@ def build_halfbust_dataset(config: BuildConfig) -> BuildReport:
     if not images:
         raise ValueError("COCO JSON contains no images")
 
-    split_dir = _resolve_split_dir(config.coco_root, config.split)
+    split_dir = resolve_split_dir(config.coco_root, config.split)
     image_paths: dict[int, Path] = {}
     image_records: dict[int, Mapping[str, Any]] = {}
     for image in images:
@@ -569,12 +618,12 @@ def build_halfbust_dataset(config: BuildConfig) -> BuildReport:
         image_annotations = annotations_by_image.get(image_id, [])
         if not image_annotations:
             continue
-        image = _load_image(image_paths[image_id])
+        image = load_image(image_paths[image_id])
         if image is None:
             continue
 
         for annotation in image_annotations:
-            keypoints = _wholebody_keypoints(annotation)
+            keypoints = wholebody_keypoints(annotation)
             if not _has_head_and_shoulders(keypoints):
                 report.annotations_skipped += 1
                 continue
@@ -584,7 +633,7 @@ def build_halfbust_dataset(config: BuildConfig) -> BuildReport:
                 continue
             box = _half_bust_box(keypoints, head, image.width, image.height, config.aspect)
             crop = image.crop(box)
-            mapped = _map_keypoints(keypoints, schema, box)
+            mapped = map_keypoints(keypoints, schema, box)
             if int(np.count_nonzero(mapped[:, 2] > 0)) < config.min_visible:
                 report.annotations_skipped += 1
                 continue
@@ -608,17 +657,17 @@ def build_halfbust_dataset(config: BuildConfig) -> BuildReport:
                 subsampling=0,
             )
             (label_dir / f"{output_stem}.txt").write_text(
-                _format_label(0, mapped) + "\n", encoding="utf-8"
+                format_label(0, mapped) + "\n", encoding="utf-8"
             )
             report.images_written += 1
             report.labels_written += 1
             report.annotations_used += 1
 
-    _write_dataset_yaml(config.out, schema, config.split)
+    write_dataset_yaml(config.out, schema, config.split)
     (config.out / "schema.json").write_text(
         json.dumps(schema.to_dict(), indent=2) + "\n", encoding="utf-8"
     )
-    _update_stats(config.out, report)
+    update_stats(config.out, report)
     if report.images_written == 0:
         LOGGER.warning("no images were written; check the JSON split and visibility flags")
     return report

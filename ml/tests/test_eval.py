@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import math
+import sys
+import types
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+import cpsa_ml.eval as eval_module
 from cpsa_ml.eval import (
     HALFBUST62_FACE_ANCHOR_INDICES,
     HALFBUST62_GROUPS,
@@ -352,3 +355,102 @@ def test_visibility_mask_limits_oks_to_annotated_points() -> None:
     )
     expected = math.exp(-(5.0**2) / ((2 * 0.026) ** 2 * 640 * 480 * 0.53 * 2))
     assert oks[0, 0] == pytest.approx(expected)
+
+
+def _missing_runtime() -> float:
+    raise ImportError("cpsa runtime is not installed")
+
+
+def test_framing_classifies_gt_and_predicted_boxes() -> None:
+    target = _target()
+    tall = np.array([0.0, 0.0, 640.0, 900.0], dtype=np.float64)
+    prediction = _prediction(target, box=tall)
+    report = evaluate(
+        [ImageSample("a", (prediction,), (target,))],
+        EvalConfig(full_body_ratio=9.0),
+    )
+
+    framing = report["framing"]
+    assert framing["full_body_ratio"] == 9.0
+    assert framing["instances"] == 1
+    assert framing["gt_box"]["half_body"] == 1
+    assert framing["gt_box"]["half_body_fraction"] == pytest.approx(1.0)
+    assert framing["gt_box"]["full_body_fraction"] == pytest.approx(0.0)
+    assert framing["predicted_box"]["full_body"] == 1
+    assert framing["predicted_box"]["full_body_fraction"] == pytest.approx(1.0)
+
+
+def test_framing_without_face_width_is_unclassified() -> None:
+    target = _target()
+    keypoints = target.keypoints.copy()
+    keypoints[:, 2] = 0.0
+    target = PersonTarget(box=target.box, keypoints=keypoints)
+    report = evaluate(
+        [
+            ImageSample(
+                "a",
+                (_prediction(target),),
+                (target,),
+            )
+        ],
+        EvalConfig(full_body_ratio=9.0),
+    )
+
+    framing = report["framing"]
+    assert framing["gt_box"]["unclassified"] == 1
+    assert framing["predicted_box"]["unclassified"] == 1
+    assert framing["gt_box"]["unclassified_fraction"] == pytest.approx(1.0)
+
+
+def test_framing_without_a_prediction_is_unclassified() -> None:
+    target = _target()
+    report = evaluate(
+        [
+            ImageSample(
+                "a",
+                (),
+                (target,),
+            )
+        ],
+        EvalConfig(full_body_ratio=9.0),
+    )
+
+    framing = report["framing"]
+    assert framing["gt_box"]["half_body"] == 1
+    assert framing["predicted_box"]["unclassified"] == 1
+
+
+def test_framing_ratio_is_read_from_the_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    subject = types.ModuleType("cpsa.vision.subject")
+
+    class SubjectConfig:
+        full_body_ratio = 3.0
+
+    subject.SubjectConfig = SubjectConfig  # type: ignore[attr-defined]
+    vision = types.ModuleType("cpsa.vision")
+    vision.subject = subject  # type: ignore[attr-defined]
+    runtime = types.ModuleType("cpsa")
+    runtime.vision = vision  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "cpsa", runtime)
+    monkeypatch.setitem(sys.modules, "cpsa.vision", vision)
+    monkeypatch.setitem(sys.modules, "cpsa.vision.subject", subject)
+
+    settings = EvalConfig()
+    assert settings.full_body_ratio == 3.0
+    assert settings.to_dict()["full_body_ratio"] == 3.0
+
+
+def test_framing_is_none_without_the_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(eval_module, "runtime_full_body_ratio", _missing_runtime)
+    settings = EvalConfig()
+    assert settings.full_body_ratio is None
+    assert settings.to_dict()["full_body_ratio"] is None
+
+    target = _target()
+    report = evaluate([ImageSample("a", (_prediction(target),), (target,))], settings)
+    assert report["framing"] is None
+
+
+def test_framing_rejects_a_non_positive_ratio() -> None:
+    with pytest.raises(ValueError, match="full_body_ratio"):
+        EvalConfig(full_body_ratio=0.0)

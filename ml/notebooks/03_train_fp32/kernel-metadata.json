@@ -10,7 +10,8 @@
   "machine_shape": "NvidiaTeslaT4",
   "enable_internet": true,
   "dataset_sources": [
-    "fabiocabeccia/cpsa-halfbust"
+    "fabiocabeccia/cpsa-halfbust",
+    "fabiocabeccia/cpsa-fullframe"
   ],
   "competition_sources": [],
   "kernel_sources": []

@@ -620,3 +620,201 @@ def test_main_requires_a_reference(tmp_path: Path) -> None:
                 str(tmp_path / "out"),
             ]
         )
+
+
+# ---------------------------------------------------------------------------
+# Grouped dumps and side-by-side splits
+# ---------------------------------------------------------------------------
+
+
+def test_parse_image_source_accepts_a_name_and_a_plain_directory() -> None:
+    assert dq.parse_image_source("half=/data/half/val") == ("half", Path("/data/half/val"))
+    assert dq.parse_image_source("/data/fullframe62/images/val") == (
+        "val",
+        Path("/data/fullframe62/images/val"),
+    )
+    assert dq.parse_image_source("plain") == ("plain", Path("plain"))
+
+
+def test_resolve_grouped_images_keeps_source_order_and_names(tmp_path: Path) -> None:
+    half = tmp_path / "half"
+    full = tmp_path / "full"
+    for directory, names in ((half, ["h0", "h1"]), (full, ["f0", "f1"])):
+        directory.mkdir()
+        for name in names:
+            (directory / f"{name}.jpg").write_bytes(b"stub")
+
+    images, groups = dq.resolve_grouped_images([f"half={half}", f"full={full}"], limit=1)
+
+    assert [path.name for path in images] == ["h0.jpg", "f0.jpg"]
+    assert groups == ["half", "full"]
+    with pytest.raises(SystemExit, match="not found"):
+        dq.resolve_grouped_images([f"missing={tmp_path / 'absent'}"], limit=1)
+
+
+def test_load_dump_reads_groups_and_subsets_frames(tmp_path: Path) -> None:
+    rng = np.random.default_rng(11)
+    heads = _random_heads(rng, count=3)
+    path = _write_dump(
+        tmp_path / "quant_outputs.npz",
+        heads,
+        names=["a", "b", "c"],
+        groups=["half", "full", "full"],
+        scales=[0.1, 0.2, 0.3],
+    )
+
+    dump = eq.load_dump(path)
+    assert dump.groups == ("half", "full", "full")
+
+    subset = dump.subset([2, 0])
+    assert subset.names == ("c", "a")
+    assert subset.groups == ("full", "half")
+    np.testing.assert_allclose(subset.scales, [0.3, 0.1])
+    assert all(head.shape[0] == 2 for head in subset.heads)
+    np.testing.assert_array_equal(subset.heads[0][0], heads[0][2])
+    with pytest.raises(ValueError, match="empty"):
+        dump.subset([])
+
+    legacy = eq.load_dump(_write_dump(tmp_path / "legacy.npz", _random_heads(rng, count=1)))
+    assert legacy.groups == ("",)
+
+
+def test_parse_eval_split_reads_name_images_and_labels() -> None:
+    split = eq.parse_eval_split("half=/data/half/val:/data/half/labels/val")
+    assert split == eq.EvalSplit(
+        name="half",
+        images=Path("/data/half/val"),
+        labels=Path("/data/half/labels/val"),
+    )
+    assert [item.name for item in eq.parse_eval_splits(["a=/i:/l", "b=/i2:/l2"])] == ["a", "b"]
+    with pytest.raises(SystemExit, match="NAME=IMAGES:LABELS"):
+        eq.parse_eval_split("half")
+    with pytest.raises(SystemExit, match="NAME=IMAGES:LABELS"):
+        eq.parse_eval_split("half=/images")
+    with pytest.raises(SystemExit, match="duplicate"):
+        eq.parse_eval_splits(["a=/i:/l", "a=/i2:/l2"])
+
+
+def test_split_indices_prefers_dump_groups_then_labels(tmp_path: Path) -> None:
+    rng = np.random.default_rng(12)
+    grouped = eq.load_dump(
+        _write_dump(
+            tmp_path / "grouped.npz",
+            _random_heads(rng, count=3),
+            names=["a", "a", "c"],
+            groups=["half", "full", "half"],
+        )
+    )
+    spec = eq.EvalSplit("half", tmp_path / "images", tmp_path / "labels")
+    assert eq.split_indices(grouped, spec) == [0, 2]
+
+    labels = tmp_path / "legacy_labels"
+    labels.mkdir()
+    (labels / "a.txt").write_text("", encoding="utf-8")
+    legacy = eq.load_dump(
+        _write_dump(tmp_path / "legacy.npz", _random_heads(rng, count=2), names=["a", "b"])
+    )
+    legacy_spec = eq.EvalSplit("half", tmp_path / "images", labels)
+    assert eq.split_indices(legacy, legacy_spec) == [0]
+
+
+def test_render_split_markdown_has_one_column_per_split() -> None:
+    half = eq.comparison_rows(_report(_all_groups(0.8)), None, None)
+    full = eq.comparison_rows(_report(_all_groups(0.6)), None, None)
+    table = eq.render_split_markdown(
+        {"half": half, "full": full},
+        {"int8": "INT8", "fp32_host": "n/a", "baseline": "n/a"},
+        ["half", "full"],
+    )
+    lines = table.splitlines()
+    assert lines[0] == "| metric | half INT8 | full INT8 |"
+    assert "wrists.pck_all@0.20fw" in table
+    assert len(lines) == 2 + len(half)
+
+
+def test_comparison_rows_include_framing_fractions() -> None:
+    int8 = _report(_all_groups(0.8))
+    int8["framing"] = {
+        "gt_box": {"full_body_fraction": 0.9},
+        "predicted_box": {"full_body_fraction": 0.4, "unclassified_fraction": 0.1},
+    }
+    rows = {row["metric"]: row for row in eq.comparison_rows(int8, None, None)}
+
+    assert rows["framing.gt_full_body_fraction"]["int8"] == 0.9
+    assert rows["framing.pred_full_body_fraction"]["int8"] == 0.4
+    assert rows["framing.pred_unclassified_fraction"]["int8"] == 0.1
+    assert rows["framing.pred_half_body_fraction"]["int8"] is None
+    assert rows["framing.gt_half_body_fraction"]["int8"] is None
+
+
+def test_main_scores_named_dump_splits_side_by_side(tmp_path: Path) -> None:
+    half_labels = tmp_path / "half_labels"
+    full_labels = tmp_path / "full_labels"
+    for labels in (half_labels, full_labels):
+        labels.mkdir()
+        (labels / "frame_0.txt").write_text(_label_line(), encoding="utf-8")
+    rng = np.random.default_rng(13)
+    dump = _write_dump(
+        tmp_path / "quant_outputs.npz",
+        _random_heads(rng, count=2),
+        names=["frame_0", "frame_0"],
+        groups=["half", "full"],
+    )
+    out = tmp_path / "out"
+
+    assert (
+        eq.main(
+            [
+                "--dump",
+                str(dump),
+                "--eval-split",
+                f"half={tmp_path / 'half_images'}:{half_labels}",
+                "--eval-split",
+                f"full={tmp_path / 'full_images'}:{full_labels}",
+                "--out",
+                str(out),
+            ]
+        )
+        == 0
+    )
+
+    for name in ("half", "full"):
+        metrics = json.loads((out / f"metrics_int8_{name}.json").read_text(encoding="utf-8"))
+        assert metrics["meta"]["split"] == name
+        assert metrics["meta"]["frames"] == 1
+
+    table = (out / "comparison_splits.md").read_text(encoding="utf-8")
+    assert table.splitlines()[0] == "| metric | half INT8 | full INT8 |"
+    summary = json.loads((out / "comparison_splits.json").read_text(encoding="utf-8"))
+    assert set(summary["splits"]) == {"half", "full"}
+    assert summary["decision"]["status"] == "unknown"
+
+    primary = json.loads((out / "comparison.json").read_text(encoding="utf-8"))
+    assert primary["split"] == "half"
+    assert (out / "metrics_int8.json").is_file()
+    assert (out / "comparison.md").is_file()
+
+
+def test_split_evaluation_rejects_an_unmatched_name(tmp_path: Path) -> None:
+    labels = tmp_path / "labels"
+    labels.mkdir()
+    (labels / "frame_0.txt").write_text(_label_line(), encoding="utf-8")
+    rng = np.random.default_rng(14)
+    dump = _write_dump(
+        tmp_path / "quant_outputs.npz",
+        _random_heads(rng, count=1),
+        names=["frame_0"],
+        groups=["half"],
+    )
+
+    with pytest.raises(SystemExit, match="no dumped frame"):
+        eq.main(
+            [
+                "--dump",
+                str(dump),
+                "--eval-split",
+                f"full={tmp_path / 'images'}:{labels}",
+                "--out",
+                str(tmp_path / "out"),
+            ]
+        )

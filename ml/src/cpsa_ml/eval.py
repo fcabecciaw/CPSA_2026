@@ -56,6 +56,16 @@ Centroid errors are the distance between the ground-truth centroid (visible
 points) and the predicted centroid (confident points) of the 14 runtime face
 anchors and of each hand, divided by the instance face width.
 
+framing
+    The runtime decides ``full_body`` vs ``half_body`` from the person-box
+    height divided by the face width (``cpsa.vision.subject.framing_state``).
+    The report classifies every ground-truth person twice --- from its own COCO
+    box and from the box of the prediction matched to it --- and reports the
+    fraction in each class.  A full-frame val split must read mostly
+    ``full_body`` and a half-body val split mostly ``half_body``; otherwise the
+    model's box does not describe the true person extent.  The threshold is
+    read from ``SubjectConfig().full_body_ratio``; it is never copied here.
+
 OKS sigmas
 ----------
 ``HALFBUST62_OKS_SIGMAS`` has 62 entries in Ultralytics' convention, i.e. the
@@ -98,6 +108,7 @@ __all__ = [
     "oks_matrix",
     "read_label_file",
     "read_yolo_pose_labels",
+    "runtime_full_body_ratio",
 ]
 
 HALFBUST62_N_KPT = 62
@@ -135,6 +146,22 @@ _EPS = 1e-7
 
 #: xtcocoapi/Ultralytics scale applied to the ground-truth box area in OKS.
 OKS_AREA_SCALE = 0.53
+
+
+def runtime_full_body_ratio() -> float:
+    """Return ``cpsa.vision.subject.SubjectConfig().full_body_ratio``.
+
+    The runtime owns the framing rule; the accuracy report reads the same
+    threshold so a metric and the deployed decision cannot drift apart.
+
+    Raises:
+        ImportError: If the ``cpsa`` runtime package is not importable (an
+            isolated ``cpsa-ml`` install, for example).
+    """
+
+    from cpsa.vision.subject import SubjectConfig
+
+    return float(SubjectConfig().full_body_ratio)
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -208,7 +235,10 @@ class EvalConfig:
     default).  ``match_iou`` associates a prediction with a target for the
     per-keypoint metrics; detection and pose AP use their own thresholds.
     ``score_thr`` filters predictions a second time (the decoders already
-    apply their confidence threshold, so it defaults to 0).
+    apply their confidence threshold, so it defaults to 0).  ``full_body_ratio``
+    is the runtime framing threshold (person-box height / face width); when it
+    is left as ``None`` the value is read from the runtime and, if the runtime
+    is not installed, framing is reported as ``None``.
     """
 
     n_kpt: int = HALFBUST62_N_KPT
@@ -222,6 +252,7 @@ class EvalConfig:
     face_width_source: str = "auto"
     eye_to_face_ratio: float = 2.2
     area_scale: float = OKS_AREA_SCALE
+    full_body_ratio: float | None = None
 
     def __post_init__(self) -> None:
         if self.n_kpt <= 0:
@@ -249,6 +280,15 @@ class EvalConfig:
             raise ValueError("pck_thresholds must be positive")
         if any(not 0.0 < value <= 1.0 for value in self.oks_thresholds):
             raise ValueError("oks_thresholds must be in (0, 1]")
+        if self.full_body_ratio is None:
+            try:
+                ratio = runtime_full_body_ratio()
+            except ImportError:
+                pass
+            else:
+                object.__setattr__(self, "full_body_ratio", ratio)
+        elif not self.full_body_ratio > 0.0:
+            raise ValueError(f"full_body_ratio must be positive, got {self.full_body_ratio}")
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-ready copy of the configuration (recorded in every report)."""
@@ -265,6 +305,9 @@ class EvalConfig:
             "face_width_source": self.face_width_source,
             "eye_to_face_ratio": float(self.eye_to_face_ratio),
             "area_scale": float(self.area_scale),
+            "full_body_ratio": (
+                None if self.full_body_ratio is None else float(self.full_body_ratio)
+            ),
             "groups": {name: list(indices) for name, indices in HALFBUST62_GROUPS},
             "face_anchor_indices": list(HALFBUST62_FACE_ANCHOR_INDICES),
         }
@@ -661,6 +704,38 @@ def _summarize(values: Sequence[float]) -> dict[str, Any]:
     }
 
 
+def _framing_bucket(box: ArrayLike, face_width: float | None, ratio: float) -> str:
+    """Classify one person as ``full_body``, ``half_body`` or ``unclassified``.
+
+    Uses the box test of ``cpsa.vision.subject.framing_state``: a person counts
+    as full body when the box height is at least ``ratio`` face widths.  The
+    face/hand visibility gates of the runtime are deliberately ignored here:
+    this metric asks whether the *box* describes the person extent, not whether
+    the keypoints are confident.  A person without a box or with an unknown
+    face width is unclassified, so the fractions still cover every ground-truth
+    person.
+    """
+
+    if face_width is None or not math.isfinite(face_width) or face_width <= _EPS:
+        return "unclassified"
+    bounds = np.asarray(box, dtype=np.float64).reshape(-1)
+    if bounds.size != 4:
+        return "unclassified"
+    height = float(bounds[3] - bounds[1])
+    if not math.isfinite(height) or height <= 0.0:
+        return "unclassified"
+    return "full_body" if height / float(face_width) >= ratio else "half_body"
+
+
+def _framing_summary(counts: dict[str, int], total: int) -> dict[str, Any]:
+    """Counts and fractions over all ground-truth persons for one box source."""
+
+    summary: dict[str, Any] = {name: int(value) for name, value in counts.items()}
+    for name, value in counts.items():
+        summary[f"{name}_fraction"] = value / total if total else float("nan")
+    return summary
+
+
 # ---------------------------------------------------------------------------
 # Evaluation
 # ---------------------------------------------------------------------------
@@ -679,7 +754,8 @@ def evaluate(
 
     Returns:
         A JSON-ready report with ``config``, ``counts``, ``detection``,
-        ``pose``, ``groups`` and ``centroids``.
+        ``pose``, ``groups``, ``centroids`` and ``framing`` (``None`` when no
+        framing threshold is available).
     """
 
     settings = config or EvalConfig()
@@ -707,6 +783,10 @@ def evaluate(
         "left_hand": [],
         "right_hand": [],
         "face": [],
+    }
+    framing_counts: dict[str, dict[str, int]] = {
+        "gt_box": {"full_body": 0, "half_body": 0, "unclassified": 0},
+        "predicted_box": {"full_body": 0, "half_body": 0, "unclassified": 0},
     }
 
     n_targets = 0
@@ -780,6 +860,16 @@ def evaluate(
                 if person is not None
                 else np.zeros(n_kpt, dtype=np.bool_)
             )
+
+            if settings.full_body_ratio is not None:
+                ratio = settings.full_body_ratio
+                framing_counts["gt_box"][_framing_bucket(target.box, face_width, ratio)] += 1
+                predicted_bucket = (
+                    "unclassified"
+                    if person is None
+                    else _framing_bucket(person.box, face_width, ratio)
+                )
+                framing_counts["predicted_box"][predicted_bucket] += 1
 
             for name, indices in HALFBUST62_GROUPS:
                 index = np.asarray(indices, dtype=np.intp)
@@ -886,4 +976,16 @@ def evaluate(
         },
         "groups": groups,
         "centroids": centroids,
+        "framing": (
+            None
+            if settings.full_body_ratio is None
+            else {
+                "full_body_ratio": float(settings.full_body_ratio),
+                "instances": int(n_instances),
+                **{
+                    source: _framing_summary(counts, n_instances)
+                    for source, counts in framing_counts.items()
+                },
+            }
+        ),
     }
