@@ -149,12 +149,76 @@ CPSA_ML_SLOW=1 uv run pytest -q tests/test_train_smoke.py
 ```
 
 Notebook 03 trains on the **mixed** dataset. `build_mixed_data_yaml` (in
-`cpsa_ml.variant_study`) writes a `data.yaml` that concatenates the half-bust
-and full-frame `images/train` directories, keeps `val` on the half-bust split
-(the primary metric Ultralytics uses for early stopping and `best.pt`) and adds
-`val_full` for the full-frame split. Absolute paths are used because the YAML
-lives outside both dataset roots. If the full-frame root is missing, it logs
+`cpsa_ml.variant_study`) writes a `data.yaml` whose `train` entry is the curated
+train list plus the full-frame `images/train` directory, keeps `val` on the
+half-bust split (the primary metric Ultralytics uses for early stopping and
+`best.pt`), adds `val_full` for the full-frame split and `val_h160` for the
+size-filtered half-bust val list. Absolute paths are used because the YAML lives
+outside both dataset roots. If the full-frame root is missing, it logs
 `WARNING: FULL-FRAME DATASET MISSING` and trains on half-body images only.
+
+### Training-list curation
+
+The demo sees a seated user at 0.45-0.7 m, where hands and face matter most, but
+the built crops are small (median 86x115 px) and 77% of them show no hand at all.
+`cpsa_ml.datasets.curation.curate_train_list` turns the built dataset into an
+explicit Ultralytics train list (`.txt`, one absolute image path per line):
+
+* keep only crops with `height >= min_height` (default 128 px; sizes come from
+  the JPEG headers, so 104k crops take a few seconds);
+* repeat crops that show a hand with `>= 10` visible keypoints `hand_repeat`
+  times (default 2) and, optionally, crops with `>= 5` visible face keypoints
+  `face_repeat` times (default 1 = off); a crop that qualifies for both is
+  repeated `max()` times, never twice over;
+* mix extra `halfbust62` datasets, each `(root, repeat)`, into the same list;
+* write `curated_train.txt`, `curated_val_h160.txt` and
+  `curated_train_summary.json` (counts before/after, hand and face shares, per
+  extra dataset) into the output directory;
+* with `labels_root` set, mirror the images into
+  `<out>/curated_train_mirror/{images,labels}/train` (one symlinked image
+  directory, one symlink per override label) so Ultralytics resolves the Task P
+  pseudo-labels from the mirrored tree instead of the read-only dataset. A
+  missing override label aborts the build rather than mixing GT and pseudo
+  labels.
+
+Measured on the local `halfbust62` build: 103,996 train crops -> 47,983 kept at
+`min_height=128` -> 69,901 list entries with `hand_repeat=2`; the hand share of
+the kept crops rises from 27% to 46%, the face share from 48% to 64%. The val
+split stays the full 4,335 GT crops, with 1,497 of them in the `h >= 160` demo
+list. Notebooks 03 and 04 expose `MIN_HEIGHT`, `HAND_REPEAT`, `FACE_REPEAT`,
+`LABELS_ROOT` (a dataset named `cpsa-halfbust-pl`, located by content) and
+`EXTRA_DATA` (a dataset named `cpsa-hagrid62`, empty when absent).
+
+### Fine-tuning recipe of the study
+
+`variant_study.AUGMENTATIONS` pins the recipe shared by every row, so a library
+default change cannot make the rows incomparable: explicit `optimizer="SGD"`
+(`auto` silently switches to AdamW for short runs) with `lr0=0.01`, `lrf=0.01`,
+`momentum=0.937`, `weight_decay=0.0005`, `warmup_epochs=3`, `cos_lr=True`,
+`degrees=10`, `translate=0.1`, `scale=0.5`, `fliplr=0.5` with the schema
+`flip_idx`, `mosaic=1.0`, `mixup=0`, `copy_paste=0`, `close_mosaic=15`, the Pose
+loss gain at the Ultralytics default (`pose=12.0`, pinned and not tuned) and
+`patience=30`.
+
+* **Motion blur.** Ultralytics 8.4.203 accepts an `augmentations=` train argument
+  (a list of albumentations transforms, serialised into the checkpoint), so
+  `variant_study.build_albumentations()` passes its own default transform list
+  plus `MotionBlur(blur_limit=(3, 9), p=0.15)`; nothing is monkeypatched. Without
+  albumentations (or with a release older than 1.4.4, which the defaults need)
+  the list is not passed, a `motion blur is SKIPPED` warning is logged and
+  `metrics_fp32.json` records `"custom_augmentations": null`, so the run stays
+  honest about what it did. Notebook 04 installs `albumentations==1.4.21`
+  best-effort (`check=False`).
+* **Multi-scale.** Recommendation: **off** (`multi_scale=0.0`, the Ultra
+  default). It resizes the training batch every iteration, which costs step time
+  on 2x T4, and `scale=0.5` already augments scale on these crops; it was not
+  benchmarked on a T4 here, so revisit only when a run has spare time and the
+  `h160` metric shows a reason.
+
+Notebook 03 keeps the `cpsa_ml.train` defaults for the baseline Hard-Swish
+checkpoint; notebook 04 carries this recipe for the urgency run
+(`VARIANTS = [DEFAULT_VARIANTS[2]]`, `EPOCHS = 30`) and the main run
+(`DEFAULT_VARIANTS`, `EPOCHS = 120`).
 
 ## ONNX export and DPU operator check
 

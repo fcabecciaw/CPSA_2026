@@ -150,3 +150,40 @@ def test_push_folder_notebook_matches_canonical() -> None:
         canonical = _load(NOTEBOOK_DIR / f"{stem}.ipynb")
         pushed = _load(NOTEBOOK_DIR / stem / f"{stem}.ipynb")
         assert canonical == pushed
+
+
+def _source(stem: str) -> str:
+    notebook = _load(NOTEBOOK_DIR / f"{stem}.ipynb")
+    return "".join("".join(cell["source"]) for cell in notebook["cells"])
+
+
+@pytest.mark.parametrize("stem", ["03_train_fp32", "04_variant_study"])
+def test_training_notebooks_expose_the_curation_knobs(stem: str) -> None:
+    source = _source(stem)
+    assert "MIN_HEIGHT = 128" in source
+    assert "HAND_REPEAT = 2" in source
+    assert "FACE_REPEAT = 1" in source
+    assert "LABELS_ROOT" in source
+    assert "cpsa-halfbust-pl" in source
+    assert "labels_root=LABELS_ROOT" in source
+    assert "EXTRA_DATA" in source
+    assert "cpsa-hagrid62" in source
+    # Notebook 03 curates explicitly; notebook 04 lets train_study prepare the data.
+    if stem == "03_train_fp32":
+        assert "curate_train_list" in source
+
+
+def test_notebook_04_defaults_to_the_urgent_run() -> None:
+    source = _source("04_variant_study")
+    assert "VARIANTS = [DEFAULT_VARIANTS[2]]" in source  # lrelu 512 -> deploy 384x512
+    assert "EPOCHS = 30" in source
+    assert "the main run uses 120" in source
+    assert "albumentations==" in source  # motion blur is installed best-effort
+    assert "min_height=MIN_HEIGHT" in source
+    assert "extra_data=EXTRA_DATA" in source
+
+
+def test_notebook_03_uses_the_curated_list_in_the_mixed_dataset() -> None:
+    source = _source("03_train_fp32")
+    assert "curated_train=CURATION.train_list" in source
+    assert "val_h160=CURATION.val_h160_list" in source

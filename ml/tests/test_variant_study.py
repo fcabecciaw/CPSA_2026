@@ -10,18 +10,24 @@ from types import SimpleNamespace
 import pytest
 import torch
 import yaml
+from PIL import Image
 
 from cpsa_ml import variant_study
+from cpsa_ml.datasets.curation import ExtraDataset
 from cpsa_ml.models import load_yolo, model_yaml_path
 from cpsa_ml.schema import HALFBUST_62
 from cpsa_ml.variant_study import (
+    ALBUMENTATIONS_MIN_VERSION,
     AUGMENTATIONS,
     DEFAULT_VARIANTS,
+    MOTION_BLUR_DESCRIPTION,
     STUDY_ACTIVATIONS,
     StudyConfig,
     VariantEntry,
+    build_albumentations,
     build_metrics_payload,
     build_mixed_data_yaml,
+    prepare_study_data,
     publish_artifacts,
     train_study,
     train_variant,
@@ -97,12 +103,25 @@ def test_default_variants_use_packaged_configs() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _dataset(root: Path, *, kpt_shape: tuple[int, int] = (62, 3)) -> Path:
-    """Create the image skeleton and ``data.yaml`` of a built dataset."""
+def _label_line(n_keypoints: int) -> str:
+    """One YOLO-pose label row with every keypoint visible."""
+
+    values = [0.0, 0.5, 0.5, 1.0, 1.0] + [0.5, 0.5, 1.0] * n_keypoints
+    return " ".join(f"{value:g}" for value in values)
+
+
+def _dataset(root: Path, *, kpt_shape: tuple[int, int] = (62, 3), crops: int = 2) -> Path:
+    """Create the images, labels and ``data.yaml`` of a built dataset."""
 
     for split in ("train", "val"):
         (root / "images" / split).mkdir(parents=True, exist_ok=True)
         (root / "labels" / split).mkdir(parents=True, exist_ok=True)
+        for index in range(crops):
+            stem = f"{split}-{index}"
+            Image.new("RGB", (64, 200)).save(root / "images" / split / f"{stem}.jpg", format="JPEG")
+            (root / "labels" / split / f"{stem}.txt").write_text(
+                _label_line(kpt_shape[0]) + "\n", encoding="utf-8"
+            )
     (root / "data.yaml").write_text(
         yaml.safe_dump(
             {
@@ -138,15 +157,48 @@ def test_study_config_defaults(tmp_path: Path) -> None:
     assert config.seed == 0
     assert config.epochs == 100
     assert config.batch == 32
+    assert config.patience == 30
     assert config.augmentations == dict(AUGMENTATIONS)
     assert config.resume == {}
     assert config.full_data is None
     assert config.mixed_data == config.publish / "data_mixed.yaml"
+    assert config.min_height == 128
+    assert config.hand_repeat == 2
+    assert config.face_repeat == 1
+    assert config.labels_root is None
+    assert config.extra_data == ()
 
     # Every config owns its augmentation copy.
     config.augmentations["mosaic"] = 0.0
     assert AUGMENTATIONS["mosaic"] == 1.0
     assert _config(tmp_path).augmentations["mosaic"] == 1.0
+
+
+def test_study_config_normalizes_the_curation_knobs(tmp_path: Path) -> None:
+    extra = tmp_path / "hagrid"
+    config = _config(
+        tmp_path,
+        labels_root=str(tmp_path / "halfbust-pl"),
+        extra_data=[(str(extra), 2)],
+    )
+    assert config.labels_root == tmp_path / "halfbust-pl"
+    assert config.extra_data == (ExtraDataset(extra, 2),)
+
+
+def test_augmentations_pin_the_seated_demo_recipe() -> None:
+    assert AUGMENTATIONS["cos_lr"] is True
+    assert AUGMENTATIONS["degrees"] == 10.0
+    assert AUGMENTATIONS["close_mosaic"] == 15
+    assert AUGMENTATIONS["mixup"] == 0.0
+    assert AUGMENTATIONS["fliplr"] == 0.5
+    assert AUGMENTATIONS["scale"] == 0.5
+    assert AUGMENTATIONS["optimizer"] == "SGD"
+    assert AUGMENTATIONS["lr0"] == 0.01
+    assert AUGMENTATIONS["lrf"] == 0.01
+    assert AUGMENTATIONS["momentum"] == 0.937
+    assert AUGMENTATIONS["warmup_epochs"] == 3.0
+    assert AUGMENTATIONS["pose"] == 12.0  # Ultralytics default, deliberately not tuned
+    assert AUGMENTATIONS["multi_scale"] == 0.0  # recommendation: off, it costs speed
 
 
 def test_study_config_normalizes_resume_paths(tmp_path: Path) -> None:
@@ -179,6 +231,9 @@ def test_study_config_normalizes_resume_paths(tmp_path: Path) -> None:
         ({"patience": -1}, "patience"),
         ({"val_conf": 1.5}, "val_conf"),
         ({"val_iou": 0.0}, "val_iou"),
+        ({"min_height": -1}, "min_height"),
+        ({"hand_repeat": 0}, "hand_repeat"),
+        ({"face_repeat": 0}, "face_repeat"),
     ],
 )
 def test_study_config_rejects_invalid_values(tmp_path: Path, overrides: dict, message: str) -> None:
@@ -245,6 +300,63 @@ def test_dataset_root_accepts_a_yaml_or_a_directory(tmp_path: Path) -> None:
     root = _dataset(tmp_path / "dataset")
     assert variant_study.dataset_root(root) == root
     assert variant_study.dataset_root(root / "data.yaml") == root
+
+
+def test_mixed_data_yaml_uses_the_curated_list_and_the_h160_split(tmp_path: Path) -> None:
+    half = _dataset(tmp_path / "halfbust")
+    curated = tmp_path / "work" / "curated_train.txt"
+    curated.parent.mkdir()
+    curated.write_text(str(half / "images" / "train" / "train-0.jpg") + "\n", encoding="utf-8")
+    val_h160 = tmp_path / "work" / "curated_val_h160.txt"
+    val_h160.write_text(str(half / "images" / "val" / "val-0.jpg") + "\n", encoding="utf-8")
+
+    payload = build_mixed_data_yaml(
+        half, None, tmp_path / "data_mixed.yaml", curated_train=curated, val_h160=val_h160
+    )
+
+    assert payload["train"] == [str(curated)]
+    assert payload["val"] == str(half / "images" / "val")
+    assert payload["val_h160"] == str(val_h160)
+
+
+def test_mixed_data_yaml_reports_one_split_per_extra_dataset(tmp_path: Path) -> None:
+    half = _dataset(tmp_path / "halfbust")
+    extra = _dataset(tmp_path / "hagrid")
+    other = _dataset(tmp_path / "other")
+
+    payload = build_mixed_data_yaml(
+        half, None, tmp_path / "data_mixed.yaml", extra_roots=[extra, other]
+    )
+
+    assert payload["val_extra1"] == str(extra / "images" / "val")
+    assert payload["val_extra2"] == str(other / "images" / "val")
+
+
+def test_mixed_data_yaml_rejects_an_extra_dataset_with_another_schema(tmp_path: Path) -> None:
+    half = _dataset(tmp_path / "halfbust")
+    extra = _dataset(tmp_path / "hagrid", kpt_shape=(17, 3))
+
+    with pytest.raises(ValueError, match="does not match"):
+        build_mixed_data_yaml(half, None, tmp_path / "data_mixed.yaml", extra_roots=[extra])
+
+
+def test_prepare_study_data_writes_the_curated_lists(tmp_path: Path) -> None:
+    extra = _dataset(tmp_path / "hagrid")
+    config = _config(tmp_path, extra_data=[(extra, 1)])
+
+    data = prepare_study_data(config)
+
+    assert data.train_list == config.mixed_data.parent / "curated_train.txt"
+    assert data.curation.summary_path.is_file()
+    assert data.summary["train_images_total"] == 2
+    assert data.summary["train_entries"] == 4  # two crops with every keypoint visible
+    assert data.summary["extra_entries"] == 2
+    lines = data.train_list.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 6
+    assert data.mixed_data["train"] == [str(data.train_list)]
+    assert data.mixed_data["val_h160"] == str(data.curation.val_h160_list)
+    assert data.mixed_data["val_extra1"] == str(extra / "images" / "val")
+    assert config.mixed_data.is_file()
 
 
 # ---------------------------------------------------------------------------
@@ -482,12 +594,41 @@ def test_build_metrics_payload_records_the_variant(tmp_path: Path) -> None:
     assert payload["metrics"] == {
         "half": {"metrics/mAP50-95(P)": 0.4},
         "full": {"metrics/mAP50-95(P)": 0.3},
+        "h160": None,
     }
     assert payload["speed_ms"] == {"inference": 1.5}
     assert payload["versions"] == {"ultralytics": "8.4.203"}
     assert payload["augmentations"] == dict(AUGMENTATIONS)
+    assert payload["custom_augmentations"] is None
+    assert payload["curation"] is None
+    assert payload["extra_metrics"] == []
+    assert payload["extra_data"] == []
     assert payload["mixed_data"] == str(config.mixed_data)
     assert payload["full_data"] is None
+
+
+def test_build_metrics_payload_reports_the_h160_split_and_the_curation(tmp_path: Path) -> None:
+    payload = build_metrics_payload(
+        DEFAULT_VARIANTS[0],
+        _config(tmp_path, extra_data=[(tmp_path / "hagrid", 2)]),
+        artifacts={},
+        transfer=None,
+        results={"metrics/mAP50-95(P)": 0.4},
+        results_h160={"metrics/mAP50-95(P)": 0.5},
+        extra_metrics=[{"root": "/data/hagrid", "repeat": 2, "results": {}}],
+        curation={"train_entries": 7},
+        custom_augmentations=[MOTION_BLUR_DESCRIPTION],
+    )
+
+    assert payload["metrics"] == {
+        "half": {"metrics/mAP50-95(P)": 0.4},
+        "full": None,
+        "h160": {"metrics/mAP50-95(P)": 0.5},
+    }
+    assert payload["curation"] == {"train_entries": 7}
+    assert payload["custom_augmentations"] == [MOTION_BLUR_DESCRIPTION]
+    assert payload["extra_metrics"] == [{"root": "/data/hagrid", "repeat": 2, "results": {}}]
+    assert payload["extra_data"] == [{"root": str(tmp_path / "hagrid"), "repeat": 2}]
 
 
 def test_build_metrics_payload_marks_missing_evidence(tmp_path: Path) -> None:
@@ -509,7 +650,11 @@ def test_build_metrics_payload_marks_missing_evidence(tmp_path: Path) -> None:
         transfer=None,
         results={"metrics/mAP50-95(P)": 0.4},
     )
-    assert half_only["metrics"] == {"half": {"metrics/mAP50-95(P)": 0.4}, "full": None}
+    assert half_only["metrics"] == {
+        "half": {"metrics/mAP50-95(P)": 0.4},
+        "full": None,
+        "h160": None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -549,7 +694,8 @@ class _FakeYOLO:
     def val(self, **kwargs: object) -> SimpleNamespace:
         self.val_kwargs = dict(kwargs)
         type(self).val_calls.append(dict(kwargs))
-        score = 0.42 if kwargs.get("split") == "val" else 0.31
+        scores = {"val": 0.42, "val_full": 0.31, "val_h160": 0.35}
+        score = scores.get(str(kwargs.get("split")), 0.21)
         return SimpleNamespace(
             results_dict={"metrics/mAP50-95(P)": score},
             speed={"inference": 1.5},
@@ -586,6 +732,7 @@ def fake_runtime(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         return Path(output)
 
     monkeypatch.setattr(onnx_check, "export_onnx", export_onnx)
+    monkeypatch.setattr(variant_study, "build_albumentations", lambda: None)
     return SimpleNamespace(export_calls=export_calls, yolo=_FakeYOLO)
 
 
@@ -594,6 +741,7 @@ def test_train_variant_trains_at_its_size_then_validates_and_exports_at_deploy_s
 ) -> None:
     entry = VariantEntry("lrelu", 384, (288, 384))
     full = _dataset(tmp_path / "fullframe")
+    extra = _dataset(tmp_path / "hagrid")
     config = _config(
         tmp_path,
         variants=(entry,),
@@ -604,6 +752,7 @@ def test_train_variant_trains_at_its_size_then_validates_and_exports_at_deploy_s
         workers=0,
         run_prefix="study",
         full_data=full,
+        extra_data=[(extra, 2)],
     )
 
     summary = train_variant(entry, config)
@@ -612,6 +761,14 @@ def test_train_variant_trains_at_its_size_then_validates_and_exports_at_deploy_s
     assert built.train_kwargs["imgsz"] == 384
     assert built.train_kwargs["data"] == str(config.mixed_data)
     assert config.mixed_data.is_file()
+    mixed = yaml.safe_load(config.mixed_data.read_text(encoding="utf-8"))
+    assert mixed["train"] == [
+        str(config.mixed_data.parent / "curated_train.txt"),
+        str(full / "images" / "train"),
+    ]
+    assert mixed["val_h160"] == str(config.mixed_data.parent / "curated_val_h160.txt")
+    assert mixed["val_extra1"] == str(extra / "images" / "val")
+    assert "augmentations" not in built.train_kwargs
     assert built.train_kwargs["epochs"] == 2
     assert built.train_kwargs["batch"] == 4
     assert built.train_kwargs["device"] == "cpu"
@@ -624,7 +781,7 @@ def test_train_variant_trains_at_its_size_then_validates_and_exports_at_deploy_s
         assert built.train_kwargs[key] == value
 
     validated = fake_runtime.yolo.created[1]
-    primary, full_call = fake_runtime.yolo.val_calls
+    primary, full_call, h160_call, extra_call = fake_runtime.yolo.val_calls
     assert validated is not fake_runtime.yolo.created[0]
     assert primary["imgsz"] == [288, 384]
     assert primary["split"] == "val"
@@ -634,6 +791,8 @@ def test_train_variant_trains_at_its_size_then_validates_and_exports_at_deploy_s
     assert primary["device"] == "cpu"
     assert full_call["split"] == "val_full"
     assert full_call["data"] == str(config.mixed_data)
+    assert h160_call["split"] == "val_h160"
+    assert extra_call["split"] == "val_extra1"
 
     assert fake_runtime.export_calls[0]["imgsz"] == (288, 384)
     assert fake_runtime.export_calls[0]["opset"] == 17
@@ -646,7 +805,18 @@ def test_train_variant_trains_at_its_size_then_validates_and_exports_at_deploy_s
     assert payload["metrics"] == {
         "half": {"metrics/mAP50-95(P)": 0.42},
         "full": {"metrics/mAP50-95(P)": 0.31},
+        "h160": {"metrics/mAP50-95(P)": 0.35},
     }
+    assert payload["extra_metrics"] == [
+        {
+            "root": str(extra),
+            "repeat": 2,
+            "split": "val_extra1",
+            "results": {"metrics/mAP50-95(P)": 0.21},
+        }
+    ]
+    assert payload["curation"]["train_images_total"] == 2
+    assert payload["custom_augmentations"] is None
     assert payload["speed_ms"] == {"inference": 1.5}
     assert payload["onnx"] == str(published / "deploy.onnx")
     assert payload["transfer"]["transferred"] == 3
@@ -661,9 +831,28 @@ def test_train_variant_trains_at_its_size_then_validates_and_exports_at_deploy_s
             "results.csv": str(published / "results.csv"),
             "deploy.onnx": str(published / "deploy.onnx"),
             "metrics_fp32.json": str(published / "metrics_fp32.json"),
+            "curated_summary.json": str(config.mixed_data.parent / "curated_train_summary.json"),
             "transfer_report.json": str(published / "transfer_report.json"),
         },
     }
+
+
+def test_train_variant_passes_motion_blur_and_records_it(
+    tmp_path: Path, fake_runtime: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entry = VariantEntry("lrelu", 512, (384, 512))
+    config = _config(tmp_path, variants=(entry,))
+    motion_blur = ["motion-blur"]
+    monkeypatch.setattr(variant_study, "build_albumentations", lambda: motion_blur)
+
+    train_variant(entry, config)
+
+    built = fake_runtime.yolo.created[0]
+    assert built.train_kwargs["augmentations"] is motion_blur
+    payload = json.loads(
+        (config.publish / entry.name / "metrics_fp32.json").read_text(encoding="utf-8")
+    )
+    assert payload["custom_augmentations"] == [MOTION_BLUR_DESCRIPTION]
 
 
 def test_train_variant_resumes_from_the_entry_checkpoint(
@@ -706,21 +895,130 @@ def test_train_variant_rejects_a_missing_resume_checkpoint(
     assert fake_runtime.yolo.created == []
 
 
-def test_train_study_runs_every_row_in_order(
+def test_train_study_prepares_the_data_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     entries = DEFAULT_VARIANTS[:3]
     config = _config(tmp_path, variants=entries)
     calls: list[str] = []
+    prepared = prepare_study_data(config)
+    prepare_calls: list[StudyConfig] = []
+    received: list[object] = []
 
-    def fake_train(entry: VariantEntry, study: StudyConfig) -> dict:
+    def fake_prepare(study: StudyConfig) -> variant_study.StudyData:
+        prepare_calls.append(study)
+        return prepared
+
+    def fake_train(entry: VariantEntry, study: StudyConfig, *, data: object = None) -> dict:
         assert study is config
         calls.append(entry.name)
+        received.append(data)
         return {"variant": entry.name, "run_dir": "run", "artifacts": {}}
 
+    monkeypatch.setattr(variant_study, "prepare_study_data", fake_prepare)
     monkeypatch.setattr(variant_study, "train_variant", fake_train)
 
     summaries = train_study(config)
 
+    assert prepare_calls == [config]
     assert calls == [entry.name for entry in entries]
+    assert received == [prepared, prepared, prepared]
     assert [summary["variant"] for summary in summaries] == calls
+
+
+# ---------------------------------------------------------------------------
+# Motion blur (albumentations train argument)
+# ---------------------------------------------------------------------------
+
+
+class _FakeAlbumentations:
+    """Stand-in for the ``albumentations`` module: records the transform arguments."""
+
+    def __init__(self, version: str = ALBUMENTATIONS_MIN_VERSION) -> None:
+        self.__version__ = version
+        self.built: list[tuple[str, dict]] = []
+
+    def _transform(self, name: str, **kwargs: object) -> SimpleNamespace:
+        self.built.append((name, dict(kwargs)))
+        return SimpleNamespace(name=name, kwargs=kwargs)
+
+    def Blur(self, **kwargs: object) -> SimpleNamespace:  # noqa: N802 - mirrors albumentations
+        return self._transform("Blur", **kwargs)
+
+    def MedianBlur(self, **kwargs: object) -> SimpleNamespace:  # noqa: N802
+        return self._transform("MedianBlur", **kwargs)
+
+    def ToGray(self, **kwargs: object) -> SimpleNamespace:  # noqa: N802
+        return self._transform("ToGray", **kwargs)
+
+    def CLAHE(self, **kwargs: object) -> SimpleNamespace:  # noqa: N802
+        return self._transform("CLAHE", **kwargs)
+
+    def RandomBrightnessContrast(self, **kwargs: object) -> SimpleNamespace:  # noqa: N802
+        return self._transform("RandomBrightnessContrast", **kwargs)
+
+    def RandomGamma(self, **kwargs: object) -> SimpleNamespace:  # noqa: N802
+        return self._transform("RandomGamma", **kwargs)
+
+    def ImageCompression(self, **kwargs: object) -> SimpleNamespace:  # noqa: N802
+        return self._transform("ImageCompression", **kwargs)
+
+    def MotionBlur(self, **kwargs: object) -> SimpleNamespace:  # noqa: N802
+        return self._transform("MotionBlur", **kwargs)
+
+
+def _fake_albumentations(
+    monkeypatch: pytest.MonkeyPatch, module: _FakeAlbumentations | None
+) -> None:
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args: object, **kwargs: object) -> object:
+        if name == "albumentations":
+            if module is None:
+                raise ImportError("No module named 'albumentations'")
+            return module
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+
+def test_build_albumentations_adds_motion_blur_to_the_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _FakeAlbumentations()
+    _fake_albumentations(monkeypatch, module)
+
+    transforms = build_albumentations()
+
+    assert [name for name, _ in module.built] == [
+        "Blur",
+        "MedianBlur",
+        "ToGray",
+        "CLAHE",
+        "RandomBrightnessContrast",
+        "RandomGamma",
+        "ImageCompression",
+        "MotionBlur",
+    ]
+    assert module.built[-1][1] == {"blur_limit": (3, 9), "p": 0.15}
+    assert module.built[0][1] == {"p": 0.01}
+    assert transforms is not None and len(transforms) == 8
+
+
+def test_build_albumentations_skips_without_the_library(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _fake_albumentations(monkeypatch, None)
+
+    with caplog.at_level(logging.WARNING):
+        assert build_albumentations() is None
+
+    assert "motion blur is SKIPPED" in caplog.text
+
+
+def test_build_albumentations_skips_an_old_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fake_albumentations(monkeypatch, _FakeAlbumentations("1.3.9"))
+
+    assert build_albumentations() is None
