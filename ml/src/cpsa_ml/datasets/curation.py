@@ -35,16 +35,19 @@ import logging
 import os
 import shutil
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
 
 from cpsa_ml.schema import KeypointSchema, get_schema
+
+_T = TypeVar("_T")
 
 __all__ = [
     "FACE_MIN_VISIBLE",
@@ -321,6 +324,30 @@ def _mirror_train_images(
     return mirrored
 
 
+def _parallel_map(
+    function: Callable[[Path], _T], items: Sequence[Path], label: str, workers: int = 16
+) -> list[_T]:
+    """Map ``function`` over files with a thread pool, printing progress.
+
+    The work is I/O-bound (small reads on a possibly network-mounted disk), so
+    threads overlap the latency; results keep the input order.
+    """
+
+    results: list[_T] = []
+    started = time.perf_counter()
+    step = max(len(items) // 10, 1)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for index, result in enumerate(pool.map(function, items, chunksize=64), start=1):
+            results.append(result)
+            if index % step == 0 or index == len(items):
+                print(
+                    f"curation: {index}/{len(items)} {label} scanned "
+                    f"({time.perf_counter() - started:.0f} s)",
+                    flush=True,
+                )
+    return results
+
+
 def curate_train_list(config: CurationConfig) -> CurationResult:
     """Write the curated train list, the size-filtered val list and the summary.
 
@@ -353,18 +380,24 @@ def curate_train_list(config: CurationConfig) -> CurationResult:
         raise FileNotFoundError(f"no images under {root / 'images' / 'train'}")
     val_images = _image_files(root / "images" / "val")
 
-    kept: list[Path] = []
-    multiplicity: dict[Path, int] = {}
-    hand_all = face_all = hand_kept = face_kept = missing_labels = 0
-    for image in train_images:
+    def scan(image: Path) -> tuple[bool, bool, bool, int]:
         label_path = labels_dir / f"{image.stem}.txt"
         has_hand, has_face = visible_keypoint_flags(
             label_path, groups, n_keypoints=len(schema.names)
         )
-        missing_labels += int(not label_path.is_file())
+        return has_hand, has_face, label_path.is_file(), image_height(image)
+
+    # Network-mounted datasets (Kaggle /kaggle/input) are slow per small file,
+    # so labels and image headers are read by a thread pool, with progress.
+    scanned = _parallel_map(scan, train_images, "train crops")
+    kept: list[Path] = []
+    multiplicity: dict[Path, int] = {}
+    hand_all = face_all = hand_kept = face_kept = missing_labels = 0
+    for image, (has_hand, has_face, has_label, height) in zip(train_images, scanned, strict=True):
+        missing_labels += int(not has_label)
         hand_all += int(has_hand)
         face_all += int(has_face)
-        if image_height(image) < config.min_height:
+        if height < config.min_height:
             continue
         kept.append(image)
         hand_kept += int(has_hand)
@@ -412,7 +445,12 @@ def curate_train_list(config: CurationConfig) -> CurationResult:
             }
         )
 
-    val_h160 = [image for image in val_images if image_height(image) >= config.val_min_height]
+    val_heights = _parallel_map(image_height, val_images, "val crops")
+    val_h160 = [
+        image
+        for image, height in zip(val_images, val_heights, strict=True)
+        if height >= config.val_min_height
+    ]
     train_list = out_dir / TRAIN_LIST_NAME
     train_list.write_text("\n".join(entries) + "\n", encoding="utf-8")
     val_h160_list = out_dir / VAL_H160_LIST_NAME
