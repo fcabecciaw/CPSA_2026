@@ -704,6 +704,136 @@ runs are left to the user. Locally:
   `cpsa-ml-autolabel` script; `ruff check .` is clean and the touched Python
   files and notebook 07 are formatted.
 
+## Hand model: board fine-tune fallback
+
+Use this runbook when the notebook-08 hand model is weak on real F200 IR frames.
+It captures raw top-down IR frames on the board, auto-labels them on the host
+with the current `best.pt`, fine-tunes locally (CPU is enough) and hands the new
+checkpoint to the T6 quantize/compile flow. Nothing here runs on the board
+automatically.
+
+**Safety.** On 2026-11-11 the board froze when an IR capture ran alongside the
+demo services. The capture script refuses to open the camera while
+`cpsa-supervisor` or `cpsa-dpu` is active, so the services must be stopped first.
+The recordings contain faces: keep the frames, the auto-labelled dataset and the
+fine-tuned weights local; never upload them to Kaggle or anywhere else.
+
+### 1. Stop the demo services on the board
+
+```bash
+ssh kria@10.42.0.83
+sudo systemctl stop cpsa-supervisor cpsa-dpu
+```
+
+### 2. Capture raw IR/depth frames on the board
+
+The venv is `/home/kria/cpsa/.venv` (see `deploy/README.md`); the script is in the
+deployed tree at `/home/kria/cpsa/scripts/capture_ir_frames.py`.
+
+```bash
+cd /home/kria/cpsa
+.venv/bin/python scripts/capture_ir_frames.py \
+  --out build/ir_capture_20261112 \
+  --count 300 --every 2 --max-seconds 120 \
+  --match RealSense
+```
+
+* `--count` frames are saved (every `--every`-th delivered frame), ending at
+  `--max-seconds` or on Ctrl-C; the camera is closed in all three cases.
+* Output: `ir_XXXXX.png` (raw 8-bit IR, 640x480), `depth_XXXXX.npy` (raw Z16)
+  and `meta.json` (camera node, timestamps, counts, stop reason).
+* The services check is part of the run. `--allow-services` skips it and should
+  not be used during a demo.
+
+### 3. Copy the frames to the host
+
+```bash
+scp -r kria@10.42.0.83:/home/kria/cpsa/build/ir_capture_20261112 \
+  build/ir_capture_20261112
+```
+
+The frames stay untracked under `build/`.
+
+### 4. Auto-label with the current hand model
+
+```bash
+cd ml
+.venv/bin/python -m cpsa_ml.datasets.irpseudo \
+  --frames ../build/ir_capture_20261112 \
+  --weights ../build/models/hand_topdown/best.pt \
+  --out ../build/ir_pseudo \
+  --conf 0.5 --kpt-conf 0.5 --val-ratio 0.15 --seed 0 \
+  --mix-handframe ../build/hand_topdown --mix-ratio 1.0
+```
+
+* The frames go through the runtime IR look (min-max, CLAHE `3.0` on `(8, 8)`,
+  three equal channels) before prediction, so the labels see the model input.
+* A frame is kept only if **every** detected hand passes `--conf` and has at
+  least 15 of 21 keypoints above `--kpt-conf`; a frame with any weak hand is
+  dropped whole, and weak keypoints of kept hands get `v = 0`.
+* `--frames-npy ir.npy` (instead of `--frames`) reads an `N x H x W` uint8
+  stack, such as the 50 frames captured on 2026-11-11.
+* `--mix-handframe` copies a seeded subset of an existing full-frame dataset's
+  train split into the new train split (`--mix-ratio` mixed frames per kept
+  frame), which limits forgetting; `--mix-ratio 0` disables the mix.
+* Output: `../build/ir_pseudo/` with `images/{train,val}`, `labels/{train,val}`,
+  `data.yaml`, `stats.json` (kept/dropped counts, thresholds, sources) and
+  `contact_sheet.png`. Remove an existing run with `--overwrite` or use a fresh
+  directory.
+
+### 5. Inspect the contact sheet before training
+
+```bash
+xdg-open ../build/ir_pseudo/contact_sheet.png
+```
+
+Check that every visible hand has a box and keypoints and that no hand is
+unlabelled. If the model misses many hands, lower `--conf`/`--kpt-conf`
+carefully and re-read `stats.json`, or capture more frames first.
+
+### 6. Fine-tune from the current checkpoint
+
+```bash
+cd ml
+.venv/bin/python -m cpsa_ml.finetune_hand \
+  --weights ../build/models/hand_topdown/best.pt \
+  --data ../build/ir_pseudo/data.yaml \
+  --epochs 20 --imgsz 320 --batch 16 --device cpu \
+  --out ../build/hand_finetune
+```
+
+The recipe starts from the given weights with `lr0=0.002`, `mosaic=0.5`,
+`degrees=180`, `fliplr=0.5`, `hsv_h=0`, `hsv_s=0`, `hsv_v=0.3` and exports the
+DPU graph at `256x320`. The local `ml/.venv` torch is CPU-only; `--device 0`
+(or `0,1`) uses CUDA later. Outputs:
+
+* `../build/hand_finetune/best.pt` — the fine-tuned checkpoint;
+* `../build/hand_finetune/best.onnx` — fixed `1x3x256x320`, opset 17;
+* `../build/hand_finetune/results.csv` — the training log.
+
+### 7. Continue with the T6 quantize/compile flow
+
+Use the new checkpoint in T6 step 2 instead of the notebook-08 one:
+
+```bash
+tools/vitis/run_vitis.sh python tools/vitis/dump_quant_outputs.py \
+  --weights build/hand_finetune/best.pt \
+  --calib-images train=build/ir_pseudo/images/val \
+  --test-images half=build/ir_pseudo/images/val \
+  --calib-count 120 --test-count 64 --height 256 --width 320 --threads 1 \
+  --out build/vitis/hand_topdown/quant
+```
+
+Then T6 step 3 (compile) and the evaluation steps are unchanged; rebuild the
+overlay contact sheet on the real IR frames and compare it with step 5.
+
+### 8. Restart the demo services
+
+```bash
+ssh kria@10.42.0.83
+sudo systemctl start cpsa-supervisor cpsa-dpu
+```
+
 ## Licences
 
 * Ultralytics is **AGPL-3.0**. It is isolated in `ml/`; trained weights are

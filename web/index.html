@@ -43,6 +43,12 @@
           <button type="button" id="mode-medical" data-mode="medical" aria-pressed="false">
             Medicale
           </button>
+          <button type="button" id="mode-hologram" data-mode="hologram" aria-pressed="false">
+            Ologramma
+          </button>
+          <button type="button" id="mode-rps" data-mode="rps" aria-pressed="false">
+            Sasso-carta-forbice
+          </button>
         </div>
         <p id="mode-status" class="mode-status">In attesa di connessione…</p>
         <p id="mode-error" class="mode-error" role="status" aria-live="polite"></p>
@@ -69,7 +75,7 @@
           </section>
         </div>
 
-        <section class="panel skeleton-panel" aria-labelledby="skeleton-title">
+        <section class="panel skeleton-panel" id="view-medical" aria-labelledby="skeleton-title">
           <header class="panel-head">
             <h2 id="skeleton-title">Scheletro</h2>
             <span class="hint">HALFBUST_62 · specchiato</span>
@@ -91,6 +97,60 @@
               <li><span class="legend-swatch legend-hands" aria-hidden="true"></span>Mani</li>
             </ul>
             <p class="hint" id="skeleton-meta"></p>
+          </div>
+        </section>
+
+        <section
+          class="panel hologram-panel"
+          id="view-hologram"
+          aria-labelledby="hologram-title"
+          hidden
+        >
+          <header class="panel-head">
+            <h2 id="hologram-title">Ologramma</h2>
+            <span class="hint">hand21 · 3D · profondità IR</span>
+          </header>
+          <div class="canvas-wrap">
+            <canvas
+              id="hologram"
+              role="img"
+              aria-label="Ologramma non disponibile: in attesa di dati."
+            ></canvas>
+            <p class="canvas-empty" id="hologram-empty">In attesa della mano…</p>
+          </div>
+          <div class="skeleton-footer">
+            <ul class="legend" aria-label="Legenda dell'ologramma">
+              <li><span class="legend-swatch legend-joint" aria-hidden="true"></span>Articolazioni</li>
+              <li><span class="legend-swatch legend-bone" aria-hidden="true"></span>Ossa</li>
+              <li><span class="legend-swatch legend-grid" aria-hidden="true"></span>Piano del tavolo</li>
+            </ul>
+            <p class="hint" id="hologram-meta"></p>
+          </div>
+        </section>
+
+        <section class="panel rps-panel" id="view-rps" aria-labelledby="rps-title" hidden>
+          <header class="panel-head">
+            <h2 id="rps-title">Sasso, carta, forbice</h2>
+            <span class="hint" id="rps-phase"></span>
+          </header>
+          <p class="rps-count" id="rps-count" aria-live="polite" role="status">Mostra la mano per iniziare</p>
+          <div class="rps-duel">
+            <div class="rps-side">
+              <span class="rps-icon" id="rps-player-icon" aria-hidden="true">·</span>
+              <p class="rps-side-label">Tu</p>
+              <p class="rps-gesture" id="rps-player">—</p>
+            </div>
+            <p class="rps-versus">contro</p>
+            <div class="rps-side">
+              <span class="rps-icon" id="rps-board-icon" aria-hidden="true">·</span>
+              <p class="rps-side-label">Tavolo</p>
+              <p class="rps-gesture" id="rps-board">—</p>
+            </div>
+          </div>
+          <ul class="rps-score" id="rps-score" aria-label="Punteggio"></ul>
+          <div class="canvas-wrap rps-preview">
+            <canvas id="rps-canvas" role="img" aria-label="Anteprima della mano"></canvas>
+            <p class="canvas-empty" id="rps-empty">Mano non visibile</p>
           </div>
         </section>
 

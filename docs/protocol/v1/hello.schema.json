@@ -22,7 +22,9 @@
         "enum": [
           "idle",
           "lab",
-          "medical"
+          "hologram",
+          "medical",
+          "rps"
         ]
       }
     },

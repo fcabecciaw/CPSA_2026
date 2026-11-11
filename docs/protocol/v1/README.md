@@ -23,3 +23,7 @@ Live video (protocol addition, v1 compatible; F14):
 - With no analyzed frames (idle or another mode) the response stays open and sends nothing. When `server.video` is false the endpoint answers `404` with `{"error": "video_disabled"}`.
 - Frames are only displayed live; this path never writes them to disk.
 
+Hand demos (protocol additions, v1 compatible; F-E):
+- `hologram.hands` (state, at most 30 Hz): one analyzed IR frame. `width` × `height` are the IR frame size; each hand carries `score`, `box` in IR pixels, `kpts2d` as `[u, v, conf]` × 21 and `kpts3d` as `[x, y, z]` in metres in the IR camera frame, or `null` for a keypoint without a valid depth measurement. `timing.dpu_ms` is the last inference and `timing.total_ms` the whole chain.
+- `rps.state` (state, on change and at 10 Hz during the countdown): the rock/paper/scissors round. `phase` is `waiting`, `ready`, `countdown`, `shoot` or `result`; `count` is 3, 2, 1 or `null`; `player` is a gesture or `none`; `player_p` is the vote share; `board` is the move the board played; `outcome` is `win`, `lose`, `draw` or `unclear`; `score` counts rounds; `hand.kpts2d` is the live hand, or `hand` is `null`.
+

@@ -31,7 +31,7 @@ from cpsa.vision.trigger import TriggerConfig
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 VISION_MODEL_KINDS = ("onnx", "xmodel")
-SUPERVISOR_MODES = ("idle", "medical")
+SUPERVISOR_MODES = ("idle", "hologram", "medical", "rps")
 MEDICAL_TRIGGERS = ("imu", "vision")
 """Episode trigger sources (FR-026)."""
 
@@ -42,6 +42,16 @@ DEFAULT_CAMERA_MATCH = "RealSense"
 The adapters own the discovery itself; the application layer may not import
 them, so the default the demo camera reports is repeated here.
 """
+
+DEFAULT_IR_FX = 430.0
+DEFAULT_IR_FY = 430.0
+DEFAULT_IR_CX = 320.0
+DEFAULT_IR_CY = 240.0
+"""Nominal F200 IR pinhole until a calibration exists (hands demos plan)."""
+
+DEFAULT_DEPTH_SCALE_M = 3.125e-5
+DEFAULT_DEPTH_OFFSET_M = 0.0
+"""Raw Z16 depth to metres (hands demos plan)."""
 EnumT = TypeVar("EnumT", bound=Enum)
 
 
@@ -263,6 +273,75 @@ class MedicalConfig:
 
 
 @dataclass(frozen=True)
+class HandsModelConfig:
+    """The hand pose model (hands demos plan, T4).
+
+    ``input_height`` and ``input_width`` document the compiled graph size; the
+    DPU estimator reads the real input size from the ``.xmodel``.
+    """
+
+    path: Path
+    input_height: int = 256
+    input_width: int = 320
+    conf_thr: float = 0.25
+    iou_thr: float = 0.45
+
+
+@dataclass(frozen=True)
+class HandsCameraConfig:
+    """The IR/depth node selection; ``auto`` matches the card name.
+
+    ``fps`` is the requested INZI frame rate, which also caps the perception loop.
+    """
+
+    match: str = DEFAULT_CAMERA_MATCH
+    fps: float = 30.0
+
+
+@dataclass(frozen=True)
+class HandsIntrinsicsConfig:
+    """IR pinhole intrinsics used by the 2D-to-3D lift."""
+
+    fx: float = DEFAULT_IR_FX
+    fy: float = DEFAULT_IR_FY
+    cx: float = DEFAULT_IR_CX
+    cy: float = DEFAULT_IR_CY
+
+
+@dataclass(frozen=True)
+class HandsDepthConfig:
+    """Raw Z16 depth to metres: ``depth_m = raw * scale_m + offset_m``."""
+
+    scale_m: float = DEFAULT_DEPTH_SCALE_M
+    offset_m: float = DEFAULT_DEPTH_OFFSET_M
+
+
+@dataclass(frozen=True)
+class HandsRpsConfig:
+    """Rock/paper/scissors round timings and thresholds (T4)."""
+
+    classifier_path: Path
+    ready_s: float = 0.5
+    countdown_step_s: float = 0.7
+    shoot_s: float = 0.4
+    result_s: float = 3.0
+    score_reset_s: float = 20.0
+    min_share: float = 0.6
+
+
+@dataclass(frozen=True)
+class HandsConfig:
+    """The optional ``hands`` section: one perception chain for both hand modes."""
+
+    model: HandsModelConfig
+    camera: HandsCameraConfig = field(default_factory=HandsCameraConfig)
+    intrinsics: HandsIntrinsicsConfig = field(default_factory=HandsIntrinsicsConfig)
+    depth: HandsDepthConfig = field(default_factory=HandsDepthConfig)
+    rps: HandsRpsConfig | None = None
+    """The ``rps`` subsection; ``None`` when the document has no classifier."""
+
+
+@dataclass(frozen=True)
 class Config:
     log: LogConfig
     bluecoins: BlueCoinsConfig
@@ -272,6 +351,7 @@ class Config:
     camera: CameraConfig
     vision: VisionConfig
     medical: MedicalConfig = field(default_factory=MedicalConfig)
+    hands: HandsConfig | None = None
     server: ServerConfig = field(default_factory=ServerConfig)
     supervisor: SupervisorConfig = field(default_factory=SupervisorConfig)
 
@@ -315,6 +395,8 @@ def parse(data: object) -> Config:
     cooldown_s = dispatch.positive("cooldown_s")
     verification_deadline_s = dispatch.positive("verification_deadline_s")
     medical = _medical_config(root.optional_section("medical"), cooldown_s)
+    hands_section = root.optional_section("hands")
+    hands = _hands_config(hands_section) if hands_section is not None else None
 
     if vision.fast_budget_s >= verification_deadline_s:
         raise ConfigError(
@@ -374,6 +456,7 @@ def parse(data: object) -> Config:
         ),
         vision=vision,
         medical=medical,
+        hands=hands,
         server=server,
         supervisor=supervisor,
     )
@@ -437,6 +520,75 @@ def _medical_config(medical: _Section | None, cooldown_s: float) -> MedicalConfi
     )
     for section in (medical, thresholds):
         section.reject_unknown()
+    return config
+
+
+def _hands_config(hands: _Section) -> HandsConfig:
+    """Build the validated optional ``hands`` section (T4).
+
+    ``model.path`` is required; every other key takes the documented demo
+    default, so a document only lists what it changes. An absent ``rps``
+    section leaves :attr:`HandsConfig.rps` ``None``: the ``rps`` mode then
+    fails its start with ``model_missing`` instead of loading a classifier.
+    """
+    model = hands.section("model")
+    camera = hands.optional_section("camera")
+    intrinsics = hands.optional_section("intrinsics")
+    depth = hands.optional_section("depth")
+    rps_section = hands.optional_section("rps")
+    if camera is not None:
+        camera_match = camera.optional_text("match", DEFAULT_CAMERA_MATCH)
+        camera_fps = camera.optional_positive("fps", 30.0)
+        camera.reject_unknown()
+    else:
+        camera_match = DEFAULT_CAMERA_MATCH
+        camera_fps = 30.0
+    ir = HandsIntrinsicsConfig()
+    if intrinsics is not None:
+        ir = HandsIntrinsicsConfig(
+            fx=intrinsics.optional_positive("fx", DEFAULT_IR_FX),
+            fy=intrinsics.optional_positive("fy", DEFAULT_IR_FY),
+            cx=intrinsics.optional_positive("cx", DEFAULT_IR_CX),
+            cy=intrinsics.optional_positive("cy", DEFAULT_IR_CY),
+        )
+        intrinsics.reject_unknown()
+    raw_depth = HandsDepthConfig()
+    if depth is not None:
+        raw_depth = HandsDepthConfig(
+            scale_m=depth.optional_positive("scale_m", DEFAULT_DEPTH_SCALE_M),
+            offset_m=depth.optional_number("offset_m", DEFAULT_DEPTH_OFFSET_M),
+        )
+        depth.reject_unknown()
+    config = HandsConfig(
+        model=HandsModelConfig(
+            path=Path(model.text("path")).expanduser(),
+            input_height=model.optional_positive_int("input_height", 256),
+            input_width=model.optional_positive_int("input_width", 320),
+            conf_thr=model.optional_fraction("conf_thr", 0.25),
+            iou_thr=model.optional_fraction("iou_thr", 0.45),
+        ),
+        camera=HandsCameraConfig(match=camera_match, fps=camera_fps),
+        intrinsics=ir,
+        depth=raw_depth,
+        rps=_hands_rps_config(rps_section) if rps_section is not None else None,
+    )
+    for section in (hands, model):
+        section.reject_unknown()
+    return config
+
+
+def _hands_rps_config(rps: _Section) -> HandsRpsConfig:
+    """Build the validated ``hands.rps`` subsection (T4)."""
+    config = HandsRpsConfig(
+        classifier_path=Path(rps.text("classifier_path")).expanduser(),
+        ready_s=rps.optional_positive("ready_s", 0.5),
+        countdown_step_s=rps.optional_positive("countdown_step_s", 0.7),
+        shoot_s=rps.optional_positive("shoot_s", 0.4),
+        result_s=rps.optional_positive("result_s", 3.0),
+        score_reset_s=rps.optional_positive("score_reset_s", 20.0),
+        min_share=rps.optional_fraction("min_share", 0.6),
+    )
+    rps.reject_unknown()
     return config
 
 
@@ -710,6 +862,43 @@ class _Section:
             self._used.add(name)
             return default
         return self.non_negative(name)
+
+    def optional_positive(self, name: str, default: float) -> float:
+        """Return the positive number at ``name``, or ``default`` when absent."""
+        if name not in self._data:
+            return default
+        return self.positive(name)
+
+    def optional_number(self, name: str, default: float) -> float:
+        """Return the finite number at ``name``, or ``default`` when absent."""
+        if name not in self._data:
+            return default
+        return self.number(name)
+
+    def optional_fraction(self, name: str, default: float) -> float:
+        """Return the number in ``[0, 1]`` at ``name``, or ``default`` when absent."""
+        if name not in self._data:
+            return default
+        return self.fraction(name)
+
+    def optional_positive_int(self, name: str, default: int) -> int:
+        """Return the positive integer at ``name``, or ``default`` when absent."""
+        if name not in self._data:
+            return default
+        return self.positive_int(name)
+
+    def number(self, name: str) -> float:
+        """Return the finite number at ``name`` (negative allowed)."""
+        value = self._get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(self._key(name), "expected a number")
+        try:
+            number = float(value)
+        except OverflowError:
+            number = math.inf
+        if not math.isfinite(number):
+            raise ConfigError(self._key(name), "expected a finite number")
+        return number
 
     def pair(self, name: str) -> tuple[float, float]:
         value = self._get(name)

@@ -179,3 +179,32 @@ medical:
     contact_window_s: 10.0        # T: seconds the N contacts must fall within
     oscillation_min_s: 3.0        # D: seconds of continuous rocking or flapping
     refractory_s: null            # no new start this long after an episode ends; null = dispatch.cooldown_s
+
+# Hands demos (T4): the `hologram` and `rps` modes share one IR hand perception
+# chain. The medical keys above are untouched by this section.
+hands:
+  model:
+    path: models/hand21_topdown.xmodel  # compiled HAND21 pose model (256x320)
+    input_height: 256             # compiled graph size, pixels
+    input_width: 320
+    conf_thr: 0.25                # minimum hand score
+    iou_thr: 0.45                 # NMS IoU threshold
+  camera:
+    match: RealSense              # card-name fragment of the INZI IR/depth node
+    fps: 30                       # INZI rate and perception cap; try 60 once INZI@60 is confirmed on the board
+  intrinsics:                     # nominal F200 IR pinhole until a calibration exists
+    fx: 430
+    fy: 430
+    cx: 320
+    cy: 240
+  depth:
+    scale_m: 3.125e-5             # raw Z16 to metres: depth_m = raw * scale_m + offset_m
+    offset_m: 0
+  rps:
+    classifier_path: models/rps_mlp.npz  # 42-64-64-4 classifier exported by cpsa_ml.gestures
+    ready_s: 0.5                  # one hand visible this long starts the countdown
+    countdown_step_s: 0.7         # per countdown step (3, 2, 1)
+    shoot_s: 0.4                  # majority-vote window after "1"
+    result_s: 3.0                 # how long win/lose/draw/unclear stays on screen
+    score_reset_s: 20.0           # score reset after this long without a hand
+    min_share: 0.6                # minimum vote share for a recognized gesture

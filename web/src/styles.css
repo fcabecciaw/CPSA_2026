@@ -923,6 +923,131 @@ p {
 
 /* --- Shared -------------------------------------------------------------- */
 
+/* A hidden view must win over `.panel { display: flex }` (the UA rule loses). */
+.panel[hidden] {
+  display: none;
+}
+
+/* --- Hologram and Sasso-carta-forbice views (T5) ------------------------- */
+
+.hologram-panel .canvas-wrap {
+  background: #050b14;
+}
+
+.legend-joint {
+  background: #bff4ff;
+  box-shadow: 0 0 6px rgb(56 214 255 / 85%);
+}
+
+.legend-bone {
+  background: rgb(126 232 255 / 55%);
+}
+
+.legend-grid {
+  background: rgb(90 200 255 / 35%);
+}
+
+.rps-panel {
+  gap: 0.55rem;
+}
+
+.rps-count {
+  min-height: 1.2em;
+  margin: 0;
+  color: var(--accent);
+  font-size: clamp(1.5rem, 1.5vw + 0.95rem, 2.9rem);
+  font-weight: 800;
+  text-align: center;
+}
+
+.rps-duel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: clamp(0.5rem, 1vw, 1.4rem);
+}
+
+.rps-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  padding: 0.5rem 0.4rem;
+  background: rgb(10 15 26 / 55%);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+
+.rps-icon {
+  font-size: clamp(2.2rem, 2.6vw + 1.3rem, 4rem);
+  line-height: 1.05;
+}
+
+.rps-side-label {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rps-gesture {
+  margin: 0;
+  font-size: clamp(1rem, 0.6vw + 0.7rem, 1.4rem);
+  font-weight: 700;
+}
+
+.rps-versus {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+.rps-count[data-outcome="win"] {
+  color: var(--ok);
+}
+
+.rps-count[data-outcome="lose"] {
+  color: var(--danger);
+}
+
+.rps-count[data-outcome="draw"] {
+  color: var(--warn);
+}
+
+.rps-count[data-outcome="unclear"] {
+  color: var(--muted-strong);
+}
+
+.rps-score {
+  display: flex;
+  justify-content: center;
+  gap: 0.9rem;
+  margin: 0;
+  padding: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  list-style: none;
+}
+
+.rps-score-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.3rem;
+}
+
+.rps-score-value {
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 800;
+}
+
+.rps-preview {
+  flex: 1;
+  min-height: 6rem;
+}
+
 .code {
   padding: 0.05em 0.3em;
   color: var(--muted-strong);

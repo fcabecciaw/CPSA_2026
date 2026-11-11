@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from cpsa.domain.model import FaceRegion, Side
-from cpsa.vision.layouts import COCO17, HALFBUST_62, get_layout
+from cpsa.vision.layouts import COCO17, HALFBUST_62, HAND21, LAYOUTS, get_layout
 
 
 def test_coco17_has_body_keypoints_without_hands() -> None:
@@ -129,3 +129,55 @@ def test_layouts_match_the_ml_schema() -> None:
     )
     assert COCO17.names == tuple(schema.COCO17.names)
     assert HALFBUST_62.names == tuple(schema.HALFBUST_62.names)
+
+
+def test_hand21_has_the_mediapipe_hand_names() -> None:
+    assert len(HAND21) == 21
+    assert HAND21.name == "hand21"
+    assert HAND21.names == (
+        "wrist",
+        "thumb_cmc",
+        "thumb_mcp",
+        "thumb_ip",
+        "thumb_tip",
+        "index_finger_mcp",
+        "index_finger_pip",
+        "index_finger_dip",
+        "index_finger_tip",
+        "middle_finger_mcp",
+        "middle_finger_pip",
+        "middle_finger_dip",
+        "middle_finger_tip",
+        "ring_finger_mcp",
+        "ring_finger_pip",
+        "ring_finger_dip",
+        "ring_finger_tip",
+        "pinky_mcp",
+        "pinky_pip",
+        "pinky_dip",
+        "pinky_tip",
+    )
+    assert HAND21.index("wrist") == 0
+    assert HAND21.index("pinky_tip") == 20
+
+
+def test_hand21_has_the_twenty_finger_bones() -> None:
+    assert len(HAND21.edges) == 20
+    assert len(set(HAND21.edges)) == 20
+    for first, second in HAND21.edges:
+        assert 0 <= first < len(HAND21)
+        assert 0 <= second < len(HAND21)
+        assert first != second
+    for finger_start in (1, 5, 9, 13, 17):
+        assert (finger_start, finger_start + 1) in HAND21.edges
+        assert (finger_start + 2, finger_start + 3) in HAND21.edges
+    # One hand has one anchor: the palm chain of the two-hand layout is gone.
+    assert (5, 9) not in HAND21.edges
+
+
+def test_hand21_has_no_face_anchors_and_is_resolvable() -> None:
+    assert HAND21.face == ()
+    assert HAND21.face_regions == ()
+    assert get_layout("hand21") is HAND21
+    assert get_layout("HAND21") is HAND21
+    assert get_layout("hand21") is LAYOUTS["hand21"]

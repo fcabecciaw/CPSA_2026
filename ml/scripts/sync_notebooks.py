@@ -20,6 +20,7 @@ NOTEBOOKS = (
     "04_variant_study",
     "05_qat",
     "07_hand_pose",
+    "08_hand_topdown",
 )
 
 

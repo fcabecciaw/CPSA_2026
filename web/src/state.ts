@@ -10,9 +10,12 @@ import type {
   ErrorPayload,
   HandsPayload,
   HelloPayload,
+  HologramHandsPayload,
   LogLevel,
   MedicalStatePayload,
+  Mode,
   ModeProgressPayload,
+  RpsStatePayload,
   ServerMessage,
   StatusPayload,
   Tag,
@@ -50,6 +53,10 @@ export interface DashboardState {
   logs: LogEntry[];
   episode: EpisodePayload | null;
   hands: HandsPayload | null;
+  /** T5: the last `hologram.hands` frame of the hologram mode. */
+  hologram: HologramHandsPayload | null;
+  /** T5: the last `rps.state` of the Sasso-carta-forbice mode. */
+  rps: RpsStatePayload | null;
   modeProgress: ModeProgressPayload | null;
   lastError: ErrorEntry | null;
   /** `seq` of a sent `mode.set` still waiting for its answer (IF-304). */
@@ -63,7 +70,15 @@ export interface DashboardState {
   lastMessageAt: number;
 }
 
-export type StateRegion = "mode" | "live" | "feed" | "episode" | "hands" | "logs";
+export type StateRegion =
+  | "mode"
+  | "live"
+  | "feed"
+  | "episode"
+  | "hands"
+  | "logs"
+  | "hologram"
+  | "rps";
 
 export class DashboardStore {
   readonly state: DashboardState = {
@@ -74,6 +89,8 @@ export class DashboardStore {
     logs: [],
     episode: null,
     hands: null,
+    hologram: null,
+    rps: null,
     modeProgress: null,
     lastError: null,
     pendingModeSeq: null,
@@ -114,10 +131,13 @@ export class DashboardStore {
 
       case "status": {
         this.state.status = message.data;
+        // T5: the two hand streams belong to their own mode, so leaving it
+        // drops the snapshot and the view falls back to its empty copy.
+        const regions: StateRegion[] = ["mode", ...this.dropModeStreams(message.data.mode)];
         if (message.data.mode !== "medical") {
-          return this.clearMedical(["mode", "live"]);
+          return [...this.clearMedical(["live"]), ...regions];
         }
-        return ["mode"];
+        return regions;
       }
 
       case "mode.progress":
@@ -215,7 +235,32 @@ export class DashboardStore {
         this.state.hands = message.data;
         this.state.lastHandsAt = receivedAt;
         return ["hands"];
+
+      case "hologram.hands":
+        this.state.hologram = message.data;
+        return ["hologram"];
+
+      case "rps.state":
+        this.state.rps = message.data;
+        return ["rps"];
     }
+  }
+
+  /**
+   * T5: forgets the hand stream of a mode the server has left (hologram,
+   * Sasso-carta-forbice), so a view never shows a frozen hand.
+   */
+  private dropModeStreams(mode: Mode): StateRegion[] {
+    const regions: StateRegion[] = [];
+    if (mode !== "hologram" && this.state.hologram !== null) {
+      this.state.hologram = null;
+      regions.push("hologram");
+    }
+    if (mode !== "rps" && this.state.rps !== null) {
+      this.state.rps = null;
+      regions.push("rps");
+    }
+    return regions;
   }
 
   /**

@@ -16,6 +16,9 @@ import type {
   Mode,
   ModeState,
   ModeStep,
+  RpsGesture,
+  RpsOutcome,
+  RpsPhase,
   Tag,
   Verdict,
   DecisionReason,
@@ -65,6 +68,53 @@ export const MODE_LABEL: Record<Mode, string> = {
   idle: "Idle",
   lab: "Lab",
   medical: "Medicale",
+  hologram: "Ologramma",
+  rps: "Sasso-carta-forbice",
+};
+
+/** T5: the two hand-demo views. */
+export const RPS_LABELS = {
+  waiting: "Mostra la mano per iniziare",
+  ready: "Preparati…",
+  shoot: "Via!",
+  versus: "contro",
+  player: "Tu",
+  board: "Tavolo",
+  draws: "Pareggi",
+  preview: "Anteprima della mano",
+} as const;
+
+/** "Sasso… carta… forbice!", one word for each countdown step (3, 2, 1). */
+export const RPS_COUNTDOWN_WORDS: readonly string[] = ["Sasso…", "carta…", "forbice!"];
+
+export const RPS_PHASE_LABEL: Record<RpsPhase, string> = {
+  waiting: "in attesa",
+  ready: "pronto",
+  countdown: "conto alla rovescia",
+  shoot: "via",
+  result: "risultato",
+};
+
+export const RPS_GESTURE_LABEL: Record<RpsGesture, string> = {
+  rock: "sasso",
+  paper: "carta",
+  scissors: "forbice",
+  none: "gesto non chiaro",
+};
+
+/** Paired with the label, never the only cue. */
+export const RPS_GESTURE_ICON: Record<RpsGesture, string> = {
+  rock: "✊",
+  paper: "✋",
+  scissors: "✌",
+  none: "·",
+};
+
+export const RPS_OUTCOME_LABEL: Record<RpsOutcome, string> = {
+  win: "Hai vinto!",
+  lose: "Vince il tavolo",
+  draw: "Pareggio",
+  unclear: "Gesto poco chiaro",
 };
 
 export const MODE_STATE_LABEL: Record<ModeState, string> = {
