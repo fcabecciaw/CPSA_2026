@@ -16,6 +16,22 @@ that drops the oldest frame when the analyzer falls behind (P-05).
 * every pushed frame and every assessment is recorded in an
   :class:`EpisodeTrace`, which audit-mode replay re-executes exactly (P-06).
 
+In continuous mode (``continuous=True``, FR-027..FR-029) the same analysis
+thread also runs without an external detection. Every frame on the
+``analysis_fps`` grid is estimated **once** and pushed into one long-lived
+stream :class:`~cpsa.vision.episode.EpisodeAnalyzer`, and a
+:class:`~cpsa.vision.trigger.VisionTrigger` turns the stream's contact events
+and rocking/flapping state into detections for an injected ``on_detection``
+callback. An episode is a time window opened on that stream
+(:meth:`~cpsa.vision.episode.EpisodeAnalyzer.open_window`): it neither restarts
+the tracker nor replays the pre-roll, so an episode start costs no pose
+inference and the tracker is warm at ``t_start``. The stream prunes its recorded
+frames behind the window, which bounds memory over hours of runtime.
+
+Continuous-mode episode traces therefore describe a warm tracker: their frames
+are the stream frames in the window, so audit replay (which re-executes them
+from a cold tracker) is exact only for the IMU-triggered path.
+
 Trace JSON Lines layout, written at episode end::
 
     {"type": "episode", "episode_id": ..., "t_start": ..., "layout": ...,
@@ -32,7 +48,7 @@ import logging
 import threading
 import time
 from collections import deque
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -50,10 +66,12 @@ from cpsa.domain.model import (
     Verdict,
     VisionAssessment,
 )
-from cpsa.ports import Clock, EvidenceSink, PoseEstimator, VideoSource
+from cpsa.ports import Clock, EvidenceSink, PoseEstimator, VideoSource, VisionObserver
 from cpsa.vision.assessment import AnalysisConfig, severity_of
 from cpsa.vision.episode import EpisodeAnalyzer
 from cpsa.vision.fusion import IMUSignal, estimate_clock_offset
+from cpsa.vision.oscillation import detect_flapping, detect_rocking
+from cpsa.vision.trigger import TriggerFire, VisionTrigger
 from cpsa.vision.types import (
     EpisodeReport,
     KeypointLayout,
@@ -76,6 +94,22 @@ logger = logging.getLogger("cpsa.vision")
 
 _EPS = 1e-9
 _SEVERITY_RANK: Mapping[Tag, int] = {Tag.NON_DANGEROUS: 1, Tag.DANGEROUS: 2}
+_OSCILLATION_EVAL_S = 0.2  # rocking/flapping and episode activity: at most 5 Hz
+_PERF_WINDOW_S = 5.0  # rolling window of the performance snapshot (F12)
+
+
+@dataclass(frozen=True)
+class _PerfSample:
+    """Timings of one analyzed frame, kept for the rolling performance window (F12)."""
+
+    t: float
+    decode_ms: float
+    preprocess_ms: float | None
+    dpu_ms: float | None
+    postprocess_ms: float | None
+    pose_ms: float
+    track_ms: float
+    latency_ms: float
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +351,18 @@ class VisionVerifier:
         layout: keypoint layout of the pose model.
         log_dir: log base path; episode reports and (without evidence) traces go
             under ``<log_dir>/<day>/vision/``.
+        observer: live vision results for a display adapter; called from the
+            analysis thread. An exception is logged and swallowed, so it never
+            changes a verdict (F2).
+        continuous: run one pose-inference stream while idle and during episodes,
+            and start episodes from the camera alone (FR-027..FR-029, plans F8 and
+            S). Off by default, which keeps the IMU-triggered behavior unchanged
+            (AC-026).
+        trigger: the camera-only trigger; required with ``continuous`` and
+            ignored without it, so the IMU-triggered path is unchanged.
+        on_detection: receives the detections the trigger fires, from the
+            analysis thread; required with ``continuous``. It must not block, and
+            an exception is logged and swallowed.
     """
 
     def __init__(
@@ -329,7 +375,13 @@ class VisionVerifier:
         layout: KeypointLayout,
         *,
         log_dir: Path | None = None,
+        observer: VisionObserver | None = None,
+        continuous: bool = False,
+        trigger: VisionTrigger | None = None,
+        on_detection: Callable[[Detection], None] | None = None,
     ) -> None:
+        if continuous and (trigger is None or on_detection is None):
+            raise ValueError("continuous vision verification requires a trigger and on_detection")
         self._source = source
         self._estimator = estimator
         self._evidence = evidence
@@ -337,16 +389,40 @@ class VisionVerifier:
         self._clock = clock
         self._layout = layout
         self._log_dir = log_dir
+        self._observer = observer
         self._analyzer = EpisodeAnalyzer(layout, cfg.tracker, cfg.analysis)
+
+        self._continuous = continuous
+        self._trigger = trigger if continuous else None
+        self._on_detection = on_detection
+        self._stream: EpisodeAnalyzer | None = None
+        self._stream_counter = 0
+        self._stream_started_t = 0.0
+        self._stream_grid_t = 0.0
+        self._stream_contacts: dict[float, Tag] = {}
+        self._stream_error: BaseException | None = None
+        self._stream_until: float | None = None
+        self._osc_recent: deque[TrackedFrame] = deque()
+        # Last (t, active) result: detect_rocking/detect_flapping scan the whole
+        # oscillation_min_s window, too costly to repeat on every 30 fps frame.
+        self._osc_eval: tuple[float, bool] | None = None
+        self._end_check_t: float | None = None  # last episode-end activity check
 
         self._cond = threading.Condition()
         self._items: deque[_Item] = deque()
         self._frame_items = 0
         self._pre_roll: deque[VideoFrame] = deque()
         self._dropped = 0
+        self._drop_total = 0
         self._drop_logged = False
         self._last_capture_t: float | None = None
         self._health_error: BaseException | None = None
+
+        # Performance snapshot (F12): receive times of camera frames, one sample per
+        # analyzed frame, and the cumulative analysis-queue drops.
+        self._camera_times: deque[float] = deque()
+        self._analyzed_times: deque[float] = deque()
+        self._perf_samples: deque[_PerfSample] = deque()
 
         self._requests: list[_Request] = []
         self._episode_active = False
@@ -406,15 +482,136 @@ class VisionVerifier:
 
     @property
     def analyzed_until_t(self) -> float | None:
-        """Camera timestamp of the last frame pushed into the analyzer (P-05)."""
+        """Camera timestamp of the last frame pushed into the analyzer (P-05).
+
+        In camera-only mode this is the last frame the stream analyzer tracked,
+        whether or not an episode was open.
+        """
         with self._cond:
+            if self._continuous:
+                return self._stream_until
             return self._snapshot_until
+
+    @property
+    def health_error(self) -> BaseException | None:
+        """Error that made the video source unhealthy, or ``None``.
+
+        ``start`` records a camera that cannot be opened and ``_on_source_error``
+        records a stream failure; both leave the verifier fail-open (``verify``
+        returns ``UNDECIDED``) instead of raising. A ``Mode`` uses this read-only
+        signal to report the failure it would otherwise not see (R-05).
+        """
+        with self._cond:
+            return self._health_error
 
     def imu_sample_count(self, side: Side) -> int:
         """Number of buffered acceleration samples for one side (P-07)."""
         with self._imu_lock:
             buffer = self._imu.get(side)
             return 0 if buffer is None else len(buffer)
+
+    def perf_snapshot(self) -> dict[str, float | int | None]:
+        """Rolling 5 s camera and analysis timings for the dashboard (F12).
+
+        Thread-safe and cheap enough for the 1 Hz status loop. ``analyzed_fps`` and
+        ``camera_fps`` are the frames in the window over the span it covers;
+        ``analyzed_fps`` counts the frames run through the estimator (the stream in
+        camera-only mode, the episode path otherwise), ``camera_fps`` the frames the
+        source delivered. Stage means are ``None`` when the estimator reports no
+        ``stage_ms`` (or nothing ran yet), and ``dropped`` is the cumulative number
+        of analysis-queue drops.
+        """
+        now = self._clock.monotonic()
+        with self._cond:
+            self._prune_perf_locked(now)
+            samples = tuple(self._perf_samples)
+            camera_fps = self._rate_locked(self._camera_times, now)
+            analyzed_fps = self._rate_locked(self._analyzed_times, now)
+            dropped = int(self._drop_total)
+        return {
+            "analyzed_fps": analyzed_fps,
+            "camera_fps": camera_fps,
+            "decode_ms": _mean(samples, "decode_ms"),
+            "preprocess_ms": _mean(samples, "preprocess_ms"),
+            "dpu_ms": _mean(samples, "dpu_ms"),
+            "postprocess_ms": _mean(samples, "postprocess_ms"),
+            "pose_ms": _mean(samples, "pose_ms"),
+            "track_ms": _mean(samples, "track_ms"),
+            "latency_ms": _mean(samples, "latency_ms"),
+            "dropped": dropped,
+        }
+
+    def _prune_perf_locked(self, now: float) -> None:
+        horizon = now - _PERF_WINDOW_S
+        while self._camera_times and self._camera_times[0] < horizon:
+            self._camera_times.popleft()
+        while self._analyzed_times and self._analyzed_times[0] < horizon:
+            self._analyzed_times.popleft()
+        while self._perf_samples and self._perf_samples[0].t < horizon:
+            self._perf_samples.popleft()
+
+    @staticmethod
+    def _rate_locked(times: deque[float], now: float) -> float | None:
+        """Frames in the window over the span they cover; ``None`` without data."""
+        if not times:
+            return None
+        span = now - times[0]
+        if span <= 0.0:
+            return None
+        return len(times) / span
+
+    def _record_analysis(
+        self,
+        frame: VideoFrame,
+        *,
+        decode_ms: float,
+        preprocess_ms: float | None,
+        dpu_ms: float | None,
+        postprocess_ms: float | None,
+        pose_ms: float,
+        track_ms: float,
+    ) -> None:
+        """Keep one frame's timings in the performance window (F12)."""
+        now = self._clock.monotonic()
+        sample = _PerfSample(
+            t=now,
+            decode_ms=decode_ms,
+            preprocess_ms=preprocess_ms,
+            dpu_ms=dpu_ms,
+            postprocess_ms=postprocess_ms,
+            pose_ms=pose_ms,
+            track_ms=track_ms,
+            latency_ms=(now - frame.t) * 1000.0,
+        )
+        with self._cond:
+            self._analyzed_times.append(now)
+            self._perf_samples.append(sample)
+            self._prune_perf_locked(now)
+
+    def _stage_ms(self) -> tuple[float | None, float | None, float | None]:
+        """Preprocess, DPU and postprocess times of the last estimate (F12)."""
+        stages = getattr(self._estimator, "stage_ms", None)
+        if stages is None:
+            return None, None, None
+        try:
+            values = stages() if callable(stages) else stages
+        except Exception:
+            logger.exception("Failed to read the pose estimator stage timings")
+            return None, None, None
+        if not isinstance(values, Mapping):
+            return None, None, None
+        postprocess = _sum_numbers(values, ("decode", "nms", "unletterbox"))
+        return _number(values.get("preprocess")), _number(values.get("dpu")), postprocess
+
+    @property
+    def _episode_analyzer(self) -> EpisodeAnalyzer:
+        """Analyzer that holds the frames of the active episode.
+
+        In camera-only mode the episode is a window of the one stream analyzer
+        (F17); the IMU-triggered path keeps its dedicated episode analyzer.
+        """
+        stream = self._stream
+        return stream if stream is not None else self._analyzer
 
     # -- lifecycle --------------------------------------------------------
 
@@ -430,6 +627,11 @@ class VisionVerifier:
             if self._started:
                 return
             self._stop.clear()
+            if self._continuous:
+                self._stream = None
+                self._stream_contacts = {}
+                self._stream_error = None
+                self._stream_until = None
             self._thread = threading.Thread(
                 target=self._run, name="cpsa-vision-analysis", daemon=True
             )
@@ -477,14 +679,18 @@ class VisionVerifier:
             while self._pre_roll and frame.t - self._pre_roll[0].t > self._cfg.preroll_s:
                 self._pre_roll.popleft()
             self._last_capture_t = frame.t
+            now = self._clock.monotonic()
+            self._camera_times.append(now)
+            self._prune_perf_locked(now)
             want = self._want_active
-        if want:
+            continuous = self._continuous
+        if want or continuous:
             self._offer_frame(frame)
 
     def _offer_frame(self, frame: VideoFrame) -> None:
         """Append a frame to the bounded analysis queue, dropping the oldest."""
         with self._cond:
-            if not self._want_active:
+            if not self._want_active and not self._continuous:
                 return
             if self._frame_items >= self._cfg.queue_max:
                 for index, item in enumerate(self._items):
@@ -492,6 +698,7 @@ class VisionVerifier:
                         del self._items[index]
                         self._frame_items -= 1
                         self._dropped += 1
+                        self._drop_total += 1
                         if not self._drop_logged:
                             self._drop_logged = True
                             logger.warning(
@@ -638,7 +845,10 @@ class VisionVerifier:
                 continue
             try:
                 if isinstance(item, _FrameItem):
-                    self._analyze_frame(item.frame)
+                    if self._continuous:
+                        self._stream_frame(item.frame)
+                    else:
+                        self._analyze_frame(item.frame)
                 elif isinstance(item, _ObserveItem):
                     self._start_or_extend(item.detection)
                 elif isinstance(item, _VerifyItem):
@@ -700,14 +910,52 @@ class VisionVerifier:
             self._retained.clear()
             self._peak_event = None
             self._peak_window = []
-            self._episode_skeleton = self._analyzer.skeleton_state
-            snapshot = [frame for frame in self._pre_roll if frame.t >= self._episode_t_start]
+            t_start = self._episode_t_start
+            continuous = self._continuous
+            if not continuous:
+                self._episode_skeleton = self._analyzer.skeleton_state
+                snapshot = [frame for frame in self._pre_roll if frame.t >= t_start]
+        if continuous:
+            self._open_stream_window(episode_id, t_start)
+            return
         self._analyzer.start(episode_id, self._episode_t_start)
         logger.info("Vision episode %s started at %.3f", episode_id, self._episode_t_start)
+        self._notify_episode(episode_id, self._episode_t_start, True)
         for frame in snapshot:
             if self._stop.is_set():
                 break
             self._analyze_frame(frame)
+
+    def _open_stream_window(self, episode_id: str, t_start: float) -> None:
+        """Open an episode window on the running stream and serve what is tracked.
+
+        Frames up to the firing detection are already tracked, so the window is
+        seeded from them instead of replaying the pre-roll: the start costs no
+        pose inference and ``verify`` answers as soon as the request arrives.
+        """
+        stream = self._stream_analyzer(t_start)
+        stream.open_window(episode_id, t_start)
+        self._stream_contacts = {}
+        with self._cond:
+            self._episode_skeleton = stream.skeleton_state
+            self._seed_stream_window_locked(stream, t_start)
+        logger.info("Vision episode %s opened on the stream at %.3f", episode_id, t_start)
+        self._notify_episode(episode_id, t_start, True)
+        self._serve_requests()
+
+    def _seed_stream_window_locked(self, stream: EpisodeAnalyzer, t_start: float) -> None:
+        """Adopt the stream frames of the window as the episode's trace and pre-roll."""
+        window = [frame for frame in stream.frames if frame.t >= t_start - _EPS]
+        tracked_by_seq = {int(frame.seq): frame for frame in window}
+        self._trace_frames = [TraceFrame(int(frame.seq), float(frame.t)) for frame in window]
+        for frame in self._pre_roll:
+            tracked = tracked_by_seq.get(int(frame.seq))
+            if tracked is not None and frame.t >= t_start - _EPS:
+                self._retained.append((frame, tracked))
+        self._snapshot_index = len(self._trace_frames)
+        self._snapshot_until = window[-1].t if window else None
+        if self._retained:
+            self._update_peak_window(*self._retained[-1])
 
     def _analyze_frame(self, frame: VideoFrame) -> None:
         with self._cond:
@@ -721,13 +969,18 @@ class VisionVerifier:
                 return
             t_start = self._episode_t_start
         try:
+            decode_started = time.perf_counter()
             rgb = frame.decode()
+            decoded = time.perf_counter()
             persons = self._estimator.estimate(rgb)
+            estimated = time.perf_counter()
         except Exception as exc:
             self._record_episode_error(exc)
             return
+        stages = self._stage_ms()
         pose = PoseFrame(frame.seq, frame.t, frame.width, frame.height, tuple(persons))
         tracked = self._analyzer.push(pose)
+        tracked_at = time.perf_counter()
         with self._cond:
             self._grid_t = (
                 t_start
@@ -739,15 +992,21 @@ class VisionVerifier:
             self._snapshot_until = frame.t
             self._trace_frames.append(TraceFrame(frame.seq, frame.t))
             self._retained.append((frame, tracked))
-            retain_s = (
-                self._cfg.evidence.clip_s
-                + self._cfg.analysis.activity_window_s
-                + self._cfg.idle_timeout_s
-                + 1.0
-            )
+            retain_s = self._evidence_retain_s()
             while self._retained and frame.t - self._retained[0][0].t > retain_s:
                 self._retained.popleft()
             self._update_peak_window(frame, tracked)
+        self._record_analysis(
+            frame,
+            decode_ms=(decoded - decode_started) * 1000.0,
+            preprocess_ms=stages[0],
+            dpu_ms=stages[1],
+            postprocess_ms=stages[2],
+            pose_ms=(estimated - decoded) * 1000.0,
+            track_ms=(tracked_at - estimated) * 1000.0,
+        )
+        self._notify_frame_image(frame.seq, frame.t, rgb)
+        self._notify_tracked(tracked)
         self._serve_requests()
 
     def _update_peak_window(self, frame: VideoFrame, tracked: TrackedFrame) -> None:
@@ -760,7 +1019,7 @@ class VisionVerifier:
         """
         if self._evidence is None or not self._cfg.evidence.enabled:
             return
-        peak = self._analyzer.contact_peak
+        peak = self._episode_analyzer.contact_peak
         if peak is None:
             return
         half = 0.5 * self._cfg.evidence.clip_s
@@ -825,7 +1084,7 @@ class VisionVerifier:
                 )
                 computed.append((request, result, index, healthy, True))
                 continue
-            result = self._analyzer.assess(
+            result = self._episode_analyzer.assess(
                 request.t_from,
                 request.t_to,
                 request.now,
@@ -871,7 +1130,14 @@ class VisionVerifier:
             last_detection = self._last_detection_mono
         if last_detection is not None and now - last_detection < self._cfg.idle_timeout_s:
             return
-        if self._analyzer.active(now):
+        # active() rebuilds the episode report; at 30 fps that cost must not be
+        # paid on every loop, and a 0.2 s granularity is invisible next to the
+        # idle timeout.
+        last_check = self._end_check_t
+        if last_check is not None and 0.0 <= now - last_check < _OSCILLATION_EVAL_S - _EPS:
+            return
+        self._end_check_t = now
+        if self._episode_analyzer.active(now):
             return
         self._finish_episode(now)
 
@@ -889,26 +1155,37 @@ class VisionVerifier:
             self._pending_episode_id = None
         if episode_id is None:
             return
-        report = self._with_imu(self._analyzer.report(now))
-        trace = EpisodeTrace(
-            episode_id=episode_id,
-            t_start=t_start,
-            layout=self._layout.name,
-            analysis_fps=self._cfg.analysis_fps,
-            report_now=now,
-            frames=trace_frames,
-            assessments=trace_assessments,
-            skeleton=self._episode_skeleton,
-        )
-        trace_path = self._write_trace(trace)
-        self._write_report(report, trace_path)
-        self._write_evidence(report)
-        if self._evidence is not None and self._cfg.evidence.enabled:
-            try:
-                self._evidence.purge(self._clock.now())
-            except Exception:
-                logger.exception("Vision evidence purge failed")
-        self._analyzer.end()
+        analyzer = self._episode_analyzer
+        try:
+            report = self._with_imu(analyzer.report(now))
+            trace = EpisodeTrace(
+                episode_id=episode_id,
+                t_start=t_start,
+                layout=self._layout.name,
+                analysis_fps=self._cfg.analysis_fps,
+                report_now=now,
+                frames=trace_frames,
+                assessments=trace_assessments,
+                skeleton=self._episode_skeleton,
+            )
+            trace_path = self._write_trace(trace)
+            self._write_report(report, trace_path)
+            self._notify_episode(episode_id, t_start, False)
+            self._notify_report(report)
+            self._write_evidence(report)
+            if self._evidence is not None and self._cfg.evidence.enabled:
+                try:
+                    self._evidence.purge(self._clock.now())
+                except Exception:
+                    logger.exception("Vision evidence purge failed")
+            if self._continuous:
+                analyzer.close_window()
+            else:
+                analyzer.end()
+        finally:
+            # A failing report or output step must not lose the clear fire that
+            # resets the dashboard tag and starts the refractory period.
+            self._finish_trigger(now)
         with self._cond:
             self._last_report = report
             self._last_trace = trace
@@ -917,7 +1194,252 @@ class VisionVerifier:
             self._episode_skeleton = None
         logger.info("Vision episode %s ended at %.3f", episode_id, now)
 
+    # -- continuous stream (FR-027..FR-029, plans F8 and S) ---------------
+
+    def _stream_frame(self, frame: VideoFrame) -> None:
+        """Analyze one camera-only frame once, then poll the trigger (FR-027, F17).
+
+        Every frame on the ``analysis_fps`` grid goes through pose inference and
+        the tracker exactly once, whether or not an episode is open: the episode
+        is a window of this one stream, so its start neither replays the pre-roll
+        nor restarts the tracker. A frame the estimator or the tracker rejects is
+        logged and skipped; the stream continues with the next frame.
+        """
+        trigger = self._trigger
+        if trigger is None or frame.t + _EPS < self._stream_grid_t:
+            return
+        try:
+            decode_started = time.perf_counter()
+            rgb = frame.decode()
+            decoded = time.perf_counter()
+            persons = self._estimator.estimate(rgb)
+            estimated = time.perf_counter()
+        except Exception as exc:
+            self._record_stream_error(exc)
+            return
+        if self._stream_error is not None:
+            logger.info("Vision stream path recovered after: %s", self._stream_error)
+            self._stream_error = None
+        stages = self._stage_ms()
+        stream = self._stream_analyzer(frame.t)
+        pose = PoseFrame(frame.seq, frame.t, frame.width, frame.height, tuple(persons))
+        try:
+            tracked = stream.push(pose)
+        except Exception:
+            logger.exception("Vision stream frame %d could not be tracked", frame.seq)
+            return
+        tracked_at = time.perf_counter()
+        self._record_analysis(
+            frame,
+            decode_ms=(decoded - decode_started) * 1000.0,
+            preprocess_ms=stages[0],
+            dpu_ms=stages[1],
+            postprocess_ms=stages[2],
+            pose_ms=(estimated - decoded) * 1000.0,
+            track_ms=(tracked_at - estimated) * 1000.0,
+        )
+        elapsed = frame.t - self._stream_started_t
+        self._stream_grid_t = (
+            self._stream_started_t
+            + (int(np.floor(elapsed * self._cfg.analysis_fps + _EPS)) + 1) / self._cfg.analysis_fps
+        )
+        # Continuous mode shows the skeleton outside episodes too (F14); the
+        # dashboard throttles ``medical.hands`` itself.
+        self._notify_frame_image(frame.seq, frame.t, rgb)
+        self._notify_tracked(tracked)
+        self._remember_oscillation_frame(tracked)
+        self._stream_contacts = self._feed_trigger(
+            trigger, stream.contact_events, self._stream_contacts, frame.t
+        )
+        self._emit_fire(trigger.poll(frame.t, episode_active=self._episode_active))
+        with self._cond:
+            self._stream_until = frame.t
+            if self._episode_active:
+                self._snapshot_index += 1
+                self._snapshot_until = frame.t
+                self._trace_frames.append(TraceFrame(frame.seq, frame.t))
+                self._retained.append((frame, tracked))
+                retain_s = self._evidence_retain_s()
+                while self._retained and frame.t - self._retained[0][0].t > retain_s:
+                    self._retained.popleft()
+                self._update_peak_window(frame, tracked)
+        if self._episode_active:
+            self._serve_requests()
+        stream.prune(frame.t - self._retain_s())
+
+    def _stream_analyzer(self, t: float) -> EpisodeAnalyzer:
+        """Return the long-lived camera-only stream analyzer, starting it at ``t``.
+
+        One analyzer serves the whole verifier start (F17); the five-minute
+        watch restart is gone because :meth:`EpisodeAnalyzer.prune` bounds what
+        it keeps.
+        """
+        stream = self._stream
+        if stream is None:
+            self._stream_counter += 1
+            stream = EpisodeAnalyzer(self._layout, self._cfg.tracker, self._cfg.analysis)
+            stream.start(f"stream-{self._stream_counter}", t)
+            self._stream = stream
+            self._stream_started_t = t
+            self._stream_grid_t = t
+            self._stream_contacts = {}
+            self._stream_until = None
+        return stream
+
+    def _retain_s(self) -> float:
+        """Tracked seconds the stream analyzer keeps (plan S)."""
+        return max(self._cfg.preroll_s, self._cfg.lookback_s + self._cfg.fast_after_s)
+
+    def _evidence_retain_s(self) -> float:
+        """Decoded seconds kept for the evidence clip around the peak contact."""
+        return (
+            self._cfg.evidence.clip_s
+            + self._cfg.analysis.activity_window_s
+            + self._cfg.idle_timeout_s
+            + 1.0
+        )
+
+    def _feed_trigger(
+        self,
+        trigger: VisionTrigger,
+        events: Sequence[tuple[float, Tag]],
+        fed: Mapping[float, Tag],
+        t: float,
+    ) -> dict[float, Tag]:
+        """Feed new contact events, grade upgrades, and the oscillation state at ``t``.
+
+        Returns the grades now fed, keyed by contact start. The analyzer keeps one
+        entry per contact in start order and upgrades its grade in place over the
+        recoil tail, so one trigger entry can change grade after it was first fed.
+        Every new contact is fed once and an upgraded one is re-fed, which the
+        trigger needs to report the final grade; it counts each contact once
+        whatever it is fed. Upgrades of contacts that already left
+        ``contact_window_s`` are skipped: they can no longer take part in a start
+        fire. Entries are keyed by start time rather than by position because
+        :meth:`~cpsa.vision.episode.EpisodeAnalyzer.prune` drops old events from
+        the front, so one index does not name the same contact for long.
+        """
+        horizon = t - trigger.config.contact_window_s
+        for event_t, severity in events:
+            previous = fed.get(event_t)
+            if previous is severity:
+                continue
+            if previous is not None and event_t < horizon - _EPS:
+                continue
+            trigger.contact(event_t, severity)
+        trigger.oscillation(t, self._oscillation_active(t))
+        return {event_t: severity for event_t, severity in events}
+
+    def _remember_oscillation_frame(self, tracked: TrackedFrame) -> None:
+        """Keep the tracked frames of the last ``oscillation_min_s`` for FR-019."""
+        trigger = self._trigger
+        if trigger is None:
+            return
+        if self._osc_recent and tracked.t <= self._osc_recent[-1].t:
+            return  # replayed pre-roll frame, already in the window
+        self._osc_recent.append(tracked)
+        horizon = tracked.t - trigger.config.oscillation_min_s
+        while self._osc_recent and self._osc_recent[0].t < horizon - _EPS:
+            self._osc_recent.popleft()
+
+    def _oscillation_active(self, t: float) -> bool:
+        """Whether rocking or flapping is present in the last ``oscillation_min_s``."""
+        trigger = self._trigger
+        if trigger is None:
+            return False
+        last = self._osc_eval
+        if last is not None and 0.0 <= t - last[0] < _OSCILLATION_EVAL_S - _EPS:
+            return last[1]
+        cutoff = t - trigger.config.oscillation_min_s
+        recent = [frame for frame in self._osc_recent if frame.t >= cutoff]
+        cfg = self._cfg.analysis
+        active = bool(recent) and (
+            detect_rocking(recent, self._layout, cfg) or detect_flapping(recent, self._layout, cfg)
+        )
+        self._osc_eval = (t, active)
+        return active
+
+    def _finish_trigger(self, now: float) -> None:
+        """Forward the trigger's ``clear`` fire and reset its fed event state (FR-029)."""
+        trigger = self._trigger
+        if trigger is None:
+            return
+        self._emit_fire(trigger.episode_ended(now))
+        self._osc_recent.clear()
+        self._osc_eval = None
+        self._stream_contacts = {}
+
+    def _emit_fire(self, fire: TriggerFire | None) -> None:
+        """Turn one trigger decision into a detection for ``on_detection`` (F8)."""
+        if fire is None:
+            return
+        callback = self._on_detection
+        if callback is None:
+            return
+        detection = Detection(
+            tag=fire.severity,
+            timestamp=self._clock.now(),
+            window_end_ts=fire.t,
+            features=(),
+        )
+        try:
+            callback(detection)
+        except Exception:
+            logger.exception("Vision trigger callback failed for %s", fire.reason)
+
+    def _record_stream_error(self, error: BaseException) -> None:
+        """Log a stream inference failure once; the stream keeps running (FR-032)."""
+        first = self._stream_error is None
+        self._stream_error = error
+        if first:
+            logger.error("Pose estimation failed in the vision stream path", exc_info=error)
+
     # -- outputs ----------------------------------------------------------
+
+    def _notify_episode(self, episode_id: str, t_start: float, active: bool) -> None:
+        observer = self._observer
+        if observer is None:
+            return
+        try:
+            observer.on_episode(episode_id, t_start, active)
+        except Exception:
+            logger.exception("Vision observer failed in on_episode")
+
+    def _notify_tracked(self, tracked: TrackedFrame) -> None:
+        observer = self._observer
+        if observer is None:
+            return
+        try:
+            observer.on_tracked(tracked)
+        except Exception:
+            logger.exception("Vision observer failed in on_tracked")
+
+    def _notify_frame_image(self, seq: int, t: float, rgb: NDArray[np.uint8]) -> None:
+        """Hand one analyzed frame to an observer that serves the video stream (F14).
+
+        The check is structural: the ``VisionObserver`` port has no image callback, so
+        a dashboard adapter opts in by implementing ``on_frame_image``. The array is
+        passed by reference: the observer must not copy or encode it here.
+        """
+        observer = self._observer
+        if observer is None:
+            return
+        notify = getattr(observer, "on_frame_image", None)
+        if not callable(notify):
+            return
+        try:
+            notify(seq, t, rgb)
+        except Exception:
+            logger.exception("Vision observer failed in on_frame_image")
+
+    def _notify_report(self, report: EpisodeReport) -> None:
+        observer = self._observer
+        if observer is None:
+            return
+        try:
+            observer.on_report(report)
+        except Exception:
+            logger.exception("Vision observer failed in on_report")
 
     def _trace_path(self, episode_id: str, day: datetime) -> Path | None:
         folder = day.strftime("%Y-%m-%d")
@@ -1023,7 +1545,7 @@ class VisionVerifier:
             if signal is not None:
                 signals[side] = signal
         with self._cond:
-            frames = self._analyzer.frames
+            frames = self._episode_analyzer.frames
         return with_imu(report, frames, self._layout, self._cfg.analysis, signals)
 
     def _imu_signal(self, side: Side) -> IMUSignal | None:
@@ -1035,6 +1557,32 @@ class VisionVerifier:
         times = np.asarray([sample[0] for sample in samples], dtype=np.float64)
         values = np.asarray([sample[1] for sample in samples], dtype=np.float64)
         return IMUSignal(t_s=times, acc_norm_g=values)
+
+
+def _mean(samples: Sequence[_PerfSample], name: str) -> float | None:
+    """Mean of one timing over the window; ``None`` when no sample has it."""
+    values = [
+        float(value) for value in (getattr(sample, name) for sample in samples) if value is not None
+    ]
+    if not values:
+        return None
+    return float(np.mean(values))
+
+
+def _number(value: object) -> float | None:
+    """Return ``value`` as a finite float, or ``None`` when it is absent or invalid."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if np.isfinite(number) else None
+
+
+def _sum_numbers(values: Mapping[str, object], keys: Sequence[str]) -> float | None:
+    """Sum the finite numbers at ``keys``; ``None`` when any of them is missing."""
+    numbers = [_number(values.get(key)) for key in keys]
+    if any(number is None for number in numbers):
+        return None
+    return float(sum(number for number in numbers if number is not None))
 
 
 def wrist_acceleration(

@@ -1,0 +1,15 @@
+{
+  "id": "fabiocabeccia/cpsa-06-teacher-hagrid",
+  "title": "CPSA 06 teacher HaGRID",
+  "code_file": "06_teacher_hagrid.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_tpu": false,
+  "machine_shape": "NvidiaTeslaT4",
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}

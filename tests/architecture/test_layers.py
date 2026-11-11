@@ -22,10 +22,26 @@ RULES: dict[str, tuple[frozenset[str], frozenset[str] | None]] = {
         frozenset({"domain", "imu", "ports", "vision"}),
         frozenset({"numpy", "yaml"}),
     ),
-    "adapters": (frozenset({"domain", "ports", "vision"}), ANYTHING),
+    "adapters": (frozenset({"domain", "ports", "vision", "protocol"}), ANYTHING),
+    "protocol": (frozenset({"domain", "vision"}), frozenset()),
+    "supervisor": (
+        frozenset({"domain", "ports", "protocol", "application", "vision"}),
+        frozenset(),
+    ),
     "vision": (frozenset({"domain"}), frozenset({"numpy"})),
     "board": (
-        frozenset({"domain", "imu", "ports", "application", "adapters", "vision"}),
+        frozenset(
+            {
+                "domain",
+                "imu",
+                "ports",
+                "application",
+                "adapters",
+                "vision",
+                "protocol",
+                "supervisor",
+            }
+        ),
         ANYTHING,
     ),
     "recorder": (

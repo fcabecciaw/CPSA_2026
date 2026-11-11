@@ -19,6 +19,11 @@ Range                   Group
 The hand blocks use the MediaPipe 21-landmark order, so ``HAND_21`` (the
 left-hand block) is also the schema of the standalone hand model fed by
 MediaPipe-style labels (HaGRID, Ultralytics hand-keypoints).
+
+Each schema also derives the Ultralytics ``kpt_oks_sigmas`` of its points
+(:attr:`KeypointSchema.oks_sigmas`) from the COCO-WholeBody annotation-scale
+constants, so every generated ``data.yaml`` carries a usable keypoint loss
+weighting instead of the ``1 / nkpt`` fallback.
 """
 
 from __future__ import annotations
@@ -30,8 +35,10 @@ from numpy.typing import NDArray
 
 __all__ = [
     "COCO17",
+    "COCO_WHOLEBODY_SIGMAS",
     "HALFBUST_62",
     "HAND_21",
+    "OKS_SIGMA_FLOOR",
     "SCHEMAS",
     "KeypointSchema",
     "get_schema",
@@ -60,6 +67,52 @@ COCO17_NAMES = (
     "left_ankle",
     "right_ankle",
 )
+
+# ---------------------------------------------------------------------------
+# OKS sigmas
+# ---------------------------------------------------------------------------
+
+#: Per-keypoint standard deviations of COCO-WholeBody (133 entries), ordered
+#: like the WholeBody index layout above.  Copied verbatim from the
+#: authoritative annotation-scale constants of mmpose,
+#: ``configs/_base_/datasets/coco_wholebody.py`` (``sigmas=[...]``), which
+#: cites COCO-WholeBody ``evaluation/myeval_wholebody.py``.  Neither mmpose nor
+#: xtcocotools is installed in ``ml/.venv``, so the values are hard-coded here
+#: and ``tests/test_oks_sigmas.py`` pins their length plus representative
+#: body, face and hand entries.  The first 17 values are the COCO-17 sigmas
+#: Ultralytics' ``OKS_SIGMA`` uses (already divided by 10); WholeBody continues
+#: them for the feet, the iBUG-68 face and both hands.
+COCO_WHOLEBODY_SIGMAS: tuple[float, ...] = (
+    # body (COCO-17)
+    (0.026, 0.025, 0.025, 0.035, 0.035, 0.079, 0.079)
+    + (0.072, 0.072, 0.062, 0.062, 0.107, 0.107, 0.087, 0.087, 0.089, 0.089)
+    # feet (6)
+    + (0.068, 0.066, 0.066, 0.092, 0.094, 0.094)
+    # face (iBUG-68)
+    + (0.042, 0.043, 0.044, 0.043, 0.040, 0.035, 0.031, 0.025, 0.020, 0.023)
+    + (0.029, 0.032, 0.037, 0.038, 0.043, 0.041, 0.045, 0.013, 0.012, 0.011)
+    + (0.011, 0.012, 0.012, 0.011, 0.011, 0.013, 0.015, 0.009, 0.007, 0.007)
+    + (0.007, 0.012, 0.009, 0.008, 0.016, 0.010, 0.017, 0.011, 0.009, 0.011)
+    + (0.009, 0.007, 0.013, 0.008, 0.011, 0.012, 0.010, 0.034, 0.008, 0.008)
+    + (0.009, 0.008, 0.008, 0.007, 0.010, 0.008, 0.009, 0.009, 0.009, 0.007)
+    + (0.007, 0.008, 0.011, 0.008, 0.008, 0.008, 0.010, 0.008)
+    # left hand (21)
+    + (0.029, 0.022, 0.035, 0.037, 0.047, 0.026, 0.025, 0.024, 0.035, 0.018, 0.024)
+    + (0.022, 0.026, 0.017, 0.021, 0.021, 0.032, 0.020, 0.019, 0.022, 0.031)
+    # right hand (21)
+    + (0.029, 0.022, 0.035, 0.037, 0.047, 0.026, 0.025, 0.024, 0.035, 0.018, 0.024)
+    + (0.022, 0.026, 0.017, 0.021, 0.021, 0.032, 0.020, 0.019, 0.022, 0.031)
+)
+
+#: Lower bound applied to every schema sigma.  ``0.025`` is the smallest
+#: COCO-17 sigma (eyes), which is what standard YOLO-pose training uses for
+#: those points.  The iBUG face landmarks and the hand joints have much smaller
+#: annotation-scale constants (down to 0.007), and Ultralytics' keypoint loss
+#: ``1 - exp(-e / sigma)`` saturates at 1 for a joint whose error ``e`` exceeds
+#: a few times sigma; its gradient ``exp(-e / sigma) / sigma`` then vanishes and
+#: a joint that starts far from its target never converges.  Flooring at the
+#: eye sigma keeps such points learnable.
+OKS_SIGMA_FLOOR = 0.025
 
 # ---------------------------------------------------------------------------
 # HALFBUST-62
@@ -164,6 +217,32 @@ class KeypointSchema:
         """Ultralytics ``kpt_shape``: ``(num_keypoints, 3)``."""
 
         return (len(self.names), 3)
+
+    @property
+    def oks_sigmas(self) -> tuple[float, ...]:
+        """Ultralytics ``kpt_oks_sigmas`` for this schema, in schema order.
+
+        Written into every generated ``data.yaml``: Ultralytics' pose trainer
+        stores the dataset's ``kpt_oks_sigmas`` on the model and
+        :class:`ultralytics.utils.loss.v8PoseLoss` otherwise falls back to
+        ``ones(nkpt) / nkpt`` for any ``kpt_shape`` other than ``[17, 3]``,
+        which saturates the keypoint loss for far-away joints.
+
+        Each value is the COCO-WholeBody sigma of the matching
+        :attr:`wholebody_index` entry, floored at :data:`OKS_SIGMA_FLOOR`, and
+        mirrored pairs are unified by taking the larger value so a horizontal
+        flip cannot change the loss (WholeBody's two jaw-end sigmas differ:
+        0.042 vs 0.045).
+        """
+
+        sigmas = [
+            max(OKS_SIGMA_FLOOR, COCO_WHOLEBODY_SIGMAS[index]) for index in self.wholebody_index
+        ]
+        for index, mirror in enumerate(self.flip_idx):
+            paired = max(sigmas[index], sigmas[mirror])
+            sigmas[index] = paired
+            sigmas[mirror] = paired
+        return tuple(sigmas)
 
     def extract(self, wholebody: NDArray[np.floating] | NDArray[np.integer]) -> NDArray[np.float32]:
         """Select this schema's keypoints from a ``(133, 3)`` array.

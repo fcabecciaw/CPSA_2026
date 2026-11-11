@@ -32,10 +32,20 @@ from typing import Any, Protocol
 import numpy as np
 from numpy.typing import NDArray
 
+from cpsa.adapters.camera.devices import (
+    DEFAULT_MATCH,
+    resolve_device,
+)
+from cpsa.adapters.camera.devices import (
+    DEPTH_FOURCC as DEPTH_FORMAT,
+)
 from cpsa.ports import RgbdFrame
 from cpsa.vision.pairing import PairedFrame, Pairer, PairingStats
 
 logger = logging.getLogger(__name__)
+
+CARD_MATCH = DEFAULT_MATCH
+"""Card-name fragment the F200 reports; used when a device is ``auto``."""
 
 # UVC extension unit of the F200 depth node.
 XU_UNIT = 6
@@ -346,7 +356,13 @@ def _open_video(
 
 
 class F200Source:
-    """``FrameSource`` for the F200 RGB/depth pair over two V4L2 nodes."""
+    """``FrameSource`` for the F200 RGB/depth pair over two V4L2 nodes.
+
+    Either device may be configured as ``"auto"``: :meth:`start` then picks the
+    node whose card name contains ``F200`` and whose formats fit the role (RGB:
+    ``YUYV`` without ``Z16``; depth: ``Z16``), so a USB re-plug that renumbers
+    the nodes is recovered on the next start.
+    """
 
     def __init__(
         self,
@@ -399,10 +415,17 @@ class F200Source:
             self._warned_monotonic = False
             self._streams = ()
 
-            _apply_xu(self._depth_device, self._xu)
+            rgb_device = resolve_device(self._rgb_device, match=CARD_MATCH)
+            depth_device = resolve_device(
+                self._depth_device,
+                match=CARD_MATCH,
+                require=DEPTH_FORMAT,
+                forbid=(),
+            )
+            _apply_xu(depth_device, self._xu)
             try:
                 rgb_stream = _open_video(
-                    self._rgb_device,
+                    rgb_device,
                     width=self._width,
                     height=self._height,
                     fourcc=RGB_FOURCC,
@@ -413,10 +436,10 @@ class F200Source:
                     },
                 )
             except Exception as exc:
-                raise RuntimeError(f"{self._rgb_device}: {exc}") from exc
+                raise RuntimeError(f"{rgb_device}: {exc}") from exc
             try:
                 depth_stream = _open_video(
-                    self._depth_device,
+                    depth_device,
                     width=self._width,
                     height=self._height,
                     fourcc=DEPTH_FOURCC,
@@ -424,7 +447,7 @@ class F200Source:
                 )
             except Exception as exc:
                 _close_quietly(rgb_stream)
-                raise RuntimeError(f"{self._depth_device}: {exc}") from exc
+                raise RuntimeError(f"{depth_device}: {exc}") from exc
 
             self._streams = (rgb_stream, depth_stream)
             pairer = self._pairer

@@ -164,7 +164,8 @@ def _source(stem: str) -> str:
 @pytest.mark.parametrize("stem", ["03_train_fp32", "04_variant_study"])
 def test_training_notebooks_expose_the_curation_knobs(stem: str) -> None:
     source = _source(stem)
-    assert "MIN_HEIGHT = 128" in source
+    # Notebook 04 stages the manifest subset, so its floor is the 256 px of D1.
+    assert f"MIN_HEIGHT = {256 if stem == '04_variant_study' else 128}" in source
     assert "HAND_REPEAT = 2" in source
     assert "FACE_REPEAT = 1" in source
     assert "LABELS_ROOT" in source
@@ -185,6 +186,24 @@ def test_notebook_04_defaults_to_the_urgent_run() -> None:
     assert "albumentations==" in source  # motion blur is installed best-effort
     assert "min_height=MIN_HEIGHT" in source
     assert "extra_data=EXTRA_DATA" in source
+
+
+def test_notebook_04_stages_the_manifest_and_the_teacher_archive() -> None:
+    source = _source("04_variant_study")
+    assert "from cpsa_ml.datasets.staging import" in source
+    assert 'include=load_manifest("halfbust62_h256")' in source
+    assert 'HAGRID_TAR = next(iter(find_inputs(INPUT, "hagrid62.tar")), None)' in source
+    assert 'stage_archive(HAGRID_TAR, Path("/tmp/hagrid62"))' in source
+    assert "MIN_HEIGHT = 256" in source
+    # The markdown documents the mix, the manifest and notebook 06's attachment.
+    assert "16,828" in source and "42,327" in source
+    assert "Add Input" in source and "06_teacher_hagrid" in source
+    assert "staging: the manifest keeps" in source
+    assert "staging: teacher dataset ready" in source
+    # The teacher archive is required unless the operator opts out explicitly.
+    assert "ALLOW_NO_HAGRID = False" in source
+    assert "elif not ALLOW_NO_HAGRID:" in source
+    assert "hagrid62.tar is not attached" in source
 
 
 def test_notebook_07_builds_and_trains_the_hand_model() -> None:

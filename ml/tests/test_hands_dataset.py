@@ -234,6 +234,7 @@ def test_build_from_the_ultralytics_tree(tmp_path: Path) -> None:
     assert data["names"] == {0: "hand"}
     assert data["kpt_shape"] == [21, 3]
     assert data["flip_idx"] == list(range(21))
+    assert data["kpt_oks_sigmas"] == list(HAND_21.oks_sigmas)
     assert data["train"] == "images/train"
 
     schema = json.loads((out / "schema.json").read_text())

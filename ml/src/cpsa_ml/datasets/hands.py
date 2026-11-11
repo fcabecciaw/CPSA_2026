@@ -695,6 +695,10 @@ def write_hand_dataset_yaml(out: Path, schema: KeypointSchema) -> None:
         "val": "images/val",
         "kpt_shape": list(schema.kpt_shape),
         "flip_idx": list(schema.flip_idx),
+        # Required by Ultralytics' v8PoseLoss for any kpt_shape other than
+        # [17, 3]; the hand sigmas are the WholeBody hand sigmas floored at the
+        # COCO-17 eye sigma.
+        "kpt_oks_sigmas": list(schema.oks_sigmas),
         "names": {0: "hand"},
     }
     (out / "data.yaml").write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")

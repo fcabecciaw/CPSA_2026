@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Sequence
@@ -9,6 +10,7 @@ from collections.abc import Sequence
 import numpy as np
 import pytest
 
+from cpsa.adapters.camera.devices import VideoNode
 from cpsa.adapters.camera.uvc import UvcVideoSource, _Captured, decode_yuyv
 from cpsa.vision.types import VideoFrame
 
@@ -217,6 +219,98 @@ def test_invalid_settings_are_rejected(width: int, height: int, fps: float, expo
         )
 
 
+def test_gain_and_power_line_controls_are_applied_when_configured() -> None:
+    stream = FakeStream([_Captured(ts=1.0, data=yuyv(8, 4, 128), monotonic=True)])
+    source, _ = make_source(stream, gain=160, power_line_hz=50)
+    frames: list[VideoFrame] = []
+    source.start(frames.append)
+    try:
+        wait_until(lambda: len(frames) == 1)
+    finally:
+        source.stop()
+
+    assert stream.controls == {
+        "auto_exposure": 1,
+        "exposure_time_absolute": 300,
+        "gain": 160,
+        "power_line_frequency": 1,
+    }
+
+
+@pytest.mark.parametrize(("gain", "power_line_hz"), [(0, None), (None, 55)])
+def test_invalid_gain_or_power_line_is_rejected(
+    gain: int | None, power_line_hz: int | None
+) -> None:
+    with pytest.raises(ValueError):
+        make_source(FakeStream([]), gain=gain, power_line_hz=power_line_hz)
+
+
 def test_decode_yuyv_rejects_a_truncated_buffer() -> None:
     with pytest.raises(ValueError):
         decode_yuyv(b"\x80\x80", 8, 4)
+
+
+def test_auto_device_opens_the_node_selected_from_the_listing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    listing = [
+        VideoNode("/dev/video0", "Intel(R) RealSense(TM) 3D Camer", frozenset({"Z16"})),
+        VideoNode("/dev/video3", "Intel(R) RealSense(TM) 3D Camer", frozenset({"YUYV"})),
+    ]
+    source = UvcVideoSource(
+        "auto",
+        width=8,
+        height=4,
+        fps=30.0,
+        exposure=300,
+        device_lister=lambda: listing,
+        stream_factory=Factory(FakeStream([])),
+    )
+    with caplog.at_level(logging.INFO, logger="cpsa.adapters.camera.devices"):
+        source.start(lambda frame: None)
+        source.stop()
+
+    assert "selected /dev/video3" in caplog.text
+
+
+def test_auto_device_resolves_again_on_a_restart() -> None:
+    listing = [VideoNode("/dev/video0", "Intel(R) RealSense(TM) 3D Camer", frozenset({"YUYV"}))]
+    factory = Factory(FakeStream([]))
+    source = UvcVideoSource(
+        "auto",
+        width=8,
+        height=4,
+        fps=30.0,
+        exposure=300,
+        device_lister=lambda: listing,
+        stream_factory=factory,
+    )
+    source.start(lambda frame: None)
+    source.stop()
+    listing[0] = VideoNode("/dev/video1", "Intel(R) RealSense(TM) 3D Camer", frozenset({"YUYV"}))
+    source.start(lambda frame: None)
+    source.stop()
+
+    assert [device for device, *_ in factory.calls] == ["/dev/video0", "/dev/video1"]
+
+
+def test_auto_device_without_a_matching_node_does_not_open_anything() -> None:
+    def listing() -> list[VideoNode]:
+        return [VideoNode("/dev/video0", "Integrated Webcam", frozenset({"MJPG"}))]
+
+    factory = Factory(FakeStream([]))
+    source = UvcVideoSource(
+        "auto",
+        width=8,
+        height=4,
+        fps=30.0,
+        exposure=300,
+        device_lister=listing,
+        stream_factory=factory,
+    )
+
+    with pytest.raises(RuntimeError, match="no camera node"):
+        source.start(lambda frame: None)
+
+    assert factory.calls == []
+    assert not source.running

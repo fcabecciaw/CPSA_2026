@@ -27,6 +27,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from cpsa.adapters.pose.resize import LETTERBOX_RESIZE
 from cpsa.vision.pose_decode import (
     QuantizedRawHeadDecoder,
     letterbox,
@@ -283,7 +284,7 @@ class DpuPoseEstimator:
             raise ValueError(f"rgb must be uint8, got {image.dtype}")
 
         started = time.perf_counter()
-        letterboxed, scale, pad = letterbox(image, self._input_hw)
+        letterboxed, scale, pad = letterbox(image, self._input_hw, resize=LETTERBOX_RESIZE)
         if self._input_nhwc:
             assert self._input_view is not None
             quantize_rgb_lut(letterboxed, self._input_lut, self._input_view)

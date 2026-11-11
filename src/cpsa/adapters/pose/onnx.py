@@ -19,6 +19,7 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
+from cpsa.adapters.pose.resize import LETTERBOX_RESIZE
 from cpsa.vision.pose_decode import decode_ultralytics, letterbox, unletterbox
 from cpsa.vision.types import KeypointLayout, PersonPose
 
@@ -98,7 +99,7 @@ class OnnxPoseEstimator:
         if image.dtype != np.uint8:
             raise ValueError(f"rgb must be uint8, got {image.dtype}")
 
-        letterboxed, scale, pad = letterbox(image, self._input_size)
+        letterboxed, scale, pad = letterbox(image, self._input_size, resize=LETTERBOX_RESIZE)
         tensor = (letterboxed.astype(np.float32) / 255.0).transpose(2, 0, 1)[None, ...]
         outputs = self._session.run(None, {self._input_name: tensor})
         if len(outputs) != 1:

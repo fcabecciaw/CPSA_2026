@@ -35,8 +35,9 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 from numpy.typing import NDArray
@@ -45,11 +46,15 @@ from cpsa.vision.types import PersonPose
 
 __all__ = [
     "QuantizedRawHeadDecoder",
+    "ResizeCallable",
     "decode_raw_heads",
     "decode_ultralytics",
     "letterbox",
     "unletterbox",
 ]
+
+ResizeCallable = Callable[[NDArray[np.uint8], int, int], NDArray[np.uint8]]
+"""``(image, out_height, out_width) -> image`` resize, injectable into :func:`letterbox`."""
 
 _DEFAULT_PAD_VALUE = 114
 
@@ -588,32 +593,68 @@ class QuantizedRawHeadDecoder:
         return persons
 
 
-def _resize_bilinear(
-    image: NDArray[np.uint8],
-    out_height: int,
-    out_width: int,
-) -> NDArray[np.uint8]:
-    """Resize an ``(H, W, 3)`` uint8 image with bilinear interpolation."""
+@dataclass(frozen=True)
+class _BilinearTable:
+    """Precomputed source indices and weights for one resize geometry."""
 
-    height, width = image.shape[:2]
-    if (height, width) == (out_height, out_width):
-        unchanged: NDArray[np.uint8] = image.copy()
-        return unchanged
+    y0: NDArray[np.intp]
+    y1: NDArray[np.intp]
+    wy: NDArray[np.float32]
+    x0: NDArray[np.intp]
+    x1: NDArray[np.intp]
+    wx: NDArray[np.float32]
+
+
+@lru_cache(maxsize=8)
+def _bilinear_table(height: int, width: int, out_height: int, out_width: int) -> _BilinearTable:
+    """Indices and weights of the half-pixel-centred bilinear resize.
+
+    The camera and model sizes are fixed for a run, so the geometry is cached
+    and a frame only does the arithmetic.
+    """
+
     y = (np.arange(out_height, dtype=np.float64) + 0.5) * (height / out_height) - 0.5
     x = (np.arange(out_width, dtype=np.float64) + 0.5) * (width / out_width) - 0.5
     y0 = np.clip(np.floor(y).astype(np.intp), 0, height - 1)
     x0 = np.clip(np.floor(x).astype(np.intp), 0, width - 1)
     y1 = np.clip(y0 + 1, 0, height - 1)
     x1 = np.clip(x0 + 1, 0, width - 1)
-    wy = np.clip(y - y0, 0.0, 1.0)[:, None, None]
-    wx = np.clip(x - x0, 0.0, 1.0)[None, :, None]
-    top_left = image[y0][:, x0].astype(np.float64)
-    top_right = image[y0][:, x1].astype(np.float64)
-    bottom_left = image[y1][:, x0].astype(np.float64)
-    bottom_right = image[y1][:, x1].astype(np.float64)
-    top = top_left * (1.0 - wx) + top_right * wx
-    bottom = bottom_left * (1.0 - wx) + bottom_right * wx
-    resized = top * (1.0 - wy) + bottom * wy
+    table = _BilinearTable(
+        y0=y0,
+        y1=y1,
+        wy=np.clip(y - y0, 0.0, 1.0).astype(np.float32)[:, None, None],
+        x0=x0,
+        x1=x1,
+        wx=np.clip(x - x0, 0.0, 1.0).astype(np.float32)[None, :, None],
+    )
+    for array in (table.y0, table.y1, table.wy, table.x0, table.x1, table.wx):
+        array.setflags(write=False)
+    return table
+
+
+def _resize_bilinear(
+    image: NDArray[np.uint8],
+    out_height: int,
+    out_width: int,
+) -> NDArray[np.uint8]:
+    """Resize an ``(H, W, 3)`` uint8 image with bilinear interpolation.
+
+    The vertical pass runs first on whole rows and the horizontal pass then
+    gathers within those rows, so both gathers stay cache-friendly; the geometry
+    is cached, so a frame only does the arithmetic.  The pose adapters inject
+    ``cv2.resize`` with ``INTER_LINEAR`` through :func:`letterbox` (about 70x
+    faster per 640x480 -> 512x384 frame on the host measured here); this NumPy
+    path is what runs without the ``vision`` extra.
+    """
+
+    height, width = image.shape[:2]
+    if (height, width) == (out_height, out_width):
+        unchanged: NDArray[np.uint8] = image.copy()
+        return unchanged
+    table = _bilinear_table(height, width, out_height, out_width)
+    source = image.astype(np.float32)
+    rows = source[table.y0] * (np.float32(1.0) - table.wy) + source[table.y1] * table.wy
+    resized = rows[:, table.x0] * (np.float32(1.0) - table.wx) + rows[:, table.x1] * table.wx
     rounded: NDArray[np.uint8] = np.clip(np.rint(resized), 0, 255).astype(np.uint8)
     return rounded
 
@@ -622,6 +663,8 @@ def letterbox(
     rgb: NDArray[np.uint8],
     size: tuple[int, int],
     pad_value: int = _DEFAULT_PAD_VALUE,
+    *,
+    resize: ResizeCallable | None = None,
 ) -> tuple[NDArray[np.uint8], float, tuple[float, float]]:
     """Resize with a preserved aspect ratio and pad to ``size``.
 
@@ -630,6 +673,11 @@ def letterbox(
         size: Target ``(height, width)``.  This follows Ultralytics' ``imgsz``
             order.
         pad_value: Fill value for the padding.
+        resize: Optional ``(image, out_height, out_width)`` resize callable,
+            applied to the scaled frame before padding.  The pose adapters pass
+            ``cv2.resize(..., interpolation=cv2.INTER_LINEAR)``, the call
+            Ultralytics letterboxes with; when ``None`` the NumPy bilinear
+            implementation is used.
 
     Returns:
         ``(image, scale, (pad_x, pad_y))`` where ``image`` is ``(H, W, 3)``
@@ -656,7 +704,8 @@ def letterbox(
     scale = min(out_height / height, out_width / width)
     resized_height = max(1, min(out_height, round(height * scale)))
     resized_width = max(1, min(out_width, round(width * scale)))
-    resized = _resize_bilinear(image, resized_height, resized_width)
+    resizer = _resize_bilinear if resize is None else resize
+    resized = resizer(image, resized_height, resized_width)
     canvas = np.full((out_height, out_width, 3), pad_value, dtype=np.uint8)
     top = (out_height - resized_height) // 2
     left = (out_width - resized_width) // 2

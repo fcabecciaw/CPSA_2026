@@ -1,0 +1,34 @@
+[Unit]
+Description=Load the KV260 DPU application (kv260-benchmark-b4096)
+Documentation=file:///home/kria/cpsa/deploy/README.md
+# xmutil talks to the DFX manager daemon over /tmp/dfx-mgrd.socket. Starting
+# this unit before dfx-mgr.service is up makes `xmutil loadapp` print an
+# initSocket error and still exit 0, so the app stays unloaded, the cpsa-dpu
+# unit reports success and the supervisor aborts inside VART
+# (dpu_controller.cpp: Check failed: !get_factory_methods().empty()).
+After=dfx-mgr.service
+Wants=dfx-mgr.service
+Before=cpsa-supervisor.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Wait for the DFX manager socket, then load the application and verify that the
+# device-tree overlay really appeared. `xmutil loadapp` returns 0 even when the
+# load fails, so the overlay is the only reliable success signal. `xmutil
+# unloadapp` fails when no app is loaded, which is normal on a fresh boot; keep
+# going so that loadapp always runs.
+ExecStart=/bin/sh -c '\
+for i in $(seq 1 60); do [ -S /tmp/dfx-mgrd.socket ] && break; sleep 1; done; \
+xmutil unloadapp || true; \
+for i in $(seq 1 20); do \
+  xmutil loadapp kv260-benchmark-b4096; \
+  ls /sys/kernel/config/device-tree/overlays | grep -q "^kv260-benchmark-b4096" && exit 0; \
+  sleep 3; \
+done; \
+echo "cpsa-dpu: kv260-benchmark-b4096 did not load; see journalctl -u dfx-mgr -b" >&2; \
+exit 1'
+TimeoutStartSec=240
+
+[Install]
+WantedBy=multi-user.target

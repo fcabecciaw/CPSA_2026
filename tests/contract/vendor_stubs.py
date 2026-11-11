@@ -184,6 +184,14 @@ def _build(vendor: Vendor) -> dict[str, types.ModuleType]:
             BlueSTInvalidOperationException=type("O", (Exception,), {}),
             BlueSTInvalidDataException=type("I", (Exception,), {}),
         ),
+        "blue_st_sdk.utils.ble_node_definitions": _module(
+            "blue_st_sdk.utils.ble_node_definitions",
+            FeatureCharacteristic=type(
+                "FeatureCharacteristic",
+                (),
+                {"BASE_MASK_TO_FEATURE_DIC": {}, "SENSOR_TILE_BOX_MASK_TO_FEATURE_DIC": {}},
+            ),
+        ),
     }
 
 

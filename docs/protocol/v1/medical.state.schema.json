@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "medical.state.schema.json",
+  "title": "medical.state data (server to client)",
+  "type": "object",
+  "properties": {
+    "imu": {
+      "enum": [
+        "n/a",
+        "searching",
+        "connected",
+        "lost"
+      ]
+    },
+    "tag": {
+      "enum": [
+        "NO_CLASS",
+        "NON_DANGEROUS",
+        "DANGEROUS",
+        "NON_STEREOTIPY",
+        null
+      ]
+    },
+    "episode": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "episode_id": {
+              "type": "string"
+            },
+            "t_start": {
+              "type": "number"
+            },
+            "active": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "episode_id",
+            "t_start",
+            "active"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "last_decision": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "tag": {
+              "enum": [
+                "NO_CLASS",
+                "NON_DANGEROUS",
+                "DANGEROUS",
+                "NON_STEREOTIPY"
+              ]
+            },
+            "tag_changed": {
+              "type": "boolean"
+            },
+            "verdict": {
+              "enum": [
+                "CONFIRMED",
+                "REJECTED",
+                "UNDECIDED",
+                null
+              ]
+            },
+            "reason": {
+              "enum": [
+                "CONFIRMED",
+                "UNDECIDED",
+                "TIMEOUT",
+                "VERIFIER_ERROR",
+                "REJECTED",
+                null
+              ]
+            },
+            "severity": {
+              "enum": [
+                "NO_CLASS",
+                "NON_DANGEROUS",
+                "DANGEROUS",
+                "NON_STEREOTIPY",
+                null
+              ]
+            },
+            "vision": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "verdict": {
+                      "enum": [
+                        "CONFIRMED",
+                        "REJECTED",
+                        "UNDECIDED"
+                      ]
+                    },
+                    "severity": {
+                      "enum": [
+                        "NO_CLASS",
+                        "NON_DANGEROUS",
+                        "DANGEROUS",
+                        "NON_STEREOTIPY",
+                        null
+                      ]
+                    },
+                    "episode_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "features": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "verdict",
+                    "severity",
+                    "episode_id",
+                    "features"
+                  ],
+                  "additionalProperties": true
+                }
+              ]
+            },
+            "actuations": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "actuator_id": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "actuator_id",
+                  "kind"
+                ],
+                "additionalProperties": true
+              }
+            }
+          },
+          "required": [
+            "tag",
+            "tag_changed",
+            "verdict",
+            "reason",
+            "severity",
+            "vision",
+            "actuations"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    },
+    "trigger": {
+      "enum": [
+        "imu",
+        "vision"
+      ]
+    }
+  },
+  "required": [
+    "imu",
+    "tag",
+    "episode",
+    "last_decision"
+  ],
+  "additionalProperties": true
+}

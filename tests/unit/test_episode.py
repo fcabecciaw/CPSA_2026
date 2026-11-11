@@ -292,6 +292,153 @@ def test_analyzer_exposes_frames_and_grade() -> None:
 
 
 # ---------------------------------------------------------------------------
+# F17: an episode window over one running stream (plan S)
+# ---------------------------------------------------------------------------
+
+
+def _stream(
+    frames: Sequence[TrackedFrame], start: float = 9.2
+) -> tuple[EpisodeAnalyzer, _ScriptedTracker]:
+    """Start an idle stream and push exactly ``frames`` through it, in order."""
+    tracker = _ScriptedTracker(frames)
+    analyzer = EpisodeAnalyzer(fx.LAYOUT, TRACKER, ANALYSIS, tracker=tracker)
+    analyzer.start("stream-1", start)
+    _push_frames(analyzer, frames)
+    return analyzer, tracker
+
+
+def test_open_window_reports_only_events_after_its_start() -> None:
+    """F17: a window excludes the events of the idle stream before ``t_start``."""
+    frames = [frame for frame in _episode_frames() if 9.2 <= frame.t <= 11.55]
+    analyzer, tracker = _stream(frames)
+    # Contact 1 (9.3..10.8 s) still keeps the idle stream active at 11.55 s.
+    assert analyzer.active(11.55)
+    assert analyzer.contact_peak is not None
+    resets = tracker.resets
+
+    analyzer.open_window("ep-1", 11.5)
+
+    assert analyzer.window_open
+    assert analyzer.episode_id == "ep-1"
+    assert analyzer.t_start == 11.5
+    assert tracker.resets == resets  # the window keeps the tracker
+    assert analyzer.contact_events == ()
+    assert analyzer.contact_peak is None
+    assert not analyzer.active(11.55)
+    assessment = analyzer.assess(11.5, 11.55, now=11.55)
+    assert assessment.verdict is not Verdict.CONFIRMED
+    assert "from_episode" not in assessment.features
+    report = analyzer.report(11.55)
+    assert (report.episode_id, report.t_start) == ("ep-1", 11.5)
+    assert all(contact.t_start >= report.t_start for contact in report.contacts)
+
+    analyzer.close_window()
+
+    assert not analyzer.window_open
+    assert analyzer.episode_id == "stream-1"
+    assert analyzer.t_start == 9.2
+    assert analyzer.active(11.55)  # the stream still owns the old event
+
+
+def test_open_window_requires_an_active_stream_and_no_open_window() -> None:
+    frames = [frame for frame in _episode_frames() if frame.t <= 10.0]
+    tracker = _ScriptedTracker(frames)
+    analyzer = EpisodeAnalyzer(fx.LAYOUT, TRACKER, ANALYSIS, tracker=tracker)
+    with pytest.raises(RuntimeError):
+        analyzer.open_window("ep-1", 9.2)
+
+    analyzer.start("stream-1", 9.2)
+    _push_frames(analyzer, frames)
+    analyzer.open_window("ep-1", 9.5)
+    with pytest.raises(RuntimeError, match="already open"):
+        analyzer.open_window("ep-2", 9.8)
+    analyzer.close_window()
+    with pytest.raises(ValueError):
+        analyzer.open_window("", 9.8)
+    with pytest.raises(ValueError):
+        analyzer.open_window("ep-3", float("nan"))
+    analyzer.end()
+    with pytest.raises(RuntimeError):
+        analyzer.open_window("ep-4", 9.8)
+
+
+def test_a_window_and_its_close_keep_the_held_contact_run() -> None:
+    """F17: a contact held across the window boundary stays one stream event."""
+    frames = _long_held_contact_frames(9.2, 12.0)
+    analyzer, tracker = _stream(frames)
+    first = analyzer.contact_events
+    assert [event[0] for event in first] == [pytest.approx(9.5, abs=fx.DT)]
+    resets = tracker.resets
+
+    analyzer.open_window("ep-1", 10.5)
+    analyzer.close_window()
+
+    assert tracker.resets == resets
+    assert [event[0] for event in analyzer.contact_events] == [pytest.approx(9.5, abs=fx.DT)]
+    assert analyzer.latest_grade is not None
+    assert analyzer.latest_grade[0] >= 11.9  # the run kept growing after the window
+
+
+def test_prune_drops_frames_events_and_grades_before_the_cut() -> None:
+    frames = [frame for frame in _episode_frames() if 9.2 <= frame.t <= 14.5]
+    analyzer, _ = _stream(frames)
+    assert len(analyzer.contact_events) == 2
+
+    analyzer.prune(11.0)
+
+    assert analyzer.frames
+    assert all(frame.t >= 11.0 - 1e-9 for frame in analyzer.frames)
+    assert [event[0] for event in analyzer.contact_events] == [pytest.approx(12.2, abs=2 * fx.DT)]
+    assert analyzer.latest_grade is not None
+    assert analyzer.latest_grade[0] >= 11.0
+    assert analyzer.report(14.5).t_end == pytest.approx(analyzer.frames[-1].t)
+
+
+def test_prune_never_cuts_inside_an_open_window() -> None:
+    frames = [frame for frame in _episode_frames() if 9.2 <= frame.t <= 13.0]
+    analyzer, _ = _stream(frames)
+    analyzer.open_window("ep-1", 11.5)
+
+    analyzer.prune(12.9)
+
+    assert all(frame.t >= 11.5 - fx.DT for frame in analyzer.frames)
+    assert all(event[0] >= 11.5 - fx.DT for event in analyzer.contact_events)
+
+
+def test_prune_without_a_window_keeps_the_unspecified_history() -> None:
+    frames = [frame for frame in _episode_frames() if 9.2 <= frame.t <= 12.0]
+    analyzer, _ = _stream(frames)
+
+    analyzer.prune(9.0)  # before every recorded frame
+
+    assert len(analyzer.frames) == len(frames)
+
+
+def test_prune_bounds_a_contact_held_past_the_retained_history() -> None:
+    """F17: a long hold keeps grading from the retained frames, not from all of them."""
+    times = np.arange(20.0, 20.6, fx.DT, dtype=np.float64)
+    frames = _long_held_contact_frames(9.2, 20.0) + fx.frames_from_positions(
+        times, [fx.neutral_xy() for _ in times]
+    )
+    tracker = _ScriptedTracker(frames)
+    analyzer = EpisodeAnalyzer(fx.LAYOUT, TRACKER, ANALYSIS, tracker=tracker)
+    analyzer.start("stream-1", 9.2)
+    peak = 0
+    runs = 0
+    for frame in frames:
+        analyzer.push(_pose(frame.seq, frame.t))
+        analyzer.prune(frame.t - 3.0)
+        peak = max(peak, len(analyzer.frames))
+        runs = max(runs, len(analyzer._contact_runs))
+
+    assert peak <= int(3.0 / fx.DT) + 1
+    assert analyzer.latest_grade is not None
+    assert analyzer.latest_grade[0] >= 19.9  # the held contact stayed active
+    # The hold stayed one contact run: pruning never split it.
+    assert runs == 1
+
+
+# ---------------------------------------------------------------------------
 # P-03 coverage and source health
 # ---------------------------------------------------------------------------
 

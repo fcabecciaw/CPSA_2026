@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mode.set.schema.json",
+  "title": "mode.set data (client to server)",
+  "type": "object",
+  "properties": {
+    "mode": {
+      "enum": [
+        "idle",
+        "lab",
+        "medical"
+      ]
+    }
+  },
+  "required": [
+    "mode"
+  ],
+  "additionalProperties": true
+}

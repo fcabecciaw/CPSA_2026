@@ -3,23 +3,28 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import yaml
 from PIL import Image, ImageDraw
 
+from cpsa_ml import pseudolabel
 from cpsa_ml.pseudolabel import (
     PALM_RATIO_RANGE,
     AutoLabelConfig,
     GroupThresholds,
+    PersonDetector,
+    WholeBodyTeacher,
     _hand_sample,
     _person_label,
     auto_label,
     split_for,
 )
-from cpsa_ml.schema import HALFBUST_62
+from cpsa_ml.schema import HALFBUST_62, HAND_21
 
 IMAGE_SIZE = 160
 BOX = np.asarray([[10.0, 10.0, 150.0, 150.0]], dtype=np.float32)
@@ -90,6 +95,28 @@ def read_config(**overrides) -> AutoLabelConfig:
     return AutoLabelConfig(**values)
 
 
+class FakeOnnxSession:
+    """Stand-in for an ``onnxruntime.InferenceSession`` provider list."""
+
+    def __init__(self, providers: tuple[str, ...]) -> None:
+        self._providers = providers
+
+    def get_providers(self) -> list[str]:
+        return list(self._providers)
+
+
+def fake_rtmlib(providers: tuple[str, ...], events: list[str] | None = None) -> SimpleNamespace:
+    """Return an rtmlib stand-in whose tools build a session with ``providers``."""
+
+    class FakeTool:
+        def __init__(self, *args, **kwargs) -> None:
+            if events is not None:
+                events.append("model")
+            self.session = FakeOnnxSession(providers)
+
+    return SimpleNamespace(RTMPose=FakeTool, YOLOX=FakeTool)
+
+
 def test_auto_label_writes_the_halfbust_and_hand_datasets(tmp_path: Path) -> None:
     frames = make_frames(tmp_path / "frames")
     out = tmp_path / "labeled"
@@ -108,6 +135,7 @@ def test_auto_label_writes_the_halfbust_and_hand_datasets(tmp_path: Path) -> Non
     data = yaml.safe_load((halfbust / "data.yaml").read_text())
     assert data["names"] == {0: "person"}
     assert data["kpt_shape"] == list(HALFBUST_62.kpt_shape)
+    assert data["kpt_oks_sigmas"] == list(HALFBUST_62.oks_sigmas)
     assert (halfbust / "schema.json").is_file()
     labels = sorted((halfbust / "labels" / "train").glob("*.txt"))
     assert len(labels) == 3
@@ -122,6 +150,7 @@ def test_auto_label_writes_the_halfbust_and_hand_datasets(tmp_path: Path) -> Non
     assert hand_data["names"] == {0: "hand"}
     assert hand_data["kpt_shape"] == [21, 3]
     assert hand_data["flip_idx"] == list(range(21))
+    assert hand_data["kpt_oks_sigmas"] == list(HAND_21.oks_sigmas)
     crops = sorted((hands / "images" / "train").glob("*.jpg"))
     assert len(crops) == 6  # two hands per frame
     with Image.open(crops[0]) as crop:
@@ -376,3 +405,74 @@ def test_stats_are_written_as_json(tmp_path: Path) -> None:
     assert stored == payload
     assert stored["meta"]["teacher"]["backend"] == "injected"
     assert stored["prompts"] == {"frames": 1}
+
+
+def test_cuda_teacher_fails_fast_when_onnxruntime_falls_back_to_cpu(monkeypatch) -> None:
+    monkeypatch.setattr(
+        pseudolabel, "_import_rtmlib", lambda: fake_rtmlib(("CPUExecutionProvider",))
+    )
+    monkeypatch.setattr(pseudolabel, "_preload_cuda_dlls", lambda device: None)
+    with pytest.raises(RuntimeError, match="CPUExecutionProvider"):
+        WholeBodyTeacher("rtmw-x", device="cuda")
+
+
+def test_cuda_detector_fails_fast_when_onnxruntime_falls_back_to_cpu(monkeypatch) -> None:
+    monkeypatch.setattr(
+        pseudolabel, "_import_rtmlib", lambda: fake_rtmlib(("CPUExecutionProvider",))
+    )
+    monkeypatch.setattr(pseudolabel, "_preload_cuda_dlls", lambda device: None)
+    with pytest.raises(RuntimeError, match="--device cpu --teacher rtmw-l"):
+        PersonDetector(device="cuda")
+
+
+def test_cuda_device_accepts_a_cuda_session(monkeypatch) -> None:
+    monkeypatch.setattr(
+        pseudolabel,
+        "_import_rtmlib",
+        lambda: fake_rtmlib(("CUDAExecutionProvider", "CPUExecutionProvider")),
+    )
+    monkeypatch.setattr(pseudolabel, "_preload_cuda_dlls", lambda device: None)
+    teacher = WholeBodyTeacher("rtmw-x", device="cuda")
+    assert teacher._estimator.session.get_providers()[0] == "CUDAExecutionProvider"
+
+
+def test_cpu_device_does_not_require_cuda(monkeypatch) -> None:
+    monkeypatch.setattr(
+        pseudolabel, "_import_rtmlib", lambda: fake_rtmlib(("CPUExecutionProvider",))
+    )
+    detector = PersonDetector(device="cpu")
+    assert detector._detector.session.get_providers() == ["CPUExecutionProvider"]
+
+
+def test_cuda_device_preloads_the_dlls_before_building_the_models(monkeypatch) -> None:
+    events: list[str] = []
+
+    def record_preload(device: str) -> None:
+        events.append(f"preload:{device}")
+
+    monkeypatch.setattr(pseudolabel, "_preload_cuda_dlls", record_preload)
+    monkeypatch.setattr(
+        pseudolabel,
+        "_import_rtmlib",
+        lambda: fake_rtmlib(("CUDAExecutionProvider", "CPUExecutionProvider"), events=events),
+    )
+    WholeBodyTeacher("rtmw-x", device="cuda")
+    assert events == ["preload:cuda", "model"]
+
+
+def test_auto_label_logs_throughput_and_an_eta(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    frames = make_frames(tmp_path / "frames", count=4)
+    out = tmp_path / "labeled"
+    with caplog.at_level(logging.INFO, logger="cpsa_ml.pseudolabel"):
+        auto_label(
+            read_config(out=out, frames=frames, chunk_size=2),
+            detector=fake_detector,
+            teacher=fake_teacher,
+        )
+    messages = [record.getMessage() for record in caplog.records]
+    messages = [message for message in messages if "frames/s" in message]
+    assert messages
+    assert "ETA" in messages[0]
+    assert "/4 frames" in messages[0]

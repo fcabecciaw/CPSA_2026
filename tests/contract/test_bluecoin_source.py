@@ -93,3 +93,26 @@ def test_samples_are_forwarded_with_side_and_kind(vendor: Vendor) -> None:
         (Side.RIGHT, SampleKind.ACC, (10.0, 20.0, 30.0)),
     ]
     assert left.disconnected and right.disconnected
+
+
+def test_source_registers_the_quaternion_feature_before_discovery(vendor: Vendor) -> None:
+    """The stock SDK has no class for mask 0x100; without it no node exposes quaternions."""
+    import sys
+
+    from cpsa.adapters.bluecoin.fusion_feature import (
+        FUSION_COMPACT_MASK,
+        FeatureMemsSensorFusionCompact,
+    )
+    from cpsa.adapters.bluecoin.source import BlueCoinSource
+
+    definitions = sys.modules["blue_st_sdk.utils.ble_node_definitions"].FeatureCharacteristic
+    definitions.BASE_MASK_TO_FEATURE_DIC.clear()
+    definitions.SENSOR_TILE_BOX_MASK_TO_FEATURE_DIC.clear()
+
+    BlueCoinSource("CPSA_L2", "CPSA_R2")
+
+    for table in (
+        definitions.BASE_MASK_TO_FEATURE_DIC,
+        definitions.SENSOR_TILE_BOX_MASK_TO_FEATURE_DIC,
+    ):
+        assert table[FUSION_COMPACT_MASK] is FeatureMemsSensorFusionCompact

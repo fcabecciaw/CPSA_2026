@@ -1,0 +1,33 @@
+{
+  "v": 1,
+  "type": "medical.episode",
+  "seq": 8,
+  "t": 1008.0,
+  "wall": "2026-11-12T08:00:00Z",
+  "data": {
+    "episode_id": "ep-20261112-0001",
+    "active": false,
+    "contact_count": 2,
+    "repetition_hz": 1.4,
+    "peak_severity": "DANGEROUS",
+    "labels": [
+      "hand_to_face"
+    ],
+    "contacts": [
+      {
+        "side": "right",
+        "region": "mouth",
+        "t_start": 1235.1,
+        "duration_s": 0.6,
+        "hand_shape": "fist"
+      },
+      {
+        "side": "right",
+        "region": "eyes",
+        "t_start": 1236.0,
+        "duration_s": 0.4,
+        "hand_shape": "open_palm"
+      }
+    ]
+  }
+}

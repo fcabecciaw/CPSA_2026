@@ -1,0 +1,17 @@
+{
+  "name": "cpsa-medical-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Dashboard web della demo medica CPSA (Vite + TypeScript, nessuna dipendenza a runtime).",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vite": "8.3.8"
+  }
+}

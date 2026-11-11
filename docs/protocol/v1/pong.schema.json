@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pong.schema.json",
+  "title": "pong data (server to client)",
+  "type": "object",
+  "properties": {
+    "id": {}
+  },
+  "required": [
+    "id"
+  ],
+  "additionalProperties": true
+}

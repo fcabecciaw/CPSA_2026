@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -20,7 +20,7 @@ from cpsa.domain.model import (
     Verdict,
     VisionAssessment,
 )
-from cpsa.vision.types import PersonPose, TrackedFrame, VideoFrame
+from cpsa.vision.types import EpisodeReport, PersonPose, TrackedFrame, VideoFrame
 
 SampleCallback = Callable[[Side, SampleKind, tuple[float, ...], float], None]
 """Receives ``(side, kind, values, monotonic_ts)`` for every IMU sample."""
@@ -172,3 +172,58 @@ class Clock(Protocol):
     def monotonic(self) -> float: ...
 
     def now(self) -> datetime: ...
+
+
+@runtime_checkable
+class Publisher(Protocol):
+    """Pushes protocol messages to every connected display client.
+
+    Callers pass only the message ``type`` and its ``data`` payload; the server adds
+    the envelope (``v``, ``seq``, ``t``, ``wall``) per connection (interface IF-102).
+    Both methods are thread-safe and never block the caller.
+    """
+
+    def state(self, type: str, data: Mapping[str, Any]) -> None:
+        """Replace the state of topic ``type``; slow clients get only the latest one."""
+        ...
+
+    def event(self, type: str, data: Mapping[str, Any]) -> None:
+        """Queue a discrete event; events are delivered in order."""
+        ...
+
+
+@runtime_checkable
+class VisionObserver(Protocol):
+    """Receives live vision results, for example to drive the medical dashboard.
+
+    Methods are called from the vision verifier's worker thread. Implementations must
+    return quickly and must not raise; the verifier logs and swallows any exception,
+    so an observer never changes a verdict.
+    """
+
+    def on_episode(self, episode_id: str, t_start: float, active: bool) -> None:
+        """An episode started (``active=True``) or ended (``active=False``)."""
+        ...
+
+    def on_tracked(self, tracked: TrackedFrame) -> None:
+        """One analyzed, tracked frame, during an episode and while watching (F8, F14)."""
+        ...
+
+    def on_report(self, report: EpisodeReport) -> None:
+        """The final report of an episode that just ended."""
+        ...
+
+
+@runtime_checkable
+class VisionFrameObserver(Protocol):
+    """Receives the RGB image of every analyzed camera frame (F14).
+
+    Called from the vision verifier's worker thread, before ``on_tracked``, and only
+    when the observer implements it. The image is the decoded, unmirrored camera frame
+    at camera size: implementations must not copy or encode it on that thread, and must
+    return quickly; the verifier logs and swallows any exception.
+    """
+
+    def on_frame_image(self, seq: int, t: float, rgb: NDArray[np.uint8]) -> None:
+        """One analyzed frame: ``seq`` and camera timestamp ``t``, ``(H, W, 3)`` RGB."""
+        ...

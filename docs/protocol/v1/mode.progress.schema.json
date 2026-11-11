@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mode.progress.schema.json",
+  "title": "mode.progress data (server to client)",
+  "type": "object",
+  "properties": {
+    "mode": {
+      "enum": [
+        "idle",
+        "lab",
+        "medical"
+      ]
+    },
+    "step": {
+      "enum": [
+        "stopping",
+        "releasing",
+        "starting",
+        "ready",
+        "failed"
+      ]
+    },
+    "error": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "enum": [
+                "camera_missing",
+                "camera_error",
+                "model_missing",
+                "dpu_error",
+                "imu_not_found",
+                "asset_invalid",
+                "busy",
+                "bad_command",
+                "internal"
+              ]
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "additionalProperties": true
+        }
+      ]
+    }
+  },
+  "required": [
+    "mode",
+    "step"
+  ],
+  "additionalProperties": true
+}

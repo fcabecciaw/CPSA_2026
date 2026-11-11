@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "status.schema.json",
+  "title": "status data (server to client)",
+  "type": "object",
+  "properties": {
+    "mode": {
+      "enum": [
+        "idle",
+        "lab",
+        "medical"
+      ]
+    },
+    "mode_state": {
+      "enum": [
+        "stopped",
+        "starting",
+        "running",
+        "stopping",
+        "failed"
+      ]
+    },
+    "perception": {
+      "type": "object",
+      "properties": {
+        "fps": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "dpu_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "camera": {
+          "enum": [
+            "ok",
+            "missing",
+            "error",
+            null
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timing": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "analyzed_fps": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "camera_fps": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "decode_ms": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "preprocess_ms": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "dpu_ms": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "postprocess_ms": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "pose_ms": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "track_ms": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "latency_ms": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "dropped": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "analyzed_fps",
+                "camera_fps",
+                "decode_ms",
+                "preprocess_ms",
+                "dpu_ms",
+                "postprocess_ms",
+                "pose_ms",
+                "track_ms",
+                "latency_ms",
+                "dropped"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [
+        "fps",
+        "dpu_ms",
+        "camera",
+        "model"
+      ],
+      "additionalProperties": true
+    },
+    "imu": {
+      "enum": [
+        "n/a",
+        "searching",
+        "connected",
+        "lost"
+      ]
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "camera_missing",
+          "camera_error",
+          "model_missing",
+          "dpu_error",
+          "imu_not_found",
+          "asset_invalid",
+          "busy",
+          "bad_command",
+          "internal"
+        ]
+      }
+    },
+    "uptime_s": {
+      "type": "number"
+    }
+  },
+  "required": [
+    "mode",
+    "mode_state",
+    "perception",
+    "imu",
+    "errors",
+    "uptime_s"
+  ],
+  "additionalProperties": true
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "client-envelope.schema.json",
+  "title": "Protocol v1 client command envelope",
+  "type": "object",
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "type": {
+      "type": "string"
+    },
+    "data": {
+      "type": "object"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional per-connection client command counter; the server echoes it as error.ref_seq (IF-304)."
+    }
+  },
+  "required": [
+    "v",
+    "type",
+    "data"
+  ],
+  "additionalProperties": true
+}

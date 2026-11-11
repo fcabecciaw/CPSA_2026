@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "type": "error",
+  "seq": 4,
+  "t": 1004.0,
+  "wall": "2026-11-12T08:00:00Z",
+  "data": {
+    "code": "busy",
+    "message": "a mode switch is already in progress",
+    "ref_seq": 3
+  }
+}

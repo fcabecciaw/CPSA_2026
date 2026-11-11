@@ -166,6 +166,40 @@ process exits with code 0.
 
 With no actuator enabled or found, detection, verification and logging continue.
 
+## Supervisor and web UI
+
+`cpsa-supervisor` serves the demo UI and the protocol WebSocket on one port and
+runs exactly one mode at a time. It is the composition root for the medical demo:
+the browser talks to `cpsa.adapters.web`, which publishes the supervisor `status`
+and the active mode's topics.
+
+```bash
+uv run cpsa-supervisor --config config/board.yaml
+uv run cpsa-supervisor --config config/board.yaml --fake-medical
+```
+
+Open `http://<host>:8080/` for the UI. The WebSocket is at `/ws`, the built
+frontend is under `/assets/`, and `GET /health` returns the current mode,
+mode state and uptime. With `server.video: true`, `GET /video.mjpeg` streams the
+analyzed camera frames for the dashboard at up to 10 fps. `--fake-medical` replays
+the protocol examples from `docs/protocol/v1/examples` on a loop (state at 1 Hz,
+hands at 10 Hz, decisions and episodes every 5 s), so the dashboard can be
+developed on a PC with no hardware and no `board` extra.
+
+Both configuration sections are optional; the defaults are:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `server.host` | `0.0.0.0` | interface the UI and `/ws` are served on |
+| `server.port` | `8080` | one port for HTTP and the WebSocket |
+| `server.static_dir` | `web/dist` | built frontend served at `/` and `/assets/` |
+| `server.idle_timeout_s` | `30` | close a WebSocket with no reads for this long |
+| `server.video` | `false` | serve the analyzed camera frames at `GET /video.mjpeg` (demo only) |
+| `supervisor.default_mode` | `medical` | mode started at boot: `idle` or `medical` |
+
+Stop with `Ctrl+C` or `kill -TERM <pid>`; the active mode and the web server are
+stopped in that order and the process exits with code 0.
+
 ## Recording sessions
 
 `cpsa-record record` captures synchronized RGB-D frames and, unless `--no-imu` is
@@ -390,7 +424,7 @@ unknown keys are rejected; an invalid file stops startup with exit code 2.
 | `actuators.speaker.enable`, `actuators.speaker.mac` | bool, string | Use the Bluetooth speaker with this MAC address |
 | `actuators.led_strip.enable` | bool | Scan for and use flux_led LED strips |
 | `actuators.led_strip.duration_ms` | integer > 0 | LED auto-off delay |
-| `camera.rgb_device`, `camera.depth_device` | path | V4L2 nodes for RGB (YUYV) and depth (`Z16 `) |
+| `camera.rgb_device`, `camera.depth_device` | path or `auto` | V4L2 nodes for RGB (YUYV) and depth (`Z16 `); `auto` picks the node whose card name contains `F200` and whose formats fit the role, so a USB re-plug is recovered on the next start |
 | `camera.width`, `camera.height` | integer > 0 | Capture size in pixels; frames are not resized (640×480) |
 | `camera.fps` | > 0 | Capture rate; RGB/depth pair tolerance is `1 / (2 · fps)` |
 | `camera.rgb_exposure` | integer 83…10000 | Manual `exposure_time_absolute`; auto exposure is disabled |
@@ -405,7 +439,8 @@ unknown keys are rejected; an invalid file stops startup with exit code 2.
 | `vision.model.input_width`, `vision.model.input_height` | integer > 0 | Network input size in pixels |
 | `vision.model.conf_thr` | 0…1 | Minimum person score |
 | `vision.model.iou_thr` | 0…1 | NMS IoU threshold |
-| `vision.camera.device` | path | V4L2 node of the RGB-only UVC camera |
+| `vision.camera.device` | path or `auto` | V4L2 node of the RGB-only UVC camera; `auto` selects the node at every start |
+| `vision.camera.match` | string, default `F200` | Card-name fragment used when `vision.camera.device` is `auto` |
 | `vision.camera.width`, `vision.camera.height` | integer > 0 | Capture size in pixels |
 | `vision.camera.fps` | > 0 | Capture rate |
 | `vision.camera.exposure` | integer 1…10000 | Manual `exposure_time_absolute` |

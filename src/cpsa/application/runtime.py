@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable, Sequence
+from typing import Literal
 
 from cpsa.application.classification import ClassificationStage
 from cpsa.application.config import Config
@@ -20,11 +22,33 @@ from cpsa.ports import (
     EventSink,
     FeatureExtractor,
     Gui,
+    SampleCallback,
     SensorSource,
     Verifier,
 )
 
 logger = logging.getLogger(__name__)
+
+#: Both wrists must have delivered a sample within this window to be ``connected`` (F3).
+_IMU_STALE_S = 1.0
+
+
+class NullSensorSource:
+    """A ``SensorSource`` with no devices and no I/O.
+
+    The camera-only medical mode (FR-026) has no IMU: this source scans for
+    nothing, accepts the sample callback and never calls it.
+    """
+
+    def discover(self, timeout_s: float) -> set[str]:
+        """Return no device names."""
+        return set()
+
+    def start(self, on_sample: SampleCallback) -> None:
+        """Accept the callback and stay silent."""
+
+    def stop(self) -> None:
+        """Nothing to close."""
 
 
 class Runtime:
@@ -51,9 +75,13 @@ class Runtime:
         self._actuators = list(actuators)
         self._gui = gui
         self._vision = vision
+        self._imu_rx_lock = threading.Lock()
+        self._imu_last_rx: dict[Side, float] = {}
 
     def start(self) -> None:
         try:
+            with self._imu_rx_lock:
+                self._imu_last_rx.clear()
             self._gui.start()
             self._dispatcher.start()
             if self._vision is not None:
@@ -68,9 +96,27 @@ class Runtime:
         self, side: Side, kind: SampleKind, values: tuple[float, ...], ts: float
     ) -> None:
         """Tee sensor samples to the IMU synchronizer and the vision episode feed."""
+        with self._imu_rx_lock:
+            self._imu_last_rx[side] = ts
         self._synchronizer.update(side, kind, values, ts)
         if self._vision is not None:
             self._vision.on_imu_sample(side, kind, values, ts)
+
+    def imu_status(self, now: float) -> Literal["connected", "lost"]:
+        """Whether both wrists delivered a sample within the last second (F3).
+
+        Fed by :meth:`_on_sample` with the sample's monotonic timestamp, so the
+        status follows the sensor stream even when no wall-clock time passes
+        between two reads.
+        """
+        with self._imu_rx_lock:
+            left = self._imu_last_rx.get(Side.LEFT)
+            right = self._imu_last_rx.get(Side.RIGHT)
+        if left is None or right is None:
+            return "lost"
+        if now - left > _IMU_STALE_S or now - right > _IMU_STALE_S:
+            return "lost"
+        return "connected"
 
     def stop(self) -> None:
         steps: list[tuple[str, Callable[[], None]]] = [
@@ -123,3 +169,45 @@ def build_runtime(
     )
     vision = verifier if isinstance(verifier, VisionVerifier) else None
     return Runtime(source, synchronizer, dispatcher, actuators, gui, vision)
+
+
+def build_vision_runtime(
+    config: Config,
+    *,
+    verifier: VisionVerifier,
+    actuators: Sequence[Actuator],
+    sink: EventSink,
+    gui: Gui,
+    clock: Clock,
+) -> tuple[Runtime, Callable[[Detection], None]]:
+    """Wire the camera-only pipeline (FR-026, F10).
+
+    The verifier runs continuously and turns each trigger fire into a
+    ``Detection``; the returned callable puts it into the dispatcher's slot,
+    where the IMU classification stage puts its detections in ``build_runtime``.
+    The source is a no-op: vision mode has no IMU, and the synchronizer exists
+    only because ``Runtime`` owns one start/stop order.
+    """
+    slot: LatestSlot[Detection] = LatestSlot()
+    dispatcher = Dispatcher(
+        slot,
+        verifier,
+        actuators,
+        sink,
+        gui,
+        clock,
+        cooldown_s=config.dispatch.cooldown_s,
+        deadline_s=config.dispatch.verification_deadline_s,
+    )
+    synchronizer = IMUSynchronizer(
+        max_skew_s=config.sync.max_skew_ms / 1000.0,
+        stale_s=config.sync.stale_ms / 1000.0,
+        on_row=_discard_row,
+        clock=clock,
+    )
+    runtime = Runtime(NullSensorSource(), synchronizer, dispatcher, actuators, gui, verifier)
+    return runtime, slot.put
+
+
+def _discard_row(*_row: object) -> None:
+    """Sink for the synchronizer that never receives a sample in vision mode."""

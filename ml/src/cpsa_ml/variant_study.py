@@ -32,7 +32,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import os
 import shutil
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,6 +66,7 @@ __all__ = [
     "build_metrics_payload",
     "build_mixed_data_yaml",
     "dataset_root",
+    "log_epoch_time",
     "prepare_study_data",
     "publish_artifacts",
     "train_study",
@@ -369,6 +373,21 @@ def _dataset_schema(root: Path, schema: str) -> tuple[list[int], list[int]]:
                 f"{data_yaml}: {key} {value} does not match the {keypoint_schema.name} "
                 f"schema {expected}"
             )
+    # Datasets built before the sigmas existed have no key; a declared list must
+    # describe the same schema, otherwise mixing it would train with a different
+    # keypoint loss weighting than the one the mixed YAML writes.
+    declared_sigmas = declared.get("kpt_oks_sigmas")
+    if declared_sigmas is not None:
+        sigmas = [float(item) for item in declared_sigmas]
+        expected_sigmas = list(keypoint_schema.oks_sigmas)
+        if len(sigmas) != len(expected_sigmas) or any(
+            not math.isclose(actual, expected, rel_tol=1e-9, abs_tol=1e-12)
+            for actual, expected in zip(sigmas, expected_sigmas, strict=True)
+        ):
+            raise ValueError(
+                f"{data_yaml}: kpt_oks_sigmas {sigmas} does not match the "
+                f"{keypoint_schema.name} schema {expected_sigmas}"
+            )
     return kpt_shape, flip_idx
 
 
@@ -397,6 +416,11 @@ def build_mixed_data_yaml(
     A missing or incomplete full-frame root is not fatal: the YAML then trains
     on the half-body images only and a loud warning says so, because the box
     can no longer learn the true person extent.
+
+    The mapping carries ``kpt_oks_sigmas`` from the schema
+    (:attr:`cpsa_ml.schema.KeypointSchema.oks_sigmas`); without it
+    Ultralytics' ``v8PoseLoss`` uses ``ones(nkpt) / nkpt`` for a 62-keypoint
+    head and the OKS keypoint loss saturates, so far-away joints do not learn.
 
     Args:
         half_root: Half-bust dataset root or its ``data.yaml``.
@@ -464,6 +488,10 @@ def build_mixed_data_yaml(
 
     payload["kpt_shape"] = kpt_shape
     payload["flip_idx"] = flip_idx
+    # Ultralytics' pose trainer copies this onto the model, where v8PoseLoss
+    # uses it instead of the ones(nkpt)/nkpt fallback that saturates the
+    # keypoint loss for any kpt_shape other than [17, 3].
+    payload["kpt_oks_sigmas"] = list(get_schema(schema).oks_sigmas)
     payload["names"] = {0: "person"}
     target = Path(out)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -791,6 +819,51 @@ def build_metrics_payload(
 # ---------------------------------------------------------------------------
 
 
+def log_epoch_time(trainer: Any) -> None:
+    """Print the wall time of the training loop that just finished.
+
+    ``on_train_epoch_end`` runs before validation and before Ultralytics
+    updates ``trainer.epoch_time``, so the duration is measured from the epoch
+    start it recorded when the loop began.  Under DDP every rank raises the
+    callback; only rank 0 prints, or each epoch would be reported twice.
+
+    Args:
+        trainer: The ``BaseTrainer`` of the running job.
+    """
+
+    if int(os.environ.get("RANK", "-1")) not in {-1, 0}:
+        return
+    now = time.time()
+    started = getattr(trainer, "epoch_time_start", None)
+    seconds = now - started if started is not None else 0.0
+    epoch = int(getattr(trainer, "epoch", 0)) + 1
+    epochs = getattr(trainer, "epochs", None)
+    total = now - getattr(trainer, "train_time_start", now)
+    label = f"{epoch}/{epochs}" if epochs else str(epoch)
+    print(
+        f"[epoch {label}] {seconds:.0f} s of training, {total:.0f} s since training started",
+        flush=True,
+    )
+
+
+def _enable_epoch_timing(model: Any) -> None:
+    """Register :func:`log_epoch_time` on a model, before ``train`` is called.
+
+    Ultralytics 8.4.203 pickles ``trainer.callbacks`` into the script its DDP
+    launcher generates (``ultralytics.utils.dist.generate_ddp_file``) and
+    rebuilds the trainer there with ``_callbacks=...``, so the module-level
+    callback also runs in the ``device="0,1"`` workers.  A model without a
+    callback registry cannot report epochs and is left alone.
+
+    Args:
+        model: ``ultralytics.YOLO`` wrapper.
+    """
+
+    add_callback = getattr(model, "add_callback", None)
+    if add_callback is not None:
+        add_callback("on_train_epoch_end", log_epoch_time)
+
+
 def train_variant(
     entry: VariantEntry, config: StudyConfig, *, data: StudyData | None = None
 ) -> dict[str, Any]:
@@ -837,6 +910,7 @@ def train_variant(
             raise FileNotFoundError(f"resume checkpoint for {entry.name} not found: {checkpoint}")
         print(f"[{entry.name}] resuming from {checkpoint}")
         model = YOLO(str(checkpoint), task="pose", verbose=False)
+        _enable_epoch_timing(model)
         model.train(resume=str(checkpoint))
         # `/kaggle/working` does not survive between sessions: the transfer
         # report of the interrupted run travels next to the published last.pt.
@@ -855,6 +929,7 @@ def train_variant(
 
         model = load_yolo(config.schema, variant="n", activation=entry.activation)
         transfer = transfer_coco_weights(config.coco_weights, model)
+        _enable_epoch_timing(model)
         transfer_path.write_text(json.dumps(transfer, indent=2) + "\n", encoding="utf-8")
         overrides: dict[str, Any] = dict(config.augmentations)
         if custom_augmentations is not None:

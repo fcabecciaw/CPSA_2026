@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta
+      name="description"
+      content="Dashboard della demo medica CPSA: gesti mano-viso rilevati sulla Kria KV260."
+    />
+    <title>Demo medica · UNICA EOLAB</title>
+  </head>
+  <body>
+    <div class="app">
+      <header class="masthead">
+        <div class="identity">
+          <p class="brand">
+            <span class="brand-unica">UNICA</span>
+            <span class="brand-sep" aria-hidden="true">·</span>
+            <span class="brand-eolab">EOLAB</span>
+          </p>
+          <p class="affiliation">Università di Cagliari</p>
+        </div>
+        <div class="headline">
+          <h1>Demo medica</h1>
+          <p class="subtitle">Gesti mano-viso rilevati sulla Kria KV260</p>
+        </div>
+        <div class="connection" role="status" aria-live="polite">
+          <span id="conn-dot" class="dot dot-connecting" aria-hidden="true"></span>
+          <div class="connection-copy">
+            <p id="conn-text" class="conn-text">Connessione…</p>
+            <p id="conn-detail" class="conn-detail"></p>
+          </div>
+        </div>
+      </header>
+
+      <section class="controlbar" aria-labelledby="mode-label">
+        <div class="mode-group" role="group" aria-labelledby="mode-label">
+          <span id="mode-label" class="control-label">Modalità</span>
+          <button type="button" id="mode-idle" data-mode="idle" aria-pressed="false">
+            Idle
+          </button>
+          <button type="button" id="mode-medical" data-mode="medical" aria-pressed="false">
+            Medicale
+          </button>
+        </div>
+        <p id="mode-status" class="mode-status">In attesa di connessione…</p>
+        <p id="mode-error" class="mode-error" role="status" aria-live="polite"></p>
+        <ul id="health" class="health" aria-label="Salute del sistema"></ul>
+        <ul id="timing" class="timing" aria-label="Tempi di elaborazione"></ul>
+        <p id="notice" class="notice" role="status" aria-live="polite"></p>
+      </section>
+
+      <main class="layout">
+        <div class="side side-left">
+          <section class="panel live-panel" aria-labelledby="live-title">
+            <header class="panel-head">
+              <h2 id="live-title">Stato live</h2>
+            </header>
+            <div id="live-tiles" class="tiles"></div>
+          </section>
+
+          <section class="panel episode-panel" aria-labelledby="episode-title">
+            <header class="panel-head">
+              <h2 id="episode-title">Ultimo episodio</h2>
+              <div id="episode-badge" class="episode-badge"></div>
+            </header>
+            <div id="episode-body" class="episode-body"></div>
+          </section>
+        </div>
+
+        <section class="panel skeleton-panel" aria-labelledby="skeleton-title">
+          <header class="panel-head">
+            <h2 id="skeleton-title">Scheletro</h2>
+            <span class="hint">HALFBUST_62 · specchiato</span>
+          </header>
+          <div class="canvas-wrap">
+            <img id="video" class="video" alt="Video della telecamera" hidden />
+            <canvas
+              id="skeleton"
+              role="img"
+              aria-label="Scheletro non disponibile: in attesa di dati."
+            ></canvas>
+            <p class="canvas-empty" id="canvas-empty">In attesa di episodio…</p>
+            <p class="video-note" id="video-note">Video non disponibile</p>
+          </div>
+          <div class="skeleton-footer">
+            <ul class="legend" aria-label="Legenda dello scheletro">
+              <li><span class="legend-swatch legend-body" aria-hidden="true"></span>Corpo</li>
+              <li><span class="legend-swatch legend-face" aria-hidden="true"></span>Volto</li>
+              <li><span class="legend-swatch legend-hands" aria-hidden="true"></span>Mani</li>
+            </ul>
+            <p class="hint" id="skeleton-meta"></p>
+          </div>
+        </section>
+
+        <div class="side feed-side">
+          <section class="panel feed-panel" aria-labelledby="feed-title">
+            <header class="panel-head">
+              <h2 id="feed-title">Decisioni</h2>
+              <span class="hint" id="feed-count">0 / 20</span>
+            </header>
+            <ol id="feed" class="feed" aria-label="Ultime 20 decisioni, dalla più recente"></ol>
+          </section>
+
+          <section class="panel log-panel" aria-labelledby="log-title">
+            <header class="panel-head">
+              <h2 id="log-title">Registro connessioni</h2>
+              <span class="hint" id="log-count">0 / 50</span>
+            </header>
+            <ol
+              id="log"
+              class="log"
+              aria-label="Ultime 50 righe del registro connessioni, dalla più vecchia"
+            ></ol>
+          </section>
+        </div>
+      </main>
+
+      <noscript>Questa dashboard richiede JavaScript.</noscript>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

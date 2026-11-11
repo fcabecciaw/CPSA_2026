@@ -1,18 +1,19 @@
 """Typed, validated board configuration.
 
-Every key is required and there are no code defaults: the YAML file is the single
-source of configuration. Validation failures raise :class:`ConfigError` naming the
-dotted key.
+Every key of the hardware sections is required and there are no code defaults:
+the YAML file is the single source of configuration. ``server`` and ``supervisor``
+are optional sections; when a section is absent its dataclass defaults apply.
+Validation failures raise :class:`ConfigError` naming the dotted key.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TypeVar
+from typing import Literal, TypeVar, cast
 
 import yaml
 
@@ -26,9 +27,21 @@ from cpsa.vision.oscillation import OscillationConfig
 from cpsa.vision.skeleton import SkeletonConfig
 from cpsa.vision.subject import SubjectConfig
 from cpsa.vision.tracker2d import Tracker2DConfig
+from cpsa.vision.trigger import TriggerConfig
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 VISION_MODEL_KINDS = ("onnx", "xmodel")
+SUPERVISOR_MODES = ("idle", "medical")
+MEDICAL_TRIGGERS = ("imu", "vision")
+"""Episode trigger sources (FR-026)."""
+
+TriggerMode = Literal["imu", "vision"]
+DEFAULT_CAMERA_MATCH = "RealSense"
+"""Card-name fragment used when ``vision.camera.device`` is ``auto``.
+
+The adapters own the discovery itself; the application layer may not import
+them, so the default the demo camera reports is repeated here.
+"""
 EnumT = TypeVar("EnumT", bound=Enum)
 
 
@@ -134,13 +147,22 @@ class VisionModelConfig:
 
 @dataclass(frozen=True)
 class VisionCameraConfig:
-    """RGB-only UVC camera settings used by the vision pipeline."""
+    """RGB-only UVC camera settings used by the vision pipeline.
+
+    ``device`` may be ``auto``; ``match`` is the card-name fragment that
+    :attr:`cpsa.adapters.camera.devices.resolve_device` looks for then.
+    """
 
     device: str
+    match: str
     width: int
     height: int
     fps: float
     exposure: int
+    gain: int | None = None
+    """Manual V4L2 ``gain``; ``None`` keeps the camera's value."""
+    power_line_hz: int | None = None
+    """Anti-flicker mains frequency (0 = off, 50, 60); ``None`` keeps the camera's value."""
 
 
 @dataclass(frozen=True)
@@ -208,6 +230,39 @@ class VisionConfig:
 
 
 @dataclass(frozen=True)
+class ServerConfig:
+    """HTTP and WebSocket endpoint served by ``cpsa-supervisor`` (IF-101)."""
+
+    host: str = "0.0.0.0"
+    port: int = 8080
+    static_dir: Path = Path("web/dist")
+    idle_timeout_s: float = 30.0
+    video: bool = False
+    """Serve the analyzed camera frames at ``/video.mjpeg`` (F14); off by default."""
+
+
+@dataclass(frozen=True)
+class SupervisorConfig:
+    """Which mode the supervisor starts at boot (FR-205)."""
+
+    default_mode: str = "medical"
+
+
+@dataclass(frozen=True)
+class MedicalConfig:
+    """Episode trigger source and the vision-trigger thresholds (FR-026..FR-030).
+
+    A document without a ``medical`` section means ``trigger: imu``. With
+    ``trigger: vision`` the medical mode runs camera-only: it never scans for or
+    connects to a BlueCoin. The thresholds are the validated Task F7 dataclass;
+    ``vision_trigger.refractory_s`` defaults to ``dispatch.cooldown_s``.
+    """
+
+    trigger: TriggerMode = "imu"
+    vision_trigger: TriggerConfig = field(default_factory=TriggerConfig)
+
+
+@dataclass(frozen=True)
 class Config:
     log: LogConfig
     bluecoins: BlueCoinsConfig
@@ -216,6 +271,9 @@ class Config:
     actuators: ActuatorsConfig
     camera: CameraConfig
     vision: VisionConfig
+    medical: MedicalConfig = field(default_factory=MedicalConfig)
+    server: ServerConfig = field(default_factory=ServerConfig)
+    supervisor: SupervisorConfig = field(default_factory=SupervisorConfig)
 
 
 def load(path: Path) -> Config:
@@ -246,13 +304,25 @@ def parse(data: object) -> Config:
     camera = root.section("camera")
     xu = camera.section("xu")
     vision = _vision_config(root.section("vision"))
+    server_section = root.optional_section("server")
+    supervisor_section = root.optional_section("supervisor")
+    server = _server_config(server_section) if server_section is not None else ServerConfig()
+    supervisor = (
+        _supervisor_config(supervisor_section)
+        if supervisor_section is not None
+        else SupervisorConfig()
+    )
+    cooldown_s = dispatch.positive("cooldown_s")
     verification_deadline_s = dispatch.positive("verification_deadline_s")
+    medical = _medical_config(root.optional_section("medical"), cooldown_s)
 
     if vision.fast_budget_s >= verification_deadline_s:
         raise ConfigError(
             "vision.fast_budget_s",
             "must be less than dispatch.verification_deadline_s",
         )
+    if medical.trigger == "vision" and not vision.enabled:
+        raise ConfigError("medical.trigger", "vision requires vision.enabled: true")
 
     config = Config(
         log=LogConfig(
@@ -271,7 +341,7 @@ def parse(data: object) -> Config:
             stale_ms=sync.positive("stale_ms"),
         ),
         dispatch=DispatchConfig(
-            cooldown_s=dispatch.positive("cooldown_s"),
+            cooldown_s=cooldown_s,
             verification_deadline_s=verification_deadline_s,
         ),
         actuators=ActuatorsConfig(
@@ -303,6 +373,9 @@ def parse(data: object) -> Config:
             ),
         ),
         vision=vision,
+        medical=medical,
+        server=server,
+        supervisor=supervisor,
     )
     sections = (
         root,
@@ -319,6 +392,50 @@ def parse(data: object) -> Config:
         xu,
     )
     for section in sections:
+        section.reject_unknown()
+    return config
+
+
+def _server_config(server: _Section) -> ServerConfig:
+    """Build the validated optional ``server`` section (defaults apply when absent)."""
+    config = ServerConfig(
+        host=server.text("host"),
+        port=server.integer("port", 1, 65535),
+        static_dir=Path(server.text("static_dir")).expanduser(),
+        idle_timeout_s=server.positive("idle_timeout_s"),
+        video=server.optional_flag("video", False),
+    )
+    server.reject_unknown()
+    return config
+
+
+def _supervisor_config(supervisor: _Section) -> SupervisorConfig:
+    """Build the validated optional ``supervisor`` section."""
+    config = SupervisorConfig(default_mode=supervisor.choice("default_mode", SUPERVISOR_MODES))
+    supervisor.reject_unknown()
+    return config
+
+
+def _medical_config(medical: _Section | None, cooldown_s: float) -> MedicalConfig:
+    """Build the validated optional ``medical`` section (F9).
+
+    An absent section is the IMU trigger with the default thresholds. A null
+    ``vision_trigger.refractory_s`` means ``dispatch.cooldown_s``.
+    """
+    if medical is None:
+        return MedicalConfig(vision_trigger=TriggerConfig(refractory_s=cooldown_s))
+    trigger = medical.choice("trigger", MEDICAL_TRIGGERS)
+    thresholds = medical.section("vision_trigger")
+    config = MedicalConfig(
+        trigger=cast(TriggerMode, trigger),
+        vision_trigger=TriggerConfig(
+            min_contacts=thresholds.positive_int("min_contacts"),
+            contact_window_s=thresholds.positive("contact_window_s"),
+            oscillation_min_s=thresholds.positive("oscillation_min_s"),
+            refractory_s=thresholds.optional_non_negative("refractory_s", cooldown_s),
+        ),
+    )
+    for section in (medical, thresholds):
         section.reject_unknown()
     return config
 
@@ -371,6 +488,7 @@ def _vision_config(vision: _Section) -> VisionConfig:
             init_pos_std_px=tracker.positive("init_pos_std_px"),
             init_vel_std_pxps=tracker.positive("init_vel_std_pxps"),
             init_acc_std_pxps2=tracker.positive("init_acc_std_pxps2"),
+            filter=tracker.optional_flag("filter", True),
         )
         analysis_config = AnalysisConfig(
             features=FeatureConfig(
@@ -438,10 +556,13 @@ def _vision_config(vision: _Section) -> VisionConfig:
             ),
             camera=VisionCameraConfig(
                 device=camera.text("device"),
+                match=camera.optional_text("match", DEFAULT_CAMERA_MATCH),
                 width=camera.positive_int("width"),
                 height=camera.positive_int("height"),
                 fps=camera.positive("fps"),
                 exposure=camera.integer("exposure", 1, 10000),
+                gain=camera.optional_integer("gain", 1, 10000),
+                power_line_hz=camera.optional_power_line_hz("power_line_hz"),
             ),
             preroll_s=vision.positive("preroll_s"),
             lookback_s=vision.positive("lookback_s"),
@@ -517,11 +638,23 @@ class _Section:
     def section(self, name: str) -> _Section:
         return _Section(self._get(name), self._key(name))
 
+    def optional_section(self, name: str) -> _Section | None:
+        """Return the subsection, or ``None`` when the optional section is absent."""
+        if name not in self._data:
+            return None
+        return self.section(name)
+
     def text(self, name: str) -> str:
         value = self._get(name)
         if not isinstance(value, str) or not value.strip():
             raise ConfigError(self._key(name), "expected a non-empty string")
         return value
+
+    def optional_text(self, name: str, default: str) -> str:
+        """Return the non-empty string at ``name``, or ``default`` when absent."""
+        if name not in self._data:
+            return default
+        return self.text(name)
 
     def choice(self, name: str, options: tuple[str, ...]) -> str:
         value = self.text(name)
@@ -534,6 +667,12 @@ class _Section:
         if not isinstance(value, bool):
             raise ConfigError(self._key(name), "expected true or false")
         return value
+
+    def optional_flag(self, name: str, default: bool) -> bool:
+        """Return the boolean at ``name``, or ``default`` when the key is absent."""
+        if name not in self._data:
+            return default
+        return self.flag(name)
 
     def positive(self, name: str) -> float:
         value = self._get(name)
@@ -564,6 +703,13 @@ class _Section:
         if number > 1.0:
             raise ConfigError(self._key(name), "expected a number between 0 and 1")
         return number
+
+    def optional_non_negative(self, name: str, default: float) -> float:
+        """Return the non-negative number at ``name``, or ``default`` when it is null or absent."""
+        if name not in self._data or self._data[name] is None:
+            self._used.add(name)
+            return default
+        return self.non_negative(name)
 
     def pair(self, name: str) -> tuple[float, float]:
         value = self._get(name)
@@ -608,6 +754,19 @@ class _Section:
             raise ConfigError(
                 self._key(name), f"expected an integer between {minimum} and {maximum}"
             )
+        return value
+
+    def optional_integer(self, name: str, minimum: int, maximum: int) -> int | None:
+        """Return the integer at ``name`` in ``[minimum, maximum]``, or ``None`` when absent."""
+        if name not in self._data:
+            return None
+        return self.integer(name, minimum, maximum)
+
+    def optional_power_line_hz(self, name: str) -> int | None:
+        """Return ``0`` (off), ``50`` or ``60`` at ``name``, or ``None`` when absent."""
+        value = self.optional_integer(name, 0, 60)
+        if value is not None and value not in (0, 50, 60):
+            raise ConfigError(self._key(name), "expected 0, 50 or 60")
         return value
 
     def reject_unknown(self) -> None:

@@ -10,6 +10,13 @@ FR-025 possible.
 frame at or after every grid point ``t0 + k / analysis_fps``. It depends on
 timestamps only, so the same recorded frames select the same grid in live and
 replay.
+
+The same analyzer can also run as one continuous **stream** in camera-only mode
+(plan F17): :meth:`EpisodeAnalyzer.open_window` turns a time window of the
+running stream into an episode, :meth:`EpisodeAnalyzer.close_window` returns to
+the stream, and :meth:`EpisodeAnalyzer.prune` keeps the retained history
+bounded. A window never resets the tracker or the recorded frames, so the pose
+of the episode start is already tracked.
 """
 
 from __future__ import annotations
@@ -296,6 +303,12 @@ class EpisodeAnalyzer:
     free of retained state (so a timed-out assessment cannot leak an untraced
     mutation) and makes audit replay reproduce the grade from the pushed frames
     alone.
+
+    In camera-only mode the analyzer runs as one long-lived stream and
+    :meth:`open_window` selects the episode from it (F17). The stage-2 report
+    already ignores frames before ``t_start``, and the window start also gates
+    the confirmations of :meth:`assess` and :meth:`active`. :meth:`prune` keeps
+    the recorded history bounded over hours of runtime.
     """
 
     def __init__(
@@ -313,9 +326,13 @@ class EpisodeAnalyzer:
         )
         self._episode_id = ""
         self._t_start = 0.0
+        self._stream_id = ""
+        self._stream_t_start = 0.0
+        self._window_open = False
         self._frames: list[TrackedFrame] = []
         self._last_t: float | None = None
         self._latest_grade: tuple[float, Tag] | None = None
+        self._contact_events: list[tuple[float, Tag]] = []
         self._contact_runs: list[_ContactRun] = []
         self._active_contacts: dict[Side, _ContactRun] = {}
         self._contact_peak: tuple[int, float] | None = None
@@ -333,6 +350,11 @@ class EpisodeAnalyzer:
         return self._t_start
 
     @property
+    def window_open(self) -> bool:
+        """Whether an episode window of the running stream is open (F17)."""
+        return self._window_open
+
+    @property
     def frames(self) -> tuple[TrackedFrame, ...]:
         return tuple(self._frames)
 
@@ -342,18 +364,35 @@ class EpisodeAnalyzer:
         return self._latest_grade
 
     @property
+    def contact_events(self) -> tuple[tuple[float, Tag], ...]:
+        """Start time and grade of every contact recorded in this episode (FR-028).
+
+        The camera-only trigger consumes one entry per hand-to-face contact, in
+        start order. A run that is regraded over its recoil tail updates its
+        entry in place, so the list stays one entry per contact. Only entries at
+        or after :attr:`t_start` are reported: a window opened over a running
+        stream (F17) never reports a contact of the idle period.
+        """
+        start = self._t_start - _EPS
+        return tuple(event for event in self._contact_events if event[0] >= start)
+
+    @property
     def contact_peak(self) -> tuple[int, float] | None:
         """Severity rank and start time of the highest-severity contact so far.
 
         The rank is 1 for ``NON_DANGEROUS`` and 2 for ``DANGEROUS``. Ties keep
         the later contact, matching the peak rule of the episode report. A live
         or pending run contributes its current (or finalized) grade, so a late
-        recoil upgrades the peak instead of leaving a stale rank.
+        recoil upgrades the peak instead of leaving a stale rank. Contacts before
+        :attr:`t_start` do not count, so a window over a running stream (F17)
+        never selects the evidence clip of the idle period.
         """
+        start = self._t_start - _EPS
         peaks = [run.peak for run in self._contact_runs if run.peak is not None]
         if self._contact_peak is not None:
             peaks.append(self._contact_peak)
-        return max(peaks) if peaks else None
+        counted = [peak for peak in peaks if peak[1] >= start]
+        return max(counted) if counted else None
 
     @property
     def skeleton_state(self) -> dict[str, object] | None:
@@ -374,22 +413,98 @@ class EpisodeAnalyzer:
         return self._started and not self._ended
 
     def start(self, episode_id: str, t: float) -> None:
-        """Begin a new episode; keeps the session-long skeleton references."""
+        """Begin a new episode, or the idle stream of camera-only mode (F17).
+
+        Keeps the session-long skeleton references and resets everything else,
+        including an open window.
+        """
         if not episode_id:
             raise ValueError("episode_id must not be empty")
         if not np.isfinite(t):
             raise ValueError("episode start time must be finite")
         self._tracker.reset()
+        self._stream_id = episode_id
+        self._stream_t_start = float(t)
+        self._window_open = False
         self._episode_id = episode_id
         self._t_start = float(t)
         self._frames = []
         self._last_t = None
         self._latest_grade = None
+        self._contact_events = []
         self._contact_runs.clear()
         self._active_contacts.clear()
         self._contact_peak = None
         self._started = True
         self._ended = False
+
+    def open_window(self, episode_id: str, t_start: float) -> None:
+        """Turn a time window of the running stream into the current episode (F17).
+
+        The tracker, the recorded frames, the contact runs and the events are
+        kept: the episode continues the stream instead of replaying it. Contact
+        events and grades before ``t_start`` stop counting for the window.
+        """
+        if not self._started or self._ended:
+            raise RuntimeError("analyzer is not active")
+        if self._window_open:
+            raise RuntimeError("an episode window is already open")
+        if not episode_id:
+            raise ValueError("episode_id must not be empty")
+        if not np.isfinite(t_start):
+            raise ValueError("episode start time must be finite")
+        self._window_open = True
+        self._episode_id = episode_id
+        self._t_start = float(t_start)
+
+    def close_window(self) -> None:
+        """Return to the idle stream after an episode window (F17).
+
+        In-progress contact runs are kept: the stream continues, so a contact
+        that started during the episode and is still held still belongs to the
+        stream's event history. The tracker is never touched.
+        """
+        if not self._window_open:
+            return
+        self._window_open = False
+        self._episode_id = self._stream_id
+        self._t_start = self._stream_t_start
+
+    def prune(self, before_t: float) -> None:
+        """Drop recorded frames, events and grades older than ``before_t`` (F17).
+
+        With a window open the effective cut is ``min(before_t, t_start)``, so an
+        active episode keeps its whole window. Dropping the first frames costs
+        ``O(dropped)``; a contact run that still grows keeps grading from the
+        retained frames, so a hold longer than the retained history loses only its
+        early recoil window. The tracker is never touched.
+        """
+        if not np.isfinite(before_t):
+            raise ValueError("prune time must be finite")
+        cut = float(before_t)
+        if self._window_open:
+            cut = min(cut, self._t_start)
+        dropped = 0
+        while dropped < len(self._frames) and self._frames[dropped].t < cut - _EPS:
+            dropped += 1
+        if dropped:
+            del self._frames[:dropped]
+            for run in self._contact_runs:
+                run.start_index = max(run.start_index - dropped, 0)
+                run.counted_index = max(run.counted_index - dropped, -1)
+                run.recoil_end_index = max(run.recoil_end_index - dropped, 0)
+        kept_events = 0
+        while (
+            kept_events < len(self._contact_events)
+            and self._contact_events[kept_events][0] < cut - _EPS
+        ):
+            kept_events += 1
+        if kept_events:
+            del self._contact_events[:kept_events]
+        if self._latest_grade is not None and self._latest_grade[0] < cut - _EPS:
+            self._latest_grade = None
+        if self._contact_peak is not None and self._contact_peak[1] < cut - _EPS:
+            self._contact_peak = None
 
     def end(self) -> None:
         """Freeze the episode; later pushes and assessments raise."""
@@ -492,7 +607,17 @@ class EpisodeAnalyzer:
         severity = severity_of(contact, self._cfg)
         # Recency uses the event end, matching the report activity (R-14).
         self._record_grade(contact.t_start + contact.duration_s, severity)
+        self._note_contact_event(contact.t_start, severity)
         run.peak = (1 if severity is Tag.NON_DANGEROUS else 2, contact.t_start)
+
+    def _note_contact_event(self, t_start: float, severity: Tag) -> None:
+        """Keep one graded entry per contact start for the camera-only trigger (FR-028)."""
+        for index, (event_t, current) in enumerate(self._contact_events):
+            if event_t == t_start:
+                if severity is Tag.DANGEROUS and current is not Tag.DANGEROUS:
+                    self._contact_events[index] = (event_t, severity)
+                return
+        self._contact_events.append((t_start, severity))
 
     def _finalize_contact(self, run: _ContactRun) -> None:
         """Freeze one ended contact once its recoil tail is complete."""
@@ -580,16 +705,21 @@ class EpisodeAnalyzer:
         The recency reference is the event end, the same cutoff used by
         :func:`~cpsa.vision.assessment.build_report` activity, so ``assess`` and
         ``report.active`` cannot disagree (R-14). A held contact records the
-        current frame as its end, so it counts as active now.
+        current frame as its end, so it counts as active now. A grade recorded
+        before the window start does not confirm the window (F17).
         """
         grade = self._latest_grade
-        if grade is None or grade[0] < now - self._cfg.activity_window_s:
+        if grade is None or grade[0] < self._t_start - _EPS:
+            return None
+        if grade[0] < now - self._cfg.activity_window_s:
             return None
         return grade[1]
 
     def _activity_only(self, now: float) -> bool:
         """Return whether recent activity is rocking or flapping only (FR-019)."""
         cutoff = now - self._cfg.activity_window_s
+        if self._window_open:
+            cutoff = max(cutoff, self._t_start)
         recent = [frame for frame in self._frames if frame.t >= cutoff]
         if not recent:
             return False

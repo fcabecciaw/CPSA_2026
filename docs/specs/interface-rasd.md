@@ -293,3 +293,18 @@ Frontend visuals are out of scope; the fields they need are reserved here.
 **Nonblocking risks:**
 - The 30 Hz full-state messages on the A53 CPU need NFR-I1 checked on the board.
 - glTF node naming depends on the asset sourcing.
+
+## Revision 2026-11-11: camera-only medical trigger (protocol v1, compatible addition)
+
+- **IF-451 ADDED field:** `medical.state.trigger` is `"imu"` or `"vision"`.
+  - With `"vision"`, `imu` is `"n/a"` and `tag` is the latest vision-derived tag.
+  - Clients that do not know the field ignore it (IF-103).
+- **IF-301:** with `trigger = vision`, `status.imu` is `"n/a"`.
+- **IF-452:** with `trigger = vision`, `medical.decision.tag` is the vision tag, `verdict` is `"CONFIRMED"`, and `vision` carries the assessment.
+
+## Revision 2026-11-11: dashboard video, FPS and timings (protocol v1, compatible addition)
+
+- **IF-301 ADDED field (F13):** `status.perception.fps` and `.dpu_ms` carry the analyzed camera FPS and the DPU time of the rolling 5 s window, rounded to one decimal, or null when unknown. A new optional `status.perception.timing` is null or an object with exactly `analyzed_fps`, `camera_fps`, `decode_ms`, `preprocess_ms`, `dpu_ms`, `postprocess_ms`, `pose_ms`, `track_ms`, `latency_ms` (number or null) and `dropped` (integer ≥ 0). The server always sends the key in medical mode; clients must accept it missing and must not drop unknown extra keys (IF-103).
+- **IF-454 ADDED field (F14):** `medical.hands.seq` is the analyzed frame sequence number; clients that do not know it ignore it.
+- **IF-512 ADDED endpoint (F14):** over the same HTTP port, `GET /video.mjpeg` streams the analyzed camera frames as `multipart/x-mixed-replace; boundary=cpsaframe` (`X-Frame-Seq` per part, JPEG quality 70, at most 10 frames/s per client, frames never written to disk). It is opt-in through `server.video` (default `false`) and answers `404 {"error": "video_disabled"}` when disabled. `medical.hands` stays throttled at 15 Hz (IF-601).
+
