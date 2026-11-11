@@ -50,6 +50,7 @@ def test_builds_halfbust_dataset(tmp_path: Path, synthetic_coco: tuple[Path, Pat
     data = yaml.safe_load((out / "data.yaml").read_text())
     assert data["kpt_shape"] == [62, 3]
     assert data["flip_idx"] == list(HALFBUST_62.flip_idx)
+    assert data["kpt_oks_sigmas"] == list(HALFBUST_62.oks_sigmas)
     assert data["names"] == {0: "person"}
     assert data["train"] == "images/train"
     assert data["val"] == "images/train"  # val not built yet

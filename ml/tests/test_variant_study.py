@@ -258,6 +258,7 @@ def test_mixed_data_yaml_concatenates_both_train_dirs(tmp_path: Path) -> None:
     assert payload["val_full"] == str(full / "images" / "val")
     assert payload["kpt_shape"] == [62, 3]
     assert payload["flip_idx"] == list(HALFBUST_62.flip_idx)
+    assert payload["kpt_oks_sigmas"] == list(HALFBUST_62.oks_sigmas)
     assert payload["names"] == {0: "person"}
     assert yaml.safe_load(target.read_text()) == payload
 
@@ -286,6 +287,28 @@ def test_mixed_data_yaml_rejects_a_schema_mismatch(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="does not match"):
         build_mixed_data_yaml(half, full, tmp_path / "data_mixed.yaml")
+
+
+def test_mixed_data_yaml_rejects_a_different_sigma_list(tmp_path: Path) -> None:
+    half = _dataset(tmp_path / "halfbust")
+    data_yaml = half / "data.yaml"
+    declared = yaml.safe_load(data_yaml.read_text())
+    declared["kpt_oks_sigmas"] = [1 / 62] * 62  # the saturating fallback
+    data_yaml.write_text(yaml.safe_dump(declared), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="kpt_oks_sigmas"):
+        build_mixed_data_yaml(half, None, tmp_path / "data_mixed.yaml")
+
+
+def test_mixed_data_yaml_accepts_a_matching_sigma_list(tmp_path: Path) -> None:
+    half = _dataset(tmp_path / "halfbust")
+    data_yaml = half / "data.yaml"
+    declared = yaml.safe_load(data_yaml.read_text())
+    declared["kpt_oks_sigmas"] = list(HALFBUST_62.oks_sigmas)
+    data_yaml.write_text(yaml.safe_dump(declared), encoding="utf-8")
+
+    payload = build_mixed_data_yaml(half, None, tmp_path / "data_mixed.yaml")
+    assert payload["kpt_oks_sigmas"] == list(HALFBUST_62.oks_sigmas)
 
 
 def test_mixed_data_yaml_requires_the_half_body_splits(tmp_path: Path) -> None:

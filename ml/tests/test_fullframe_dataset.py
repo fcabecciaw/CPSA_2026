@@ -252,6 +252,7 @@ def test_val_split_writes_every_qualifying_image(
     assert data["train"] == "images/val"  # train not built in this root
     assert data["kpt_shape"] == [62, 3]
     assert data["flip_idx"] == list(HALFBUST_62.flip_idx)
+    assert data["kpt_oks_sigmas"] == list(HALFBUST_62.oks_sigmas)
     stats = yaml.safe_load((out / "stats.json").read_text())
     assert stats["splits"]["val"]["images_written"] == 3
 

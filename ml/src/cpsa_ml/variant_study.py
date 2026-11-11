@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import shutil
 import time
@@ -372,6 +373,21 @@ def _dataset_schema(root: Path, schema: str) -> tuple[list[int], list[int]]:
                 f"{data_yaml}: {key} {value} does not match the {keypoint_schema.name} "
                 f"schema {expected}"
             )
+    # Datasets built before the sigmas existed have no key; a declared list must
+    # describe the same schema, otherwise mixing it would train with a different
+    # keypoint loss weighting than the one the mixed YAML writes.
+    declared_sigmas = declared.get("kpt_oks_sigmas")
+    if declared_sigmas is not None:
+        sigmas = [float(item) for item in declared_sigmas]
+        expected_sigmas = list(keypoint_schema.oks_sigmas)
+        if len(sigmas) != len(expected_sigmas) or any(
+            not math.isclose(actual, expected, rel_tol=1e-9, abs_tol=1e-12)
+            for actual, expected in zip(sigmas, expected_sigmas, strict=True)
+        ):
+            raise ValueError(
+                f"{data_yaml}: kpt_oks_sigmas {sigmas} does not match the "
+                f"{keypoint_schema.name} schema {expected_sigmas}"
+            )
     return kpt_shape, flip_idx
 
 
@@ -400,6 +416,11 @@ def build_mixed_data_yaml(
     A missing or incomplete full-frame root is not fatal: the YAML then trains
     on the half-body images only and a loud warning says so, because the box
     can no longer learn the true person extent.
+
+    The mapping carries ``kpt_oks_sigmas`` from the schema
+    (:attr:`cpsa_ml.schema.KeypointSchema.oks_sigmas`); without it
+    Ultralytics' ``v8PoseLoss`` uses ``ones(nkpt) / nkpt`` for a 62-keypoint
+    head and the OKS keypoint loss saturates, so far-away joints do not learn.
 
     Args:
         half_root: Half-bust dataset root or its ``data.yaml``.
@@ -467,6 +488,10 @@ def build_mixed_data_yaml(
 
     payload["kpt_shape"] = kpt_shape
     payload["flip_idx"] = flip_idx
+    # Ultralytics' pose trainer copies this onto the model, where v8PoseLoss
+    # uses it instead of the ones(nkpt)/nkpt fallback that saturates the
+    # keypoint loss for any kpt_shape other than [17, 3].
+    payload["kpt_oks_sigmas"] = list(get_schema(schema).oks_sigmas)
     payload["names"] = {0: "person"}
     target = Path(out)
     target.parent.mkdir(parents=True, exist_ok=True)

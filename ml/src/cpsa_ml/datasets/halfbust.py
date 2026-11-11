@@ -524,6 +524,9 @@ def write_dataset_yaml(out: Path, schema: KeypointSchema, split: str) -> None:
         "val": "images/val" if val_exists else current,
         "kpt_shape": list(schema.kpt_shape),
         "flip_idx": list(schema.flip_idx),
+        # Without this Ultralytics' v8PoseLoss falls back to ``ones(nkpt)/nkpt``
+        # for a 62-keypoint pose head and the keypoint loss saturates.
+        "kpt_oks_sigmas": list(schema.oks_sigmas),
         "names": {0: "person"},
     }
     (out / "data.yaml").write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")

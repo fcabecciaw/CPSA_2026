@@ -55,6 +55,30 @@ install gets the CUDA build needed by the T4 workers.
 involution by construction. The face pairs are jaw 0<->16, brow 19<->24,
 mouth 48<->54; chin (jaw 8) and lip centres 51/57 self-map.
 
+### Keypoint OKS sigmas
+
+Ultralytics 8.4.203 only uses the COCO-17 `OKS_SIGMA` table for a `[17, 3]`
+head; for any other `kpt_shape` its `v8PoseLoss` falls back to
+`ones(nkpt) / nkpt` unless the dataset YAML declares `kpt_oks_sigmas`
+(`PoseTrainer.set_model_attributes` in `models/yolo/pose/train.py`, consumed
+by `utils/loss.py`). With `1/62 = 0.016` the loss `1 - exp(-e)` saturates and
+its gradient vanishes for a joint that starts far from its target, which is
+why a COCO-only `lrelu_512` run fits the face (median error 1-3% of the crop
+height) but not shoulders, elbows, wrists or hands (PCK@0.2fw for the wrists
+was 0.0).
+
+`cpsa_ml.schema.COCO_WHOLEBODY_SIGMAS` holds the 133 annotation-scale sigmas of
+mmpose's `configs/_base_/datasets/coco_wholebody.py` (which cites
+COCO-WholeBody `evaluation/myeval_wholebody.py`); `KeypointSchema.oks_sigmas`
+selects them through `wholebody_index` and floors them at
+`OKS_SIGMA_FLOOR = 0.025`, the smallest COCO-17 sigma (eyes), so the iBUG face
+landmarks and the hand joints (down to 0.007 in WholeBody) keep a usable
+gradient. Mirrored pairs share the larger value so a horizontal flip cannot
+change the loss: the jaw ends are the only asymmetric pair (0.042 vs 0.045).
+Every `data.yaml` written by `write_dataset_yaml`, `write_hand_dataset_yaml`
+and `build_mixed_data_yaml` now carries the 62- or 21-entry
+`kpt_oks_sigmas` list.
+
 ## Build the half-bust dataset
 
 COCO-WholeBody uses the COCO 2017 images plus

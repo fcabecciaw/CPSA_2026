@@ -24,7 +24,7 @@ from cpsa_ml.pseudolabel import (
     auto_label,
     split_for,
 )
-from cpsa_ml.schema import HALFBUST_62
+from cpsa_ml.schema import HALFBUST_62, HAND_21
 
 IMAGE_SIZE = 160
 BOX = np.asarray([[10.0, 10.0, 150.0, 150.0]], dtype=np.float32)
@@ -135,6 +135,7 @@ def test_auto_label_writes_the_halfbust_and_hand_datasets(tmp_path: Path) -> Non
     data = yaml.safe_load((halfbust / "data.yaml").read_text())
     assert data["names"] == {0: "person"}
     assert data["kpt_shape"] == list(HALFBUST_62.kpt_shape)
+    assert data["kpt_oks_sigmas"] == list(HALFBUST_62.oks_sigmas)
     assert (halfbust / "schema.json").is_file()
     labels = sorted((halfbust / "labels" / "train").glob("*.txt"))
     assert len(labels) == 3
@@ -149,6 +150,7 @@ def test_auto_label_writes_the_halfbust_and_hand_datasets(tmp_path: Path) -> Non
     assert hand_data["names"] == {0: "hand"}
     assert hand_data["kpt_shape"] == [21, 3]
     assert hand_data["flip_idx"] == list(range(21))
+    assert hand_data["kpt_oks_sigmas"] == list(HAND_21.oks_sigmas)
     crops = sorted((hands / "images" / "train").glob("*.jpg"))
     assert len(crops) == 6  # two hands per frame
     with Image.open(crops[0]) as crop:
