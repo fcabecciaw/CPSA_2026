@@ -16,6 +16,15 @@ that drops the oldest frame when the analyzer falls behind (P-05).
 * every pushed frame and every assessment is recorded in an
   :class:`EpisodeTrace`, which audit-mode replay re-executes exactly (P-06).
 
+In continuous mode (``continuous=True``, FR-027..FR-029) the same analysis
+thread also runs without an external detection. While no episode is active,
+frames on the ``analysis_fps`` grid are estimated and tracked by a dedicated
+watch :class:`~cpsa.vision.episode.EpisodeAnalyzer`, and a
+:class:`~cpsa.vision.trigger.VisionTrigger` turns its contact events and the
+rocking/flapping state into detections for an injected ``on_detection``
+callback. During an episode the trigger is fed from the episode analyzer for
+follow-ups, and the end of the episode forwards the trigger's ``clear`` fire.
+
 Trace JSON Lines layout, written at episode end::
 
     {"type": "episode", "episode_id": ..., "t_start": ..., "layout": ...,
@@ -32,7 +41,7 @@ import logging
 import threading
 import time
 from collections import deque
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -54,6 +63,8 @@ from cpsa.ports import Clock, EvidenceSink, PoseEstimator, VideoSource, VisionOb
 from cpsa.vision.assessment import AnalysisConfig, severity_of
 from cpsa.vision.episode import EpisodeAnalyzer
 from cpsa.vision.fusion import IMUSignal, estimate_clock_offset
+from cpsa.vision.oscillation import detect_flapping, detect_rocking
+from cpsa.vision.trigger import TriggerFire, VisionTrigger
 from cpsa.vision.types import (
     EpisodeReport,
     KeypointLayout,
@@ -76,6 +87,7 @@ logger = logging.getLogger("cpsa.vision")
 
 _EPS = 1e-9
 _SEVERITY_RANK: Mapping[Tag, int] = {Tag.NON_DANGEROUS: 1, Tag.DANGEROUS: 2}
+_WATCH_MAX_S = 300.0  # restart the watch analyzer at least every 5 min (memory bound)
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +332,14 @@ class VisionVerifier:
         observer: live vision results for a display adapter; called from the
             analysis thread. An exception is logged and swallowed, so it never
             changes a verdict (F2).
+        continuous: run pose inference and tracking while idle, and start
+            episodes from the camera alone (FR-027..FR-029, plan F8). Off by
+            default, which keeps the IMU-triggered behavior unchanged (AC-026).
+        trigger: the camera-only trigger; required with ``continuous`` and
+            ignored without it, so the IMU-triggered path is unchanged.
+        on_detection: receives the detections the trigger fires, from the
+            analysis thread; required with ``continuous``. It must not block, and
+            an exception is logged and swallowed.
     """
 
     def __init__(
@@ -333,7 +353,12 @@ class VisionVerifier:
         *,
         log_dir: Path | None = None,
         observer: VisionObserver | None = None,
+        continuous: bool = False,
+        trigger: VisionTrigger | None = None,
+        on_detection: Callable[[Detection], None] | None = None,
     ) -> None:
+        if continuous and (trigger is None or on_detection is None):
+            raise ValueError("continuous vision verification requires a trigger and on_detection")
         self._source = source
         self._estimator = estimator
         self._evidence = evidence
@@ -343,6 +368,19 @@ class VisionVerifier:
         self._log_dir = log_dir
         self._observer = observer
         self._analyzer = EpisodeAnalyzer(layout, cfg.tracker, cfg.analysis)
+
+        self._continuous = continuous
+        self._trigger = trigger if continuous else None
+        self._on_detection = on_detection
+        self._watch: EpisodeAnalyzer | None = None
+        self._watch_counter = 0
+        self._watch_started_t = 0.0
+        self._watch_grid_t = 0.0
+        self._watch_contacts: tuple[Tag, ...] = ()
+        self._watch_error: BaseException | None = None
+        self._episode_contacts: tuple[Tag, ...] = ()
+        self._trigger_t: float | None = None
+        self._osc_recent: deque[TrackedFrame] = deque()
 
         self._cond = threading.Condition()
         self._items: deque[_Item] = deque()
@@ -495,13 +533,14 @@ class VisionVerifier:
                 self._pre_roll.popleft()
             self._last_capture_t = frame.t
             want = self._want_active
-        if want:
+            continuous = self._continuous
+        if want or continuous:
             self._offer_frame(frame)
 
     def _offer_frame(self, frame: VideoFrame) -> None:
         """Append a frame to the bounded analysis queue, dropping the oldest."""
         with self._cond:
-            if not self._want_active:
+            if not self._want_active and not self._continuous:
                 return
             if self._frame_items >= self._cfg.queue_max:
                 for index, item in enumerate(self._items):
@@ -655,7 +694,10 @@ class VisionVerifier:
                 continue
             try:
                 if isinstance(item, _FrameItem):
-                    self._analyze_frame(item.frame)
+                    if self._continuous and not self._episode_active:
+                        self._watch_frame(item.frame)
+                    else:
+                        self._analyze_frame(item.frame)
                 elif isinstance(item, _ObserveItem):
                     self._start_or_extend(item.detection)
                 elif isinstance(item, _VerifyItem):
@@ -719,6 +761,11 @@ class VisionVerifier:
             self._peak_window = []
             self._episode_skeleton = self._analyzer.skeleton_state
             snapshot = [frame for frame in self._pre_roll if frame.t >= self._episode_t_start]
+            if self._trigger is not None:
+                self._episode_contacts = ()
+                # The watch path already fed the frames up to the firing one;
+                # replayed pre-roll frames must not feed the trigger again.
+                self._trigger_t = float(detection.window_end_ts)
         self._analyzer.start(episode_id, self._episode_t_start)
         logger.info("Vision episode %s started at %.3f", episode_id, self._episode_t_start)
         self._notify_episode(episode_id, self._episode_t_start, True)
@@ -766,6 +813,7 @@ class VisionVerifier:
             while self._retained and frame.t - self._retained[0][0].t > retain_s:
                 self._retained.popleft()
             self._update_peak_window(frame, tracked)
+        self._feed_episode_trigger(frame, tracked)
         self._notify_tracked(tracked)
         self._serve_requests()
 
@@ -908,28 +956,33 @@ class VisionVerifier:
             self._pending_episode_id = None
         if episode_id is None:
             return
-        report = self._with_imu(self._analyzer.report(now))
-        trace = EpisodeTrace(
-            episode_id=episode_id,
-            t_start=t_start,
-            layout=self._layout.name,
-            analysis_fps=self._cfg.analysis_fps,
-            report_now=now,
-            frames=trace_frames,
-            assessments=trace_assessments,
-            skeleton=self._episode_skeleton,
-        )
-        trace_path = self._write_trace(trace)
-        self._write_report(report, trace_path)
-        self._notify_episode(episode_id, t_start, False)
-        self._notify_report(report)
-        self._write_evidence(report)
-        if self._evidence is not None and self._cfg.evidence.enabled:
-            try:
-                self._evidence.purge(self._clock.now())
-            except Exception:
-                logger.exception("Vision evidence purge failed")
-        self._analyzer.end()
+        try:
+            report = self._with_imu(self._analyzer.report(now))
+            trace = EpisodeTrace(
+                episode_id=episode_id,
+                t_start=t_start,
+                layout=self._layout.name,
+                analysis_fps=self._cfg.analysis_fps,
+                report_now=now,
+                frames=trace_frames,
+                assessments=trace_assessments,
+                skeleton=self._episode_skeleton,
+            )
+            trace_path = self._write_trace(trace)
+            self._write_report(report, trace_path)
+            self._notify_episode(episode_id, t_start, False)
+            self._notify_report(report)
+            self._write_evidence(report)
+            if self._evidence is not None and self._cfg.evidence.enabled:
+                try:
+                    self._evidence.purge(self._clock.now())
+                except Exception:
+                    logger.exception("Vision evidence purge failed")
+            self._analyzer.end()
+        finally:
+            # A failing report or output step must not lose the clear fire that
+            # resets the dashboard tag and starts the refractory period.
+            self._finish_trigger(now)
         with self._cond:
             self._last_report = report
             self._last_trace = trace
@@ -937,6 +990,166 @@ class VisionVerifier:
             self._peak_window = []
             self._episode_skeleton = None
         logger.info("Vision episode %s ended at %.3f", episode_id, now)
+
+    # -- continuous watch (FR-027..FR-029, plan F8) -----------------------
+
+    def _watch_frame(self, frame: VideoFrame) -> None:
+        """Analyze one idle frame on the watch grid and poll the trigger (FR-027).
+
+        The watch is the camera-only replacement for an external detection: pose
+        inference runs on the ``analysis_fps`` grid, a dedicated analyzer tracks
+        the subject, and the trigger turns its contact and oscillation state into
+        detections. A frame the estimator or the tracker rejects is logged and
+        skipped; the watch continues with the next frame.
+        """
+        trigger = self._trigger
+        if trigger is None or frame.t + _EPS < self._watch_grid_t:
+            return
+        try:
+            rgb = frame.decode()
+            persons = self._estimator.estimate(rgb)
+        except Exception as exc:
+            self._record_watch_error(exc)
+            return
+        if self._watch_error is not None:
+            logger.info("Vision watch path recovered after: %s", self._watch_error)
+            self._watch_error = None
+        watch = self._watch_analyzer(frame.t)
+        pose = PoseFrame(frame.seq, frame.t, frame.width, frame.height, tuple(persons))
+        try:
+            tracked = watch.push(pose)
+        except Exception:
+            logger.exception("Vision watch frame %d could not be tracked", frame.seq)
+            return
+        self._watch_grid_t = (
+            self._watch_started_t
+            + (int(np.floor((frame.t - self._watch_started_t) * self._cfg.analysis_fps + _EPS)) + 1)
+            / self._cfg.analysis_fps
+        )
+        self._remember_oscillation_frame(tracked)
+        self._watch_contacts = self._feed_trigger(
+            trigger, watch.contact_events, self._watch_contacts, frame.t
+        )
+        self._emit_fire(trigger.poll(frame.t, episode_active=False))
+
+    def _watch_analyzer(self, t: float) -> EpisodeAnalyzer:
+        """Return the watch analyzer, restarting it after an episode or every 5 min."""
+        watch = self._watch
+        if watch is None or t - self._watch_started_t > _WATCH_MAX_S:
+            self._watch_counter += 1
+            watch = EpisodeAnalyzer(self._layout, self._cfg.tracker, self._cfg.analysis)
+            watch.start(f"watch-{self._watch_counter}", t)
+            self._watch = watch
+            self._watch_started_t = t
+            self._watch_grid_t = t
+            self._watch_contacts = ()
+        return watch
+
+    def _feed_episode_trigger(self, frame: VideoFrame, tracked: TrackedFrame) -> None:
+        """Feed the episode analyzer's events to the trigger for follow-ups (FR-020)."""
+        trigger = self._trigger
+        if trigger is None:
+            return
+        self._remember_oscillation_frame(tracked)
+        last = self._trigger_t
+        if last is not None and frame.t <= last + _EPS:
+            return  # pre-roll replay, already fed by the watch path
+        self._episode_contacts = self._feed_trigger(
+            trigger, self._analyzer.contact_events, self._episode_contacts, frame.t
+        )
+        self._trigger_t = frame.t
+        self._emit_fire(trigger.poll(frame.t, episode_active=True))
+
+    def _feed_trigger(
+        self,
+        trigger: VisionTrigger,
+        events: Sequence[tuple[float, Tag]],
+        fed: tuple[Tag, ...],
+        t: float,
+    ) -> tuple[Tag, ...]:
+        """Feed new contact events, grade upgrades, and the oscillation state at ``t``.
+
+        Returns the grades now fed. The analyzer keeps one entry per contact in
+        start order and upgrades its grade in place over the recoil tail, so one
+        trigger entry can change grade after it was first fed. Every new contact is
+        fed once and an upgraded one is re-fed, which the trigger needs to report
+        the final grade; it counts each contact once whatever it is fed. Upgrades
+        of contacts that already left ``contact_window_s`` are skipped: they can no
+        longer take part in a start fire.
+        """
+        horizon = t - trigger.config.contact_window_s
+        for index, (event_t, severity) in enumerate(events):
+            if index < len(fed):
+                if fed[index] is severity:
+                    continue
+                if event_t < horizon - _EPS:
+                    continue
+            trigger.contact(event_t, severity)
+        trigger.oscillation(t, self._oscillation_active(t))
+        return tuple(severity for _, severity in events)
+
+    def _remember_oscillation_frame(self, tracked: TrackedFrame) -> None:
+        """Keep the tracked frames of the last ``oscillation_min_s`` for FR-019."""
+        trigger = self._trigger
+        if trigger is None:
+            return
+        if self._osc_recent and tracked.t <= self._osc_recent[-1].t:
+            return  # replayed pre-roll frame, already in the window
+        self._osc_recent.append(tracked)
+        horizon = tracked.t - trigger.config.oscillation_min_s
+        while self._osc_recent and self._osc_recent[0].t < horizon - _EPS:
+            self._osc_recent.popleft()
+
+    def _oscillation_active(self, t: float) -> bool:
+        """Whether rocking or flapping is present in the last ``oscillation_min_s``."""
+        trigger = self._trigger
+        if trigger is None:
+            return False
+        cutoff = t - trigger.config.oscillation_min_s
+        recent = [frame for frame in self._osc_recent if frame.t >= cutoff]
+        if not recent:
+            return False
+        cfg = self._cfg.analysis
+        return detect_rocking(recent, self._layout, cfg) or detect_flapping(
+            recent, self._layout, cfg
+        )
+
+    def _finish_trigger(self, now: float) -> None:
+        """Forward the trigger's ``clear`` fire and restart the watch (FR-029)."""
+        trigger = self._trigger
+        if trigger is None:
+            return
+        self._emit_fire(trigger.episode_ended(now))
+        self._osc_recent.clear()
+        self._watch = None
+        self._watch_contacts = ()
+        self._episode_contacts = ()
+        self._trigger_t = None
+
+    def _emit_fire(self, fire: TriggerFire | None) -> None:
+        """Turn one trigger decision into a detection for ``on_detection`` (F8)."""
+        if fire is None:
+            return
+        callback = self._on_detection
+        if callback is None:
+            return
+        detection = Detection(
+            tag=fire.severity,
+            timestamp=self._clock.now(),
+            window_end_ts=fire.t,
+            features=(),
+        )
+        try:
+            callback(detection)
+        except Exception:
+            logger.exception("Vision trigger callback failed for %s", fire.reason)
+
+    def _record_watch_error(self, error: BaseException) -> None:
+        """Log a watch-path inference failure once; the watch keeps running (FR-032)."""
+        first = self._watch_error is None
+        self._watch_error = error
+        if first:
+            logger.error("Pose estimation failed in the vision watch path", exc_info=error)
 
     # -- outputs ----------------------------------------------------------
 

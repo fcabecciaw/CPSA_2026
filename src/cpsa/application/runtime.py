@@ -22,6 +22,7 @@ from cpsa.ports import (
     EventSink,
     FeatureExtractor,
     Gui,
+    SampleCallback,
     SensorSource,
     Verifier,
 )
@@ -30,6 +31,24 @@ logger = logging.getLogger(__name__)
 
 #: Both wrists must have delivered a sample within this window to be ``connected`` (F3).
 _IMU_STALE_S = 1.0
+
+
+class NullSensorSource:
+    """A ``SensorSource`` with no devices and no I/O.
+
+    The camera-only medical mode (FR-026) has no IMU: this source scans for
+    nothing, accepts the sample callback and never calls it.
+    """
+
+    def discover(self, timeout_s: float) -> set[str]:
+        """Return no device names."""
+        return set()
+
+    def start(self, on_sample: SampleCallback) -> None:
+        """Accept the callback and stay silent."""
+
+    def stop(self) -> None:
+        """Nothing to close."""
 
 
 class Runtime:
@@ -150,3 +169,45 @@ def build_runtime(
     )
     vision = verifier if isinstance(verifier, VisionVerifier) else None
     return Runtime(source, synchronizer, dispatcher, actuators, gui, vision)
+
+
+def build_vision_runtime(
+    config: Config,
+    *,
+    verifier: VisionVerifier,
+    actuators: Sequence[Actuator],
+    sink: EventSink,
+    gui: Gui,
+    clock: Clock,
+) -> tuple[Runtime, Callable[[Detection], None]]:
+    """Wire the camera-only pipeline (FR-026, F10).
+
+    The verifier runs continuously and turns each trigger fire into a
+    ``Detection``; the returned callable puts it into the dispatcher's slot,
+    where the IMU classification stage puts its detections in ``build_runtime``.
+    The source is a no-op: vision mode has no IMU, and the synchronizer exists
+    only because ``Runtime`` owns one start/stop order.
+    """
+    slot: LatestSlot[Detection] = LatestSlot()
+    dispatcher = Dispatcher(
+        slot,
+        verifier,
+        actuators,
+        sink,
+        gui,
+        clock,
+        cooldown_s=config.dispatch.cooldown_s,
+        deadline_s=config.dispatch.verification_deadline_s,
+    )
+    synchronizer = IMUSynchronizer(
+        max_skew_s=config.sync.max_skew_ms / 1000.0,
+        stale_s=config.sync.stale_ms / 1000.0,
+        on_row=_discard_row,
+        clock=clock,
+    )
+    runtime = Runtime(NullSensorSource(), synchronizer, dispatcher, actuators, gui, verifier)
+    return runtime, slot.put
+
+
+def _discard_row(*_row: object) -> None:
+    """Sink for the synchronizer that never receives a sample in vision mode."""

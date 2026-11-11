@@ -23,7 +23,14 @@ export type ModeStep = (typeof MODE_STEPS)[number];
 export const IMU_STATES = ["n/a", "searching", "connected", "lost"] as const;
 export type ImuState = (typeof IMU_STATES)[number];
 
-export const TAGS = ["NO_CLASS", "NON_DANGEROUS", "DANGEROUS", "NON_STEREOTYPY"] as const;
+/**
+ * Activation source of the medical mode (IF-451 revision 2026-11-11):
+ * `imu` is the wrist-IMU trigger, `vision` the camera-only one.
+ */
+export const TRIGGER_SOURCES = ["imu", "vision"] as const;
+export type TriggerSource = (typeof TRIGGER_SOURCES)[number];
+
+export const TAGS = ["NO_CLASS", "NON_DANGEROUS", "DANGEROUS", "NON_STEREOTIPY"] as const;
 export type Tag = (typeof TAGS)[number];
 
 export const VERDICTS = ["CONFIRMED", "REJECTED", "UNDECIDED"] as const;
@@ -53,6 +60,9 @@ export type ErrorCode = (typeof ERROR_CODES)[number];
 
 export const CAMERA_STATES = ["ok", "missing", "error"] as const;
 export type CameraState = (typeof CAMERA_STATES)[number];
+
+export const LOG_LEVELS = ["info", "warning", "error"] as const;
+export type LogLevel = (typeof LOG_LEVELS)[number];
 
 export const HAND_SIDES = ["left", "right"] as const;
 export type HandSide = (typeof HAND_SIDES)[number];
@@ -118,6 +128,12 @@ export interface PongPayload {
   id: unknown;
 }
 
+export interface LogPayload {
+  level: LogLevel;
+  source: string;
+  message: string;
+}
+
 export interface Actuation {
   actuator_id: string;
   kind: string | null;
@@ -151,6 +167,12 @@ export interface MedicalStatePayload {
   tag: Tag | null;
   episode: EpisodeRef | null;
   last_decision: Decision | null;
+  /**
+   * Activation source of the medical mode (IF-451 revision 2026-11-11, an
+   * optional field). `null` means the server did not report it, as an older
+   * server does; the dashboard then renders the `imu` display unchanged.
+   */
+  trigger: TriggerSource | null;
 }
 
 export interface Contact {
@@ -196,6 +218,7 @@ export type ServerMessage =
   | Envelope<"mode.progress", ModeProgressPayload>
   | Envelope<"error", ErrorPayload>
   | Envelope<"pong", PongPayload>
+  | Envelope<"log", LogPayload>
   | Envelope<"medical.state", MedicalStatePayload>
   | Envelope<"medical.decision", Decision>
   | Envelope<"medical.episode", EpisodePayload>
@@ -239,6 +262,7 @@ const KNOWN_TYPES: readonly ServerMessageType[] = [
   "mode.progress",
   "error",
   "pong",
+  "log",
   "medical.state",
   "medical.decision",
   "medical.episode",
@@ -292,6 +316,8 @@ export function parseServerMessage(raw: string): ParseResult {
         return message({ v: PROTOCOL_VERSION, type, seq, t, wall, data: parseError(data) });
       case "pong":
         return message({ v: PROTOCOL_VERSION, type, seq, t, wall, data: { id: data.id } });
+      case "log":
+        return message({ v: PROTOCOL_VERSION, type, seq, t, wall, data: parseLog(data) });
       case "medical.state":
         return message({ v: PROTOCOL_VERSION, type, seq, t, wall, data: parseMedicalState(data) });
       case "medical.decision":
@@ -369,12 +395,26 @@ function parseError(data: JsonObject): ErrorPayload {
   };
 }
 
+function parseLog(data: JsonObject): LogPayload {
+  return {
+    // Lenient: a level added by a newer server shows up as "info", not as a
+    // dropped log line (R-03).
+    level: enumFieldOr(data, "level", LOG_LEVELS, "info"),
+    source: reqString(data, "source"),
+    message: reqString(data, "message"),
+  };
+}
+
 function parseMedicalState(data: JsonObject): MedicalStatePayload {
   return {
     imu: enumField(data, "imu", IMU_STATES),
     tag: nullableEnumField(data, "tag", TAGS),
     episode: data.episode == null ? null : parseEpisodeRef(asObject(data.episode, "episode")),
     last_decision: data.last_decision == null ? null : parseDecision(asObject(data.last_decision, "last_decision")),
+    // Optional since the 2026-11-11 revision: an absent field is not an error.
+    // Lenient on the value too: a trigger added by a newer server renders like
+    // an absent one instead of freezing the dashboard (R-03).
+    trigger: optionalEnumField(data, "trigger", TRIGGER_SOURCES),
   };
 }
 
@@ -586,4 +626,39 @@ function nullableEnumField<T extends string>(
 ): T | null {
   const value = data[key];
   return value == null ? null : enumValue(value, allowed, key);
+}
+
+/**
+ * Lenient variant for a value a newer server may extend: an absent, non-string
+ * or unlisted value becomes `null` instead of rejecting the whole message, so
+ * version skew does not freeze the dashboard (R-03). Strict fields keep
+ * `enumField`, which is what makes a malformed load-bearing field visible.
+ */
+function optionalEnumField<T extends string>(
+  data: JsonObject,
+  key: string,
+  allowed: readonly T[],
+): T | null {
+  const value = data[key];
+  return typeof value === "string" && (allowed as readonly string[]).includes(value)
+    ? (value as T)
+    : null;
+}
+
+/**
+ * Lenient on the value only: a level a newer server adds keeps the message
+ * with `fallback`; an absent or non-string value stays an error, so a
+ * malformed required field is still visible (R-03).
+ */
+function enumFieldOr<T extends string>(
+  data: JsonObject,
+  key: string,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  const value = data[key];
+  if (typeof value !== "string") {
+    throw new PayloadError(`${key}: attesa una stringa, ricevuto ${String(value)}`);
+  }
+  return (allowed as readonly string[]).includes(value) ? (value as T) : fallback;
 }

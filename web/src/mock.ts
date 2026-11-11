@@ -5,6 +5,11 @@
  * animates a plausible HALFBUST_62 pose so the views can be built before the
  * server exists. The module is imported with a dynamic `import()` behind
  * `import.meta.env.DEV`, so Vite removes it from the production bundle.
+ *
+ * Both activation sources of the medical mode are available: `?mock=1` replays
+ * the `imu` variant, `?mock=1&trigger=vision` the camera-only one, whose
+ * `medical.state` reports `trigger: "vision"` and `imu: "n/a"` (F11) and whose
+ * connection log has no BlueCoin lines, because no IMU is scanned (FR-026).
  */
 
 import type { SocketLike } from "./client";
@@ -14,15 +19,28 @@ import type {
   HandsPayload,
   ImuState,
   Keypoint,
+  LogPayload,
   MedicalStatePayload,
   Mode,
   ServerMessage,
   StatusPayload,
   Tag,
+  TriggerSource,
 } from "./protocol";
 
+/** IF-451 revision: `?mock=1&trigger=vision` selects the camera-only variant. */
+function requestedTrigger(): TriggerSource {
+  const requested = new URLSearchParams(window.location.search).get("trigger");
+  return requested === "vision" ? "vision" : "imu";
+}
+
+const TRIGGER: TriggerSource = requestedTrigger();
+
 export const MOCK_BADGE =
-  "Dati di esempio (mock): replay di docs/protocol/v1/examples, nessun server connesso.";
+  "Dati di esempio (mock): replay di docs/protocol/v1/examples, nessun server connesso." +
+  (TRIGGER === "vision"
+    ? " Variante solo telecamera (variante IMU: ?mock=1)."
+    : " Variante IMU (variante solo telecamera: ?mock=1&trigger=vision).");
 
 const FIXTURES = import.meta.glob("../../docs/protocol/v1/examples/*.json", {
   eager: true,
@@ -45,6 +63,31 @@ const HEIGHT = 480;
 const POSE_PERIOD_HZ = 1.4;
 const EPISODE_DURATION_MS = 22_000;
 const EPISODE_PAUSE_MS = 5_000;
+
+const IMU_LOG_LINES: readonly LogPayload[] = [
+  { level: "info", source: "supervisor", message: "Modalità medical avviata" },
+  { level: "info", source: "camera", message: "telecamera aperta" },
+  { level: "info", source: "bluecoin:CPSA_L2", message: "[left:CPSA_L2] Connected successfully" },
+  { level: "info", source: "bluecoin:CPSA_R2", message: "[right:CPSA_R2] Connected successfully" },
+  { level: "info", source: "metamotion", message: "[MetaMotion AA:BB:CC:DD:EE:FF] Connected successfully" },
+  { level: "warning", source: "bluecoin:CPSA_R2", message: "[right:CPSA_R2] Connection failed, retrying..." },
+  { level: "info", source: "bluecoin:CPSA_R2", message: "[right:CPSA_R2] Reconnected successfully" },
+  { level: "error", source: "camera", message: "camera frame callback failed" },
+  { level: "info", source: "camera", message: "telecamera riaperta" },
+];
+
+/** Camera-only variant: no IMU is scanned, so there are no BlueCoin lines (FR-026). */
+const VISION_LOG_LINES: readonly LogPayload[] = [
+  { level: "info", source: "supervisor", message: "Modalità medical avviata, attivazione da telecamera" },
+  { level: "info", source: "camera", message: "telecamera aperta" },
+  { level: "info", source: "vision", message: "analisi continua, 10 fps" },
+  { level: "info", source: "vision", message: "nessun contatto negli ultimi 10 s" },
+  { level: "warning", source: "camera", message: "frame scartato: coda di analisi piena" },
+  { level: "error", source: "camera", message: "camera frame callback failed" },
+  { level: "info", source: "camera", message: "telecamera riaperta" },
+];
+
+const LOG_LINES = TRIGGER === "vision" ? VISION_LOG_LINES : IMU_LOG_LINES;
 
 let sequence = 0;
 let monotonic = 2000;
@@ -79,6 +122,7 @@ export function createMockSocket(_url: string): SocketLike {
   let tag: Tag = "DANGEROUS";
   let lastDecision: Decision = fixture("medical.decision").data;
   let decisionIndex = 0;
+  let logIndex = 0;
   let startedAt = Date.now();
 
   const socket: SocketLike = {
@@ -143,7 +187,7 @@ export function createMockSocket(_url: string): SocketLike {
     status.perception.dpu_ms = mode === "medical" ? 17.8 : null;
     status.perception.camera = "ok";
     status.perception.model = mode === "medical" ? "pose_halfbust62" : null;
-    status.imu = mode === "medical" ? imuState() : "n/a";
+    status.imu = mode === "medical" && TRIGGER === "imu" ? imuState() : "n/a";
     status.errors = [];
     status.uptime_s = 125.4 + (Date.now() - startedAt) / 1000;
     emit(message("status", status));
@@ -171,10 +215,11 @@ export function createMockSocket(_url: string): SocketLike {
       return;
     }
     const state: MedicalStatePayload = {
-      imu: imuState(),
+      imu: TRIGGER === "vision" ? "n/a" : imuState(),
       tag,
       episode: episodeRef(),
       last_decision: lastDecision,
+      trigger: TRIGGER,
     };
     emit(message("medical.state", state));
   }
@@ -240,6 +285,12 @@ export function createMockSocket(_url: string): SocketLike {
     lastDecision = decision;
     emit(message("medical.decision", decision));
     sendMedicalState();
+  }
+
+  function sendLog(): void {
+    const line = LOG_LINES[logIndex % LOG_LINES.length];
+    logIndex += 1;
+    emit(message("log", line));
   }
 
   function handleClient(raw: string): void {
@@ -312,6 +363,11 @@ export function createMockSocket(_url: string): SocketLike {
     const progress = fixture("mode.progress");
     progress.data = { mode: "medical", step: "ready", error: null };
     emit(progress);
+    // Recent history, as the server replays it after the state snapshot.
+    for (const line of LOG_LINES.slice(0, 5)) {
+      emit(message("log", line));
+    }
+    logIndex = 5;
     startEpisode();
     // `medical.state` seeds the feed with its last decision; start the cycle
     // after it so the first visible rows differ.
@@ -325,6 +381,7 @@ export function createMockSocket(_url: string): SocketLike {
     every(1000, sendMedicalState);
     every(2000, sendStatus);
     every(5000, sendDecision);
+    every(9000, sendLog);
   });
 
   return socket;
@@ -335,14 +392,14 @@ function decisionVariants(): Decision[] {
   return [
     base,
     {
-      tag: "NON_STEREOTYPY",
+      tag: "NON_STEREOTIPY",
       tag_changed: true,
       verdict: "REJECTED",
       reason: "REJECTED",
-      severity: "NON_STEREOTYPY",
+      severity: "NON_STEREOTIPY",
       vision: {
         verdict: "REJECTED",
-        severity: "NON_STEREOTYPY",
+        severity: "NON_STEREOTIPY",
         episode_id: null,
         features: { contact_count: 0, repetition_hz: null },
       },

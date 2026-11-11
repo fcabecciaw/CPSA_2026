@@ -145,6 +145,27 @@ def test_publish_sends_one_decision_event_and_updates_the_state() -> None:
     assert snapshot["tag"] == "DANGEROUS"
 
 
+def test_the_state_reports_the_configured_trigger_mode() -> None:
+    imu_gui, _ = make_gui(FakePublisher())
+    assert imu_gui.snapshot_state("connected")["trigger"] == "imu"
+
+    vision_gui = WebGui(FakePublisher(), LAYOUT, 640, 480, FakeClock(1000.0), trigger="vision")
+    payload = vision_gui.snapshot_state("n/a")
+
+    validate_server_message(
+        {
+            "v": 1,
+            "type": "medical.state",
+            "seq": 1,
+            "t": 1000.0,
+            "wall": "2026-11-12T08:00:00Z",
+            "data": payload,
+        }
+    )
+    assert payload["trigger"] == "vision"
+    assert payload["imu"] == "n/a"
+
+
 def test_hands_are_throttled_to_at_most_15_hz() -> None:
     publisher = FakePublisher()
     gui, clock = make_gui(publisher)

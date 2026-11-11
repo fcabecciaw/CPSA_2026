@@ -4,32 +4,37 @@ IF-704: the mode wraps ``build_runtime`` and the dispatcher without changing the
 behavior; its ``Gui`` (and the verifier's ``VisionObserver``) publishes IF-451..454
 through :class:`~cpsa.adapters.gui_web.WebGui`. The perception service that will
 own the camera in a later slice is deferred (plan D4), so the mode still builds the
-same adapters as ``cpsa-board``.
+same adapters as ``cpsa-board``. With ``medical.trigger = vision`` it wraps
+``build_vision_runtime`` instead: the vision trigger replaces the BlueCoin
+detection, and no IMU is scanned or connected (FR-026, FR-027).
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Mapping, Sequence
-from typing import Any
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, cast
 
 from cpsa.adapters.clock import SystemClock
 from cpsa.adapters.gui_web import WebGui
 from cpsa.adapters.native.classifier import NativeLibraryError
 from cpsa.application.config import Config
-from cpsa.application.runtime import Runtime, build_runtime
+from cpsa.application.runtime import Runtime, build_runtime, build_vision_runtime
+from cpsa.application.vision_verifier import VisionVerifier
 from cpsa.board.__main__ import (
     BoardAdapters,
     VisionStartupError,
     board_adapters,
     discover_bluecoins,
 )
+from cpsa.domain.model import Detection
 from cpsa.ports import Actuator, Clock, Verifier
 from cpsa.protocol.medical import ImuStatus
 from cpsa.protocol.medical import state as medical_state
 from cpsa.supervisor.contract import ModeContext, ModeStartError
 from cpsa.vision.layouts import get_layout
+from cpsa.vision.trigger import VisionTrigger
 
 logger = logging.getLogger("cpsa.board.medical")
 
@@ -62,25 +67,41 @@ class MedicalMode:
     def start(self, ctx: ModeContext) -> None:
         """Discover the wrists, build the runtime and start it; block until running.
 
-        A failed start releases everything it acquired and raises
+        With ``medical.trigger = vision`` the mode is camera-only (FR-026): it
+        skips the BlueCoin discovery and the native classifier, wires the
+        continuous verifier and the vision trigger, and reports the IMU as
+        ``"n/a"``. A failed start releases everything it acquired and raises
         :class:`ModeStartError` with an IF-304 code. ``ctx.stop_event`` is the
         supervisor's cancellation handle: a stop requested before or during the
         BlueCoin discovery, the classifier load, the actuator start or the vision
         start releases whatever was acquired and returns cleanly (F4).
         """
+        vision_mode = self._vision_trigger
+        # The verifier is built before the runtime that owns the slot, so its
+        # callback forwards to the dispatcher feed once F10 returns it.
+        dispatch_detection: Callable[[Detection], None] | None = None
+
+        def on_detection(detection: Detection) -> None:
+            if dispatch_detection is not None:
+                dispatch_detection(detection)
+
         with self._lock:
             if self._runtime is not None:
                 raise ModeStartError("busy", "medical mode is already running")
-            self._imu_state = "searching"
+            self._imu_state = "n/a" if vision_mode else "searching"
             self._camera_error = None
             self._errors = []
         if self._stopped(ctx):
             self._cancelled()
             return
-        self._publish(ctx, medical_state("searching", None, None, None))
+        self._publish(
+            ctx,
+            medical_state(self._imu_state, None, None, None, trigger=self._config.medical.trigger),
+        )
 
         config = self._config
         clock = SystemClock()
+        trigger = VisionTrigger(config.medical.vision_trigger) if vision_mode else None
         adapters: BoardAdapters | None = None
         actuators: Sequence[Actuator] = ()
         runtime: Runtime | None = None
@@ -92,46 +113,73 @@ class MedicalMode:
                 config.vision.camera.width,
                 config.vision.camera.height,
                 clock,
+                trigger=config.medical.trigger,
             )
             try:
-                adapters = board_adapters(config, gui=web_gui, observer=web_gui, clock=clock)
+                adapters = board_adapters(
+                    config,
+                    gui=web_gui,
+                    observer=web_gui,
+                    clock=clock,
+                    continuous=vision_mode,
+                    trigger=trigger,
+                    on_detection=on_detection if vision_mode else None,
+                )
             except VisionStartupError as exc:
                 raise ModeStartError(_vision_start_code(exc), str(exc)) from exc
             if self._stopped(ctx):
                 self._cancelled(adapters)
                 return
-            missing = discover_bluecoins(adapters.source, config.bluecoins, ctx.stop_event)
-            if missing is None or ctx.stop_event.is_set():
-                logger.info("Stop requested during BlueCoin discovery; medical mode not started")
-                self._cancelled(adapters)
-                return
-            if missing:
-                raise ModeStartError(
-                    "imu_not_found",
-                    "BlueCoin devices not found: " + ", ".join(sorted(missing)),
+            if vision_mode:
+                actuators = adapters.start_actuators()
+                if self._stopped(ctx):
+                    self._cancelled(adapters, actuators=actuators)
+                    return
+                runtime, dispatch_detection = build_vision_runtime(
+                    config,
+                    # build_vision_runtime's contract is a continuous verifier;
+                    # the seam keeps the Verifier port type for ``cpsa-board``.
+                    verifier=cast(VisionVerifier, adapters.verifier),
+                    actuators=actuators,
+                    sink=adapters.sink,
+                    gui=web_gui,
+                    clock=adapters.clock,
                 )
-            try:
-                extractor, classifier = adapters.load_classifier()
-            except NativeLibraryError as exc:
-                raise ModeStartError("internal", str(exc)) from exc
-            if self._stopped(ctx):
-                self._cancelled(adapters)
-                return
-            actuators = adapters.start_actuators()
-            if self._stopped(ctx):
-                self._cancelled(adapters, actuators=actuators)
-                return
-            runtime = build_runtime(
-                config,
-                source=adapters.source,
-                extractor=extractor,
-                classifier=classifier,
-                verifier=adapters.verifier,
-                actuators=actuators,
-                sink=adapters.sink,
-                gui=web_gui,
-                clock=adapters.clock,
-            )
+            else:
+                missing = discover_bluecoins(adapters.source, config.bluecoins, ctx.stop_event)
+                if missing is None or ctx.stop_event.is_set():
+                    logger.info(
+                        "Stop requested during BlueCoin discovery; medical mode not started"
+                    )
+                    self._cancelled(adapters)
+                    return
+                if missing:
+                    raise ModeStartError(
+                        "imu_not_found",
+                        "BlueCoin devices not found: " + ", ".join(sorted(missing)),
+                    )
+                try:
+                    extractor, classifier = adapters.load_classifier()
+                except NativeLibraryError as exc:
+                    raise ModeStartError("internal", str(exc)) from exc
+                if self._stopped(ctx):
+                    self._cancelled(adapters)
+                    return
+                actuators = adapters.start_actuators()
+                if self._stopped(ctx):
+                    self._cancelled(adapters, actuators=actuators)
+                    return
+                runtime = build_runtime(
+                    config,
+                    source=adapters.source,
+                    extractor=extractor,
+                    classifier=classifier,
+                    verifier=adapters.verifier,
+                    actuators=actuators,
+                    sink=adapters.sink,
+                    gui=web_gui,
+                    clock=adapters.clock,
+                )
             try:
                 runtime.start()
             except Exception as exc:
@@ -141,6 +189,7 @@ class MedicalMode:
                 if isinstance(exc, FileNotFoundError):
                     raise ModeStartError("camera_missing", str(exc)) from exc
                 raise ModeStartError("internal", str(exc)) from exc
+
             # The camera opens inside runtime.start(): a stop requested while it
             # blocked must release the runtime and the verifier, not leave them.
             if self._stopped(ctx):
@@ -213,7 +262,11 @@ class MedicalMode:
     # -- health ------------------------------------------------------------
 
     def health(self) -> Mapping[str, Any]:
-        """Return the F4 health keys: imu, camera, model, fps, dpu_ms, errors."""
+        """Return the F4 health keys: imu, camera, model, fps, dpu_ms, errors.
+
+        With ``medical.trigger = vision`` the mode has no IMU, so ``imu`` is
+        always ``"n/a"`` (FR-026, F11).
+        """
         with self._lock:
             running = self._running
             runtime = self._runtime
@@ -222,8 +275,11 @@ class MedicalMode:
             stored_imu = self._imu_state
             camera_error = self._camera_error
             errors = list(self._errors)
-        if running and runtime is not None and clock is not None:
-            imu: ImuStatus = runtime.imu_status(clock.monotonic())
+        imu: ImuStatus
+        if self._vision_trigger:
+            imu = "n/a"
+        elif running and runtime is not None and clock is not None:
+            imu = runtime.imu_status(clock.monotonic())
         else:
             imu = stored_imu
         camera: str | None
@@ -260,12 +316,19 @@ class MedicalMode:
         self, ctx: ModeContext, web_gui: WebGui, clock: Clock, runtime: Runtime
     ) -> None:
         try:
-            imu: ImuStatus = runtime.imu_status(clock.monotonic())
+            imu: ImuStatus = (
+                "n/a" if self._vision_trigger else runtime.imu_status(clock.monotonic())
+            )
             with self._lock:
                 self._imu_state = imu
             self._publish(ctx, web_gui.snapshot_state(imu))
         except Exception:
             logger.exception("Failed to publish medical.state")
+
+    @property
+    def _vision_trigger(self) -> bool:
+        """Whether the medical mode runs camera-only (FR-026)."""
+        return self._config.medical.trigger == "vision"
 
     @staticmethod
     def _publish(ctx: ModeContext, payload: Mapping[str, Any]) -> None:

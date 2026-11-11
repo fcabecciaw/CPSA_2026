@@ -328,6 +328,12 @@ p {
   min-height: 0;
 }
 
+.feed-side .feed-panel,
+.feed-side .log-panel {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
 .panel {
   display: flex;
   flex-direction: column;
@@ -395,6 +401,13 @@ p {
   font-size: clamp(1.05rem, 0.7vw + 0.65rem, 1.55rem);
   font-weight: 800;
   line-height: 1.12;
+}
+
+/* Longer copy as a tile value (the unused-IMU note with the camera-only
+   trigger) stays readable without pushing the live panel taller. */
+.tile-value-long {
+  font-size: clamp(0.95rem, 0.55vw + 0.6rem, 1.3rem);
+  font-weight: 700;
 }
 
 .tile-note {
@@ -648,6 +661,92 @@ p {
   font-style: italic;
 }
 
+/* --- Connection log ------------------------------------------------------ */
+
+.log {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  font-size: 0.76rem;
+}
+
+.log-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.1rem 0.45rem;
+  padding: 0.22rem 0.35rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.log-item:last-child {
+  border-bottom: 0;
+}
+
+.log-time {
+  color: var(--muted-strong);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.log-level {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.24rem;
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.log-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.05em;
+  height: 1.05em;
+  font-size: 0.78em;
+  line-height: 1;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+}
+
+.log-level-info {
+  color: var(--accent);
+}
+
+.log-level-warning {
+  color: var(--warn);
+}
+
+.log-level-error {
+  color: var(--danger);
+}
+
+.log-source {
+  font-size: 0.72rem;
+}
+
+.log-message {
+  flex-basis: 100%;
+  min-width: 0;
+  color: var(--muted-strong);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.log-empty {
+  padding: 0.5rem;
+  color: var(--muted);
+  font-style: italic;
+}
+
 /* --- Skeleton ------------------------------------------------------------ */
 
 .canvas-wrap {
@@ -776,7 +875,7 @@ noscript {
     grid-template-rows: auto minmax(0, 1fr);
   }
 
-  .side {
+  .side-left {
     grid-row: 1 / span 2;
   }
 
@@ -803,7 +902,7 @@ noscript {
     grid-template-rows: none;
   }
 
-  .side {
+  .side-left {
     grid-row: auto;
   }
 
@@ -812,6 +911,10 @@ noscript {
   }
 
   .feed-panel {
+    max-height: 24rem;
+  }
+
+  .log-panel {
     max-height: 24rem;
   }
 }

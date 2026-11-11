@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections.abc import Sequence
@@ -9,6 +10,7 @@ from collections.abc import Sequence
 import numpy as np
 import pytest
 
+from cpsa.adapters.camera.devices import VideoNode
 from cpsa.adapters.camera.uvc import UvcVideoSource, _Captured, decode_yuyv
 from cpsa.vision.types import VideoFrame
 
@@ -220,3 +222,69 @@ def test_invalid_settings_are_rejected(width: int, height: int, fps: float, expo
 def test_decode_yuyv_rejects_a_truncated_buffer() -> None:
     with pytest.raises(ValueError):
         decode_yuyv(b"\x80\x80", 8, 4)
+
+
+def test_auto_device_opens_the_node_selected_from_the_listing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    listing = [
+        VideoNode("/dev/video0", "F200 Depth", frozenset({"Z16"})),
+        VideoNode("/dev/video3", "F200 RGB", frozenset({"YUYV"})),
+    ]
+    source = UvcVideoSource(
+        "auto",
+        width=8,
+        height=4,
+        fps=30.0,
+        exposure=300,
+        device_lister=lambda: listing,
+        stream_factory=Factory(FakeStream([])),
+    )
+    with caplog.at_level(logging.INFO, logger="cpsa.adapters.camera.devices"):
+        source.start(lambda frame: None)
+        source.stop()
+
+    assert "selected /dev/video3" in caplog.text
+
+
+def test_auto_device_resolves_again_on_a_restart() -> None:
+    listing = [VideoNode("/dev/video0", "F200 RGB", frozenset({"YUYV"}))]
+    factory = Factory(FakeStream([]))
+    source = UvcVideoSource(
+        "auto",
+        width=8,
+        height=4,
+        fps=30.0,
+        exposure=300,
+        device_lister=lambda: listing,
+        stream_factory=factory,
+    )
+    source.start(lambda frame: None)
+    source.stop()
+    listing[0] = VideoNode("/dev/video1", "F200 RGB", frozenset({"YUYV"}))
+    source.start(lambda frame: None)
+    source.stop()
+
+    assert [device for device, *_ in factory.calls] == ["/dev/video0", "/dev/video1"]
+
+
+def test_auto_device_without_a_matching_node_does_not_open_anything() -> None:
+    def listing() -> list[VideoNode]:
+        return [VideoNode("/dev/video0", "Integrated Webcam", frozenset({"MJPG"}))]
+
+    factory = Factory(FakeStream([]))
+    source = UvcVideoSource(
+        "auto",
+        width=8,
+        height=4,
+        fps=30.0,
+        exposure=300,
+        device_lister=listing,
+        stream_factory=factory,
+    )
+
+    with pytest.raises(RuntimeError, match="no camera node"):
+        source.start(lambda frame: None)
+
+    assert factory.calls == []
+    assert not source.running

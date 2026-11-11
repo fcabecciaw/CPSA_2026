@@ -20,7 +20,10 @@ The board prerequisites are the ones in the root README; this file only links
 to them:
 
 - [Installation](../README.md#installation): `board` extra, BlueZ, the
-  `bluetooth` group, the `blue-st-sdk` and MetaWear notes.
+  `bluetooth` group, the `blue-st-sdk` and MetaWear notes. The two fixes those
+  notes describe (`blue_st_sdk` on Python 3.10 and the debug `warble`) are
+  applied by `deploy/deploy.sh` itself now, so they need no manual step; the
+  notes remain the manual fallback.
 - [Installation](../README.md#installation) for the bluepy helper
   capabilities. `deploy/deploy.sh` sets them on the venv's `bluepy-helper` after
   every `uv sync` (the step is idempotent and skipped when the capability is
@@ -63,6 +66,60 @@ On the board:
   moved back if the rebuild or the import check fails, so a failed deploy leaves
   the board as it was.
 
+### One-time board setup
+
+These are outside `deploy.sh` on purpose: they change the system rather than the
+venv, they survive every `uv sync`, and they were applied during the
+2026-11-11 bring-up. They are listed here so a re-imaged board can be brought
+back without the bring-up report.
+
+**Password-less sudo.** The deploy runs `sudo install`, `sudo systemctl`,
+`sudo -n setcap` and `sudo xmutil` over `BatchMode=yes` SSH, which has no tty
+for a password. The drop-in used on the board (`mode 0440`, validated with
+`visudo -cf`):
+
+```sudoers
+kria ALL=(root) NOPASSWD: /usr/bin/systemctl, /usr/sbin/setcap, /usr/bin/xmutil, /usr/bin/install
+```
+
+`/usr/bin/install` is in the list because the deploy installs the units with
+`sudo install`; `install` as root is effectively root on this board, so keep the
+file at `/etc/sudoers.d/cpsa-deploy` with mode 0440 and do not widen it.
+
+**Bluetooth firmware for the RTL8761BU dongle.** Without these two files `hci0`
+never comes up, no BlueCoin is discovered and the medical mode reports a missing
+BlueCoin instead of starting:
+
+```text
+/lib/firmware/rtl_bt/rtl8761bu_fw.bin      1d7a9597349ad89344fa16c1913d3e39e9a12e966e417ca16871bc79bbe59edb
+/lib/firmware/rtl_bt/rtl8761bu_config.bin  6c28a3f07c6a30ed208c4b64862a23f02b7d93543ea980edd24df16bab45095f
+```
+
+Installed from the `linux-firmware` package *without* installing the package,
+so the board keeps its kernel and its firmware set:
+
+```bash
+mkdir -p /tmp/fw && cd /tmp/fw
+apt download linux-firmware                  # 316 MB
+dpkg-deb -x linux-firmware_*.deb .
+sudo install -m 0644 ./lib/firmware/rtl_bt/rtl8761bu_fw.bin \
+  ./lib/firmware/rtl_bt/rtl8761bu_config.bin /lib/firmware/rtl_bt/
+sudo modprobe -r btusb && sudo modprobe btusb
+hciconfig hci0                               # expect UP RUNNING
+bluetoothctl show                            # expect Powered: yes
+```
+
+`/tmp/fw` keeps the deb and the extracted tree (316 MB); remove it by hand once
+`hciconfig` shows the adapter.
+
+**Build tools for the debug `warble`.** Step 6 of the deploy compiles `warble`
+on the board, which needs `make`, `g++`, `libbluetooth-dev` (for libblepp) and
+`libglib2.0-dev`:
+
+```bash
+sudo apt install -y build-essential libbluetooth-dev libglib2.0-dev
+```
+
 The unit files and the deploy destination are fixed to the user `kria` and the
 directory `/home/kria/cpsa`. `--user` changes the SSH account only; that account
 must be able to write `/home/kria/cpsa`. Edit the units and this script for a
@@ -93,13 +150,21 @@ The script:
    for the camera and evidence clips; `onnxruntime` is pulled in by that extra
    but is not used with `model.kind: xmodel` (the DPU path uses the board's
    `xir`/`vart` bindings).
-4. `sudo -n setcap "cap_net_raw+eip cap_net_admin+eip"` on the venv's
+4. Re-applies the two board patches that the sync reverts, both idempotent (see
+   [Board patches](#board-patches-the-deploy-re-applies)): the `blue_st_sdk`
+   Python 3.10 fix, as a guarded `sed` on the installed
+   `dict_put_single_element.py`, and the debug build of `warble`, built once
+   into `~/cpsa-build`, installed with
+   `uv pip install --no-build-isolation`, verified with
+   `python -c 'import mbientlab.warble'` and reported with the size of
+   `libwarble.so`. `--skip-warble` skips the second one.
+5. `sudo -n setcap "cap_net_raw+eip cap_net_admin+eip"` on the venv's
    `bluepy-helper`, skipped when `getcap` already reports the capability, and
    prints the result of `getcap`. Without it the IMU reports `imu_not_found`.
-5. Installs both units into `/etc/systemd/system`, runs `daemon-reload` and
+6. Installs both units into `/etc/systemd/system`, runs `daemon-reload` and
    enables them, starts `cpsa-dpu` once, then starts or restarts the supervisor
    exactly once (a `restart` unless `--no-restart`).
-6. Checks `systemctl is-active` for both units, then polls
+7. Checks `systemctl is-active` for both units, then polls
    `http://HOST:8080/health` for up to 120 s and reads the JSON: it requires
    `"mode_state": "running"`, so a 200 that reports `mode_state: failed` (no
    model, no BlueCoin, no camera) fails the deploy with a warning and pointers
@@ -112,12 +177,66 @@ The script:
 | `--model` | required | `.xmodel` to install as `~/cpsa/models/pose_halfbust62.xmodel`. |
 | `--wheels` | none | Offline wheel directory (see below). |
 | `--no-restart` | off | Leave an already-running supervisor alone; start it only if inactive. |
+| `--skip-warble` | off | Do not rebuild and reinstall the debug `warble`. Faster; the MetaWear then aborts with `*** buffer overflow detected ***` unless the debug build is already in the venv. |
 | `--dry-run` | off | Print every planned command and change nothing on the board. |
 
 `deploy/deploy.sh --dry-run --model path/to/model.xmodel` still reads local
 files, but it never opens an SSH connection. A missing local prerequisite is
 reported as a warning in dry-run so that the plan is still printed; a real
 deploy stops there.
+
+## Board patches the deploy re-applies
+
+Two packages on the board need a fix that `uv sync --frozen` undoes on every
+deploy. The bring-up applied them by hand; step 4 of the deploy now applies and
+verifies both, so a fresh deploy leaves the board in the state the demo needs.
+Both steps live on the board, need no PC-side preparation and are idempotent: a
+second run of the deploy changes nothing.
+
+**`blue_st_sdk` on Python 3.10.** The 1.4.0 sdist uses
+`collections.MutableMapping`, which Python 3.10 moved to `collections.abc`;
+without the fix the medical mode cannot start (`AttributeError: module
+'collections' has no attribute 'MutableMapping'`). The step rewrites the
+installed `~/cpsa/.venv/lib/python3.10/site-packages/blue_st_sdk/utils/dict_put_single_element.py`
+with a guarded `sed` (`collections.MutableMapping` ->
+`collections.abc.MutableMapping`, and `import collections` ->
+`import collections.abc`), keeps the original once as
+`dict_put_single_element.py.cpsa-orig`, and prints "already patched" when the
+file is already fixed.
+
+**Debug `warble`.** The release build of `warble` (a `metawear` dependency)
+aborts the supervisor with `*** buffer overflow detected ***` as soon as the
+MetaWear connects. `deploy.sh` builds the documented debug variant once and
+reuses it:
+
+- the sources are the PyPI sdist that `uv.lock` pins (PyWarble's GitHub
+  repository is 404, and the sdist carries the `libblepp` sources). The version,
+  URL and sha256 are read from `uv.lock`; the tarball is taken from
+  `~/cpsa/wheels` when that exists, otherwise it is downloaded once and kept in
+  `~/cpsa-build/`, and its sha256 is checked before it is unpacked;
+- `~/cpsa-build/warble-<version>/` keeps the patched source tree and its build
+  objects (`setup.py.orig` next to `setup.py`). `setup.py` is patched to build
+  with `CONFIG=debug` and to take the library from `dist/debug` instead of
+  `dist/release`, so a later install only relinks what changed;
+- the library is installed into the venv with
+  `uv pip install --no-build-isolation` (`setuptools` and `wheel` are added to
+  the venv first if they are missing) and the result is cached as
+  `~/cpsa-build/libwarble-<version>-debug.so`;
+- the step then imports `mbientlab.warble` from the venv and prints the size of
+  `libwarble.so` (about 4.3 MB for the debug build). A failure to download,
+  unpack, patch, build, install or import stops the deploy with the reason, so a
+  board never goes on stage with the release `warble`.
+
+When the venv already holds that same library (the usual case for a deploy that
+did not touch `warble`), the install is skipped and the step costs a few
+seconds. The first build takes several minutes and needs `make`, `g++` and
+`libbluetooth-dev` on the board (see One-time board setup). `--skip-warble`
+skips the whole rebuild for a quick redeploy, at the price of the MetaWear
+abort. To force a clean rebuild, remove the cache:
+
+```bash
+ssh kria@10.42.0.83 'rm -rf ~/cpsa-build'
+```
 
 ## Service hardening and boot ordering
 
@@ -212,6 +331,13 @@ PC's `python3 -m pip`. When the sync fails, the script stops and puts the
 previous venv back, so an offline board keeps the demo it had; without
 `--wheels` the sync needs a package index or a warm uv cache.
 
+Offline also covers the debug `warble` (step 4): the sdist in `wheels/` is used
+instead of a download, the sha256 from `uv.lock` is still checked, and
+`setuptools`/`wheel` come from the same directory. The build itself runs on the
+board, so the build tools from One-time board setup must be installed; once the
+source tree is cached in `~/cpsa-build`, later deploys need neither the sdist
+nor the build tools again.
+
 ## Checking and restarting the services
 
 On the board (or through `ssh kria@10.42.0.83`):
@@ -221,6 +347,12 @@ systemctl is-active cpsa-dpu cpsa-supervisor     # expect: active, active
 systemctl status cpsa-dpu cpsa-supervisor
 curl -fsS http://10.42.0.83:8080/health          # expect: "mode_state": "running"
 getcap /home/kria/cpsa/.venv/lib/python3.10/site-packages/bluepy/bluepy-helper
+
+# the two board patches the deploy re-applies
+grep -c 'collections.abc' \
+  /home/kria/cpsa/.venv/lib/python3.10/site-packages/blue_st_sdk/utils/dict_put_single_element.py
+ls -l /home/kria/cpsa/.venv/lib/python3.10/site-packages/mbientlab/warble/libwarble.so
+# expect about 4.3 MB for the debug build (the release one is much smaller)
 
 sudo systemctl restart cpsa-supervisor           # restart after a code change
 sudo systemctl start cpsa-dpu                    # only if the DPU unit is inactive

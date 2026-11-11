@@ -422,7 +422,7 @@ unknown keys are rejected; an invalid file stops startup with exit code 2.
 | `actuators.speaker.enable`, `actuators.speaker.mac` | bool, string | Use the Bluetooth speaker with this MAC address |
 | `actuators.led_strip.enable` | bool | Scan for and use flux_led LED strips |
 | `actuators.led_strip.duration_ms` | integer > 0 | LED auto-off delay |
-| `camera.rgb_device`, `camera.depth_device` | path | V4L2 nodes for RGB (YUYV) and depth (`Z16 `) |
+| `camera.rgb_device`, `camera.depth_device` | path or `auto` | V4L2 nodes for RGB (YUYV) and depth (`Z16 `); `auto` picks the node whose card name contains `F200` and whose formats fit the role, so a USB re-plug is recovered on the next start |
 | `camera.width`, `camera.height` | integer > 0 | Capture size in pixels; frames are not resized (640×480) |
 | `camera.fps` | > 0 | Capture rate; RGB/depth pair tolerance is `1 / (2 · fps)` |
 | `camera.rgb_exposure` | integer 83…10000 | Manual `exposure_time_absolute`; auto exposure is disabled |
@@ -437,7 +437,8 @@ unknown keys are rejected; an invalid file stops startup with exit code 2.
 | `vision.model.input_width`, `vision.model.input_height` | integer > 0 | Network input size in pixels |
 | `vision.model.conf_thr` | 0…1 | Minimum person score |
 | `vision.model.iou_thr` | 0…1 | NMS IoU threshold |
-| `vision.camera.device` | path | V4L2 node of the RGB-only UVC camera |
+| `vision.camera.device` | path or `auto` | V4L2 node of the RGB-only UVC camera; `auto` selects the node at every start |
+| `vision.camera.match` | string, default `F200` | Card-name fragment used when `vision.camera.device` is `auto` |
 | `vision.camera.width`, `vision.camera.height` | integer > 0 | Capture size in pixels |
 | `vision.camera.fps` | > 0 | Capture rate |
 | `vision.camera.exposure` | integer 1…10000 | Manual `exposure_time_absolute` |

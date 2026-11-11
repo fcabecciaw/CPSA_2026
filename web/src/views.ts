@@ -8,12 +8,17 @@ import {
   ERROR_LABEL,
   HAND_SHAPE_LABEL,
   IMU_LABEL,
+  IMU_UNUSED_LABEL,
+  LOG_LEVEL_ICON,
+  LOG_LEVEL_LABEL,
   MODE_LABEL,
   MODE_STATE_LABEL,
   MODE_STEP_LABEL,
   REGION_LABEL,
   SIDE_LABEL,
   STATUS_LABELS,
+  TRIGGER_TILE_LABEL,
+  TRIGGER_VISION_LABEL,
   actuatorText,
   errorCodeText,
   formatClock,
@@ -26,7 +31,7 @@ import {
   tagLabel,
   verdictLabel,
 } from "./labels";
-import { MAX_DECISIONS, type DashboardState } from "./state";
+import { MAX_DECISIONS, MAX_LOGS, type DashboardState } from "./state";
 
 export interface DashboardElements {
   connDot: HTMLElement;
@@ -43,6 +48,8 @@ export interface DashboardElements {
   episodeBody: HTMLElement;
   feed: HTMLElement;
   feedCount: HTMLElement;
+  log: HTMLElement;
+  logCount: HTMLElement;
 }
 
 export function collectElements(): DashboardElements {
@@ -61,6 +68,8 @@ export function collectElements(): DashboardElements {
     episodeBody: byId("episode-body"),
     feed: byId("feed"),
     feedCount: byId("feed-count"),
+    log: byId("log"),
+    logCount: byId("log-count"),
   };
 }
 
@@ -77,6 +86,7 @@ export function renderAll(
   renderLive(elements, state);
   renderFeed(elements, state);
   renderEpisode(elements, state);
+  renderLog(elements, state);
 }
 
 export function renderConnection(elements: DashboardElements, connection: ConnectionInfo): void {
@@ -272,10 +282,29 @@ export function renderNotice(
 export function renderLive(elements: DashboardElements, state: DashboardState): void {
   clear(elements.liveTiles);
 
+  // IF-451 revision: the activation source decides whether the IMU tiles mean
+  // anything. A `null` trigger (an older server) renders exactly like `imu`.
+  const triggerIsVision = state.medical?.trigger === "vision";
+
+  if (triggerIsVision) {
+    const activation = tile(
+      TRIGGER_TILE_LABEL,
+      el("span", "tile-value", TRIGGER_VISION_LABEL),
+      "nessuna IMU richiesta",
+    );
+    activation.title = `${TRIGGER_TILE_LABEL}: ${TRIGGER_VISION_LABEL}`;
+    elements.liveTiles.appendChild(activation);
+  }
+
   const imu = state.medical?.imu ?? state.status?.imu ?? null;
-  const imuLabel = imu === null ? "—" : IMU_LABEL[imu];
-  const imuTone =
-    imu === "connected"
+  const imuLabel = triggerIsVision
+    ? IMU_UNUSED_LABEL
+    : imu === null
+      ? "—"
+      : IMU_LABEL[imu];
+  const imuClasses = triggerIsVision
+    ? "tone-muted tile-value-long"
+    : imu === "connected"
       ? "tone-ok"
       : imu === "searching"
         ? "tone-warn"
@@ -285,8 +314,8 @@ export function renderLive(elements: DashboardElements, state: DashboardState): 
   elements.liveTiles.appendChild(
     tile(
       "IMU L/R",
-      el("span", `tile-value ${imuTone}`, imuLabel),
-      "polsi sinistro e destro",
+      el("span", `tile-value ${imuClasses}`, imuLabel),
+      triggerIsVision ? null : "polsi sinistro e destro",
     ),
   );
 
@@ -358,6 +387,47 @@ export function renderFeed(elements: DashboardElements, state: DashboardState): 
 
     elements.feed.appendChild(item);
   });
+}
+
+/**
+ * Newest 50 connection lines, oldest first. The panel follows new lines only
+ * while the operator is already at the bottom; scrolling up keeps the view.
+ */
+export function renderLog(elements: DashboardElements, state: DashboardState): void {
+  const list = elements.log;
+  const stick = isScrolledToBottom(list);
+  const previousTop = list.scrollTop;
+  elements.logCount.textContent = `${state.logs.length} / ${MAX_LOGS}`;
+  clear(list);
+
+  if (state.logs.length === 0) {
+    list.appendChild(el("li", "log-empty", "Nessuna riga di registro."));
+    return;
+  }
+
+  for (const entry of state.logs) {
+    const item = el("li", `log-item log-item-${entry.level}`);
+    const time = el("time", "log-time", formatClock(entry.wall));
+    time.dateTime = entry.wall;
+    item.appendChild(time);
+
+    const level = el("span", `log-level log-level-${entry.level}`);
+    const icon = el("span", "log-icon", LOG_LEVEL_ICON[entry.level]);
+    icon.setAttribute("aria-hidden", "true");
+    level.appendChild(icon);
+    level.appendChild(document.createTextNode(LOG_LEVEL_LABEL[entry.level]));
+    item.appendChild(level);
+
+    item.appendChild(el("code", "code log-source", entry.source));
+    item.appendChild(el("span", "log-message", entry.message));
+    list.appendChild(item);
+  }
+
+  list.scrollTop = stick ? list.scrollHeight : previousTop;
+}
+
+function isScrolledToBottom(list: HTMLElement): boolean {
+  return list.scrollHeight - list.scrollTop - list.clientHeight <= 24;
 }
 
 export function renderEpisode(elements: DashboardElements, state: DashboardState): void {

@@ -17,6 +17,7 @@ import {
   renderEpisode,
   renderFeed,
   renderLive,
+  renderLog,
   renderMode,
   renderNotice,
 } from "./views";
@@ -77,6 +78,9 @@ function renderRegions(regions: StateRegion[]): void {
         break;
       case "hands":
         skeleton.setHands(store.state.hands);
+        break;
+      case "logs":
+        renderLog(elements, store.state);
         break;
     }
   }

@@ -316,6 +316,7 @@ class EpisodeAnalyzer:
         self._frames: list[TrackedFrame] = []
         self._last_t: float | None = None
         self._latest_grade: tuple[float, Tag] | None = None
+        self._contact_events: list[tuple[float, Tag]] = []
         self._contact_runs: list[_ContactRun] = []
         self._active_contacts: dict[Side, _ContactRun] = {}
         self._contact_peak: tuple[int, float] | None = None
@@ -340,6 +341,16 @@ class EpisodeAnalyzer:
     def latest_grade(self) -> tuple[float, Tag] | None:
         """End time and severity of the latest hand-to-face event in the episode."""
         return self._latest_grade
+
+    @property
+    def contact_events(self) -> tuple[tuple[float, Tag], ...]:
+        """Start time and grade of every contact recorded in this episode (FR-028).
+
+        The camera-only trigger consumes one entry per hand-to-face contact, in
+        start order. A run that is regraded over its recoil tail updates its
+        entry in place, so the list stays one entry per contact.
+        """
+        return tuple(self._contact_events)
 
     @property
     def contact_peak(self) -> tuple[int, float] | None:
@@ -385,6 +396,7 @@ class EpisodeAnalyzer:
         self._frames = []
         self._last_t = None
         self._latest_grade = None
+        self._contact_events = []
         self._contact_runs.clear()
         self._active_contacts.clear()
         self._contact_peak = None
@@ -492,7 +504,17 @@ class EpisodeAnalyzer:
         severity = severity_of(contact, self._cfg)
         # Recency uses the event end, matching the report activity (R-14).
         self._record_grade(contact.t_start + contact.duration_s, severity)
+        self._note_contact_event(contact.t_start, severity)
         run.peak = (1 if severity is Tag.NON_DANGEROUS else 2, contact.t_start)
+
+    def _note_contact_event(self, t_start: float, severity: Tag) -> None:
+        """Keep one graded entry per contact start for the camera-only trigger (FR-028)."""
+        for index, (event_t, current) in enumerate(self._contact_events):
+            if event_t == t_start:
+                if severity is Tag.DANGEROUS and current is not Tag.DANGEROUS:
+                    self._contact_events[index] = (event_t, severity)
+                return
+        self._contact_events.append((t_start, severity))
 
     def _finalize_contact(self, run: _ContactRun) -> None:
         """Freeze one ended contact once its recoil tail is complete."""

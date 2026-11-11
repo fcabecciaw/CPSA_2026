@@ -13,3 +13,4 @@ Conventions:
 - `subject_box` is `[x1, y1, x2, y2]` in the same pixels.
 - `t` and `t_start` are Kria `CLOCK_MONOTONIC` seconds.
 - Clients ignore unknown types and unknown fields (IF-103). Payload objects allow extra fields.
+- `log` (event, protocol addition, v1 compatible): device and connection log lines for the operator panel (BlueCoin, MetaMotion, camera, supervisor). Rate-limited by the server; clients keep only the latest lines.

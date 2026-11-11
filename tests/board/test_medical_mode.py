@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+import sys
 import threading
 import time
 from collections.abc import Mapping
@@ -10,14 +12,17 @@ from typing import Any
 
 import pytest
 
+import cpsa.board.__main__ as board_main
 import cpsa.board.medical_mode as medical_mode
 from cpsa.adapters.gui_web import WebGui
 from cpsa.application.config import Config, load
+from cpsa.application.runtime import NullSensorSource
 from cpsa.board.__main__ import BoardAdapters, VisionStartupError
 from cpsa.board.medical_mode import STATE_PERIOD_S, MedicalMode
 from cpsa.domain.model import Detection, SampleKind, Side, Verdict
 from cpsa.ports import SensorSource
 from cpsa.supervisor.contract import ModeContext, ModeStartError
+from cpsa.vision.trigger import VisionTrigger
 from tests.application.test_config import SHIPPED
 from tests.fakes import (
     FakeClassifier,
@@ -52,11 +57,15 @@ class FakeVerifier:
     """A ``Verifier`` with the public camera-health attribute and the stop hook."""
 
     def __init__(self) -> None:
+        self.started = False
         self.stopped = False
         self.health_error: BaseException | None = None
 
     def verify(self, detection: Detection) -> Verdict:
         return Verdict.UNDECIDED
+
+    def start(self) -> None:
+        self.started = True
 
     def stop(self) -> None:
         self.stopped = True
@@ -101,6 +110,7 @@ class Harness:
         self.publisher = FakePublisher()
         self.clock = FakeClock()
         self.context_value: ModeContext | None = None
+        self.discovered = False
         self.discovery_started = threading.Event()
         self.classifier_started = threading.Event()
         self.classifier_gate: threading.Event | None = None
@@ -112,8 +122,18 @@ class Harness:
         gui: object | None = None,
         observer: object | None = None,
         clock: object | None = None,
+        continuous: bool = False,
+        trigger: object | None = None,
+        on_detection: object | None = None,
     ) -> BoardAdapters:
-        self.captured = {"gui": gui, "observer": observer, "clock": clock}
+        self.captured = {
+            "gui": gui,
+            "observer": observer,
+            "clock": clock,
+            "continuous": continuous,
+            "trigger": trigger,
+            "on_detection": on_detection,
+        }
         return BoardAdapters(
             source=self.source,
             load_classifier=self._load_classifier,
@@ -128,6 +148,7 @@ class Harness:
         self, source: SensorSource, settings: object, stop_event: threading.Event
     ) -> set[str] | None:
         """Mimic the real discovery: only the supervisor's event cancels it."""
+        self.discovered = True
         if self.missing is None:
             self.discovery_started.set()
             if stop_event.wait(10.0):
@@ -420,3 +441,110 @@ def test_vision_startup_errors_map_by_cause(
 
 def test_state_period_is_one_second() -> None:
     assert STATE_PERIOD_S == 1.0
+
+
+def vision_config() -> Config:
+    """A config with the 2D pipeline enabled and the camera-only trigger (FR-026)."""
+    config = load(SHIPPED)
+    return replace(
+        config,
+        vision=replace(config.vision, enabled=True),
+        medical=replace(config.medical, trigger="vision"),
+    )
+
+
+def test_the_vision_trigger_starts_without_any_imu(monkeypatch: pytest.MonkeyPatch) -> None:
+    harness = Harness(config=vision_config())
+    harness.install(monkeypatch)
+    mode = MedicalMode(harness.config)
+
+    mode.start(harness.context())
+    try:
+        assert not harness.discovered
+        assert not harness.classifier_started.is_set()
+        assert harness.captured["continuous"] is True
+        assert isinstance(harness.captured["trigger"], VisionTrigger)
+        assert callable(harness.captured["on_detection"])
+        assert harness.verifier.started
+        assert harness.publisher.payloads("medical.state")[0] == {
+            "imu": "n/a",
+            "tag": None,
+            "episode": None,
+            "last_decision": None,
+            "trigger": "vision",
+        }
+        assert mode.health()["imu"] == "n/a"
+        assert {payload["trigger"] for payload in harness.publisher.payloads("medical.state")} == {
+            "vision"
+        }
+        assert {payload["imu"] for payload in harness.publisher.payloads("medical.state")} == {
+            "n/a"
+        }
+    finally:
+        mode.stop(2.0)
+
+    assert harness.actuator.stopped
+    assert mode.health()["imu"] == "n/a"
+
+
+def test_imu_trigger_keeps_the_classifier_and_the_imu_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load(SHIPPED)
+    harness = Harness(config=replace(config, vision=replace(config.vision, enabled=True)))
+    harness.install(monkeypatch)
+    mode = MedicalMode(harness.config)
+
+    mode.start(harness.context())
+    try:
+        assert harness.discovered
+        assert harness.classifier_started.is_set()
+        assert harness.captured["continuous"] is False
+        assert harness.captured["trigger"] is None
+        assert harness.captured["on_detection"] is None
+        assert harness.publisher.payloads("medical.state")[0]["trigger"] == "imu"
+    finally:
+        mode.stop(2.0)
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (FileNotFoundError("/dev/video0"), "camera_missing"),
+        (RuntimeError("camera busy"), "camera_error"),
+    ],
+)
+def test_a_camera_failure_with_the_vision_trigger_raises_and_leaves_it_operable(
+    monkeypatch: pytest.MonkeyPatch, error: BaseException, code: str
+) -> None:
+    config = vision_config()
+    harness = Harness(config=config)
+    harness.verifier.health_error = error
+    harness.install(monkeypatch)
+    mode = MedicalMode(config)
+
+    with pytest.raises(ModeStartError) as info:
+        mode.start(harness.context())
+
+    assert info.value.code == code
+    assert not harness.discovered
+    assert harness.verifier.stopped
+    assert mode.health()["errors"] == [code]
+    assert mode.health()["camera"] == code
+    assert mode.health()["imu"] == "n/a"
+
+
+def test_the_camera_only_adapters_never_import_the_ble_stack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = vision_config()
+    monkeypatch.setattr(board_main, "_build_verifier", lambda *args, **kwargs: FakeVerifier())
+    # A ``None`` entry makes any import of the module raise, so the guard is live.
+    monkeypatch.setitem(sys.modules, "cpsa.adapters.bluecoin.source", None)
+    with pytest.raises(ImportError):
+        importlib.import_module("cpsa.adapters.bluecoin.source")
+
+    adapters = board_main.board_adapters(config, clock=FakeClock())
+
+    assert isinstance(adapters.source, NullSensorSource)
+    assert adapters.source.discover(1.0) == set()

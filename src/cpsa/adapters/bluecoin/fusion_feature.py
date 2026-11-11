@@ -120,3 +120,25 @@ class FeatureMemsSensorFusionCompact(Feature):
             ]
         except (BlueSTInvalidOperationException, BlueSTInvalidDataException) as e:
             raise e
+
+
+#: Feature-mask bit the BlueCoin firmware advertises for the compact quaternion.
+FUSION_COMPACT_MASK = 0x00000100
+
+
+def register_fusion_feature() -> None:
+    """Map the compact-quaternion mask bit to :class:`FeatureMemsSensorFusionCompact`.
+
+    The stock ``blue_st_sdk`` leaves ``0x00000100`` commented out in
+    ``FeatureCharacteristic``, so ``Node.get_feature`` never finds the quaternion
+    and the classifier gets no orientation. The legacy runtime relied on a
+    hand-edited SDK (ST's "how to add a new feature" guide); this does the same
+    in code. Call it before discovery builds the node features. Idempotent.
+    """
+    from blue_st_sdk.utils.ble_node_definitions import FeatureCharacteristic
+
+    for table in (
+        FeatureCharacteristic.BASE_MASK_TO_FEATURE_DIC,
+        FeatureCharacteristic.SENSOR_TILE_BOX_MASK_TO_FEATURE_DIC,
+    ):
+        table[FUSION_COMPACT_MASK] = FeatureMemsSensorFusionCompact

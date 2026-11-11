@@ -59,11 +59,19 @@ def test_first_code_cell_pins_and_installs_cpsa_ml_with_the_gpu_runtime() -> Non
     assert "github.com/fcabecciaw/CPSA_2026" in source
     assert "pip" in source
     assert "cpsa-ml[pseudolabel]" in source
-    # The CPU onnxruntime of the extra is removed before the CUDA build goes in.
-    assert 'metadata.version("onnxruntime")' in source
-    assert "uninstall" in source
-    assert "onnxruntime-gpu[cuda,cudnn]" in source
-    assert "rtmlib==0.0.16" in source
+    # rtmlib (which pulls the CPU onnxruntime) goes in first, every onnxruntime
+    # build is removed, and the CUDA build is installed last: both builds share
+    # the onnxruntime/ folder, so the last install wins.
+    rtmlib = source.index("rtmlib==0.0.16")
+    uninstall = source.index('"uninstall"')
+    gpu = source.index("onnxruntime-gpu[cuda,cudnn]", uninstall)
+    assert rtmlib < uninstall < gpu
+    assert source.count("rtmlib==0.0.16") == 1
+    assert '"onnxruntime", "onnxruntime-gpu"' in source
+    assert '"onnxruntime" not in installed' in source
+    # A broken distribution reports Name=None (seen in Colab): lower() must not
+    # run on None, and "onnxruntime" must not match a nameless entry.
+    assert '(d.metadata["Name"] or "").lower()' in source
 
 
 def test_notebook_06_confirms_cuda_before_labeling() -> None:

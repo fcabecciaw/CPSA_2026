@@ -141,6 +141,15 @@ vision:                            # 2D pose episode analysis; off until a train
       strike_decel_fwps2: 4.0
       recoil_fw: 0.05
 
+# Optional medical-mode section; the values below are the defaults.
+# medical:
+#   trigger: imu                    # imu (BlueCoin) or vision (camera-only, FR-026)
+#   vision_trigger:                 # thresholds of the camera-only trigger (FR-028)
+#     min_contacts: 2               # N: contacts within the window that start an episode
+#     contact_window_s: 10.0        # T: seconds the N contacts must fall within
+#     oscillation_min_s: 3.0        # D: seconds of continuous rocking or flapping
+#     refractory_s: null            # no new start this long after an episode ends; null = dispatch.cooldown_s
+
 # Optional server and supervisor sections; the values below are the defaults.
 # server:
 #   host: 0.0.0.0                    # interface the UI and /ws are served on

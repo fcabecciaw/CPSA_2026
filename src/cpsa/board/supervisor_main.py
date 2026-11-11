@@ -20,6 +20,7 @@ from typing import Any
 
 from cpsa.adapters.clock import SystemClock
 from cpsa.adapters.event_log import configure_logging
+from cpsa.adapters.web.log_forward import install as install_log_forward
 from cpsa.application.config import Config, ConfigError
 from cpsa.application.config import load as load_config
 from cpsa.board.fake_mode import FakeMedicalMode
@@ -117,6 +118,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 supervisor_holder[0].request_mode(str(data["mode"]), ref_seq)
 
         server = _build_server(config, on_command)
+        # Device and connection log lines reach the dashboard as `log` events.
+        install_log_forward(server)
         supervisor = Supervisor(modes, server, config, SystemClock())
         supervisor_holder.append(supervisor)
     except StartupError as exc:

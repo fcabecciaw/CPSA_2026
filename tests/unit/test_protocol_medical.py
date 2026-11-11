@@ -289,7 +289,16 @@ def test_state_without_episode_or_decision_matches_the_schema() -> None:
         "tag": None,
         "episode": None,
         "last_decision": None,
+        "trigger": "imu",
     }
+
+
+def test_state_carries_the_vision_trigger_mode() -> None:
+    payload = state("n/a", None, None, None, trigger="vision")
+
+    validate_server_message(envelope("medical.state", payload))
+    assert payload["imu"] == "n/a"
+    assert payload["trigger"] == "vision"
 
 
 def test_state_carries_the_episode_and_the_last_decision() -> None:

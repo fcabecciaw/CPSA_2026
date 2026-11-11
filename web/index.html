@@ -51,7 +51,7 @@
       </section>
 
       <main class="layout">
-        <div class="side">
+        <div class="side side-left">
           <section class="panel live-panel" aria-labelledby="live-title">
             <header class="panel-head">
               <h2 id="live-title">Stato live</h2>
@@ -91,13 +91,27 @@
           </div>
         </section>
 
-        <section class="panel feed-panel" aria-labelledby="feed-title">
-          <header class="panel-head">
-            <h2 id="feed-title">Decisioni</h2>
-            <span class="hint" id="feed-count">0 / 20</span>
-          </header>
-          <ol id="feed" class="feed" aria-label="Ultime 20 decisioni, dalla più recente"></ol>
-        </section>
+        <div class="side feed-side">
+          <section class="panel feed-panel" aria-labelledby="feed-title">
+            <header class="panel-head">
+              <h2 id="feed-title">Decisioni</h2>
+              <span class="hint" id="feed-count">0 / 20</span>
+            </header>
+            <ol id="feed" class="feed" aria-label="Ultime 20 decisioni, dalla più recente"></ol>
+          </section>
+
+          <section class="panel log-panel" aria-labelledby="log-title">
+            <header class="panel-head">
+              <h2 id="log-title">Registro connessioni</h2>
+              <span class="hint" id="log-count">0 / 50</span>
+            </header>
+            <ol
+              id="log"
+              class="log"
+              aria-label="Ultime 50 righe del registro connessioni, dalla più vecchia"
+            ></ol>
+          </section>
+        </div>
       </main>
 
       <noscript>Questa dashboard richiede JavaScript.</noscript>

@@ -48,6 +48,9 @@ MAX_PENDING_PUBLISH = 256
 CLOSE_TIMEOUT_S = 1.0
 """How long a close handshake may take before the transport is aborted."""
 
+LOG_REPLAY_SIZE = 50
+"""How many recent ``log`` events are replayed to a newly connected client."""
+
 MODES = ("idle", "medical")
 CAPABILITIES = (
     "status",
@@ -55,6 +58,7 @@ CAPABILITIES = (
     "medical.decision",
     "medical.episode",
     "medical.hands",
+    "log",
 )
 DEFAULT_STATUS: Mapping[str, Any] = {
     "mode": "idle",
@@ -90,6 +94,8 @@ class _Client:
     ws: Any
     transport: Any = None
     """The TCP transport of the connection; ``None`` for a socket stand-in."""
+    peer: str = "unknown"
+    """``host:port`` of the connected peer, for command logging."""
     seq: int = 0
     states: dict[str, Mapping[str, Any]] = field(default_factory=dict)
     events: deque[tuple[str, Mapping[str, Any]]] = field(default_factory=deque)
@@ -118,6 +124,9 @@ class WebServer:
         self._watchdog: asyncio.Task[None] | None = None
         self._clients: set[_Client] = set()
         self._states: dict[str, Mapping[str, Any]] = {}
+        # Recent log lines are replayed after the state snapshot, so a dashboard
+        # that reconnects shows what happened while it was away.
+        self._log_replay: deque[tuple[str, Mapping[str, Any]]] = deque(maxlen=LOG_REPLAY_SIZE)
         self._ready = threading.Event()
         self._start_error: BaseException | None = None
         self._stopping = False
@@ -286,6 +295,8 @@ class WebServer:
                 client.states.pop(topic, None)
 
     def _handle_event(self, type: str, data: Mapping[str, Any]) -> None:
+        if type == "log":
+            self._log_replay.append((type, data))
         for client in list(self._clients):
             if client.closed:
                 continue
@@ -365,7 +376,7 @@ class WebServer:
         return ws
 
     def _attach(self, ws: Any, transport: Any = None) -> _Client:
-        client = _Client(ws=ws, transport=transport)
+        client = _Client(ws=ws, transport=transport, peer=_peer_address(transport))
         self._clients.add(client)
         loop = asyncio.get_running_loop()
         client.sender = loop.create_task(self._sender(client))
@@ -403,11 +414,14 @@ class WebServer:
 
     def _snapshot(self) -> list[tuple[str, Mapping[str, Any]]]:
         mode = str(self._states.get("status", DEFAULT_STATUS).get("mode", "idle"))
-        return [
+        states = [
             (topic, data)
             for topic, data in list(self._states.items())
             if self._applies_to(topic, mode)
         ]
+        # The recent log history follows the snapshot, oldest line first, so a
+        # reconnecting dashboard continues the timeline it was showing.
+        return states + list(self._log_replay)
 
     @staticmethod
     def _applies_to(topic: str, mode: str) -> bool:
@@ -503,6 +517,15 @@ class WebServer:
         if not isinstance(command, str) or not isinstance(data, dict):
             self._bad_command(client, ref_seq, "invalid client envelope")
             return
+        # Every client command is logged at INFO with its peer, so an action
+        # such as a mode stop can be attributed after the fact.
+        logger.info(
+            "Client command type=%s data=%s seq=%s peer=%s",
+            command,
+            data,
+            ref_seq,
+            client.peer,
+        )
         if command == "ping":
             if "id" not in data:
                 self._bad_command(client, ref_seq, "ping requires data.id")
@@ -546,6 +569,17 @@ def _command_ref_seq(message: Mapping[str, Any]) -> int | None:
     if isinstance(seq, int) and not isinstance(seq, bool) and seq >= 1:
         return seq
     raise ValueError(f"invalid client seq {seq!r}")
+
+
+def _peer_address(transport: Any) -> str:
+    """Return the peer's ``host:port``, or ``"unknown"`` without a transport."""
+    if transport is None:
+        return "unknown"
+    with contextlib.suppress(Exception):
+        peername = transport.get_extra_info("peername")
+        if peername:
+            return f"{peername[0]}:{peername[1]}"
+    return "unknown"
 
 
 def _abort_transport(transport: Any) -> None:

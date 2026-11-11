@@ -7,6 +7,7 @@ import yaml
 
 from cpsa.application.config import ConfigError, load, parse
 from cpsa.domain.model import FaceRegion
+from cpsa.vision.trigger import TriggerConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SHIPPED = REPO_ROOT / "config" / "board.yaml"
@@ -163,6 +164,7 @@ def test_shipped_vision_defaults() -> None:
     assert vision.model.kind == "onnx"
     assert (vision.model.input_width, vision.model.input_height) == (640, 480)
     assert vision.camera.device == "/dev/video0"
+    assert vision.camera.match == "F200"
     assert (vision.camera.width, vision.camera.height) == (640, 480)
     assert vision.fast_budget_s == 0.8
     assert vision.fast_budget_s < config.dispatch.verification_deadline_s
@@ -172,6 +174,14 @@ def test_shipped_vision_defaults() -> None:
     assert vision.analysis.approach_fw == 0.4
     assert vision.analysis.severity.dangerous_regions == frozenset({FaceRegion.EYES})
     assert vision.analysis.repetition_band_hz == (0.2, 5.0)
+
+
+def test_vision_camera_accepts_auto_and_an_explicit_match() -> None:
+    automatic = parse(_with(valid(), "vision.camera.device", "auto"))
+    assert automatic.vision.camera.device == "auto"
+
+    matched = parse(_with(valid(), "vision.camera.match", "C270"))
+    assert matched.vision.camera.match == "C270"
 
 
 @pytest.mark.parametrize(
@@ -324,3 +334,91 @@ def test_unknown_supervisor_key_is_named() -> None:
     with pytest.raises(ConfigError) as info:
         parse(data)
     assert info.value.key == "supervisor.fallback"
+
+
+def medical_document() -> dict[str, Any]:
+    """A valid document with the camera-only medical section (F9)."""
+    data = valid()
+    data["vision"]["enabled"] = True
+    data["medical"] = {
+        "trigger": "vision",
+        "vision_trigger": {
+            "min_contacts": 2,
+            "contact_window_s": 10.0,
+            "oscillation_min_s": 3.0,
+            "refractory_s": None,
+        },
+    }
+    return data
+
+
+def test_a_missing_medical_section_means_the_imu_trigger() -> None:
+    config = load(SHIPPED)
+
+    assert config.medical.trigger == "imu"
+    assert config.medical.vision_trigger == TriggerConfig(refractory_s=config.dispatch.cooldown_s)
+
+
+def test_the_vision_trigger_thresholds_are_loaded() -> None:
+    data = medical_document()
+    data["medical"]["vision_trigger"] = {
+        "min_contacts": 3,
+        "contact_window_s": 8.0,
+        "oscillation_min_s": 2.5,
+        "refractory_s": 7.0,
+    }
+
+    config = parse(data)
+
+    assert config.medical.trigger == "vision"
+    assert config.medical.vision_trigger == TriggerConfig(3, 8.0, 2.5, 7.0)
+
+
+def test_a_null_refractory_defaults_to_the_dispatch_cooldown() -> None:
+    config = parse(medical_document())
+
+    assert config.medical.vision_trigger.refractory_s == config.dispatch.cooldown_s
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("medical.trigger", "both"),
+        ("medical.vision_trigger.min_contacts", 0),
+        ("medical.vision_trigger.contact_window_s", 0),
+        ("medical.vision_trigger.oscillation_min_s", -1),
+        ("medical.vision_trigger.refractory_s", -0.5),
+        ("medical.vision_trigger.extra", 1),
+        ("medical.extra", True),
+    ],
+)
+def test_invalid_medical_value_is_named(key: str, value: object) -> None:
+    with pytest.raises(ConfigError) as info:
+        parse(_with(medical_document(), key, value))
+    assert info.value.key == key
+
+
+def test_missing_medical_key_is_named_when_the_section_is_present() -> None:
+    data = medical_document()
+    del data["medical"]["vision_trigger"]["min_contacts"]
+
+    with pytest.raises(ConfigError) as info:
+        parse(data)
+    assert info.value.key == "medical.vision_trigger.min_contacts"
+
+
+def test_the_vision_trigger_requires_the_vision_pipeline() -> None:
+    data = medical_document()
+    data["vision"]["enabled"] = False
+
+    with pytest.raises(ConfigError) as info:
+        parse(data)
+    assert info.value.key == "medical.trigger"
+
+
+def test_the_demo_config_is_camera_only() -> None:
+    config = load(REPO_ROOT / "config" / "board.demo.yaml")
+
+    assert config.vision.enabled is True
+    assert config.medical.trigger == "vision"
+    assert config.medical.vision_trigger == TriggerConfig(refractory_s=config.dispatch.cooldown_s)

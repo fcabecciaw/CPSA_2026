@@ -14,13 +14,19 @@ import logging
 import select
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
 
+from cpsa.adapters.camera.devices import (
+    DEFAULT_MATCH,
+    VideoNode,
+    list_video_nodes,
+    resolve_device,
+)
 from cpsa.adapters.camera.f200 import yuyv_to_rgb
 from cpsa.vision.types import VideoFrame
 
@@ -134,10 +140,14 @@ class UvcVideoSource:
     """``VideoSource`` for one RGB-only UVC camera.
 
     Args:
-        device: V4L2 node, for example ``/dev/video0``.
+        device: V4L2 node, for example ``/dev/video0``, or ``"auto"`` to pick
+            the node whose card name contains ``match`` at every :meth:`start`.
         width, height: requested YUYV frame size.
         fps: requested frame rate.
         exposure: manual ``exposure_time_absolute`` value.
+        match: case-insensitive card-name fragment used for ``"auto"``.
+        device_lister: test seam returning the V4L2 nodes for ``"auto"``;
+            defaults to :func:`cpsa.adapters.camera.devices.list_video_nodes`.
         stream_factory: test seam; defaults to the linuxpy implementation.
     """
 
@@ -149,6 +159,8 @@ class UvcVideoSource:
         height: int,
         fps: float,
         exposure: int,
+        match: str = DEFAULT_MATCH,
+        device_lister: Callable[[], Sequence[VideoNode]] | None = None,
         stream_factory: _StreamFactory | None = None,
     ) -> None:
         if width <= 0 or height <= 0 or width % 2:
@@ -157,7 +169,11 @@ class UvcVideoSource:
             raise ValueError("fps must be positive")
         if exposure <= 0:
             raise ValueError("exposure must be positive")
+        if not match.strip():
+            raise ValueError("match must not be empty")
         self._device = device
+        self._match = match
+        self._lister = device_lister if device_lister is not None else list_video_nodes
         self._width = int(width)
         self._height = int(height)
         self._fps = float(fps)
@@ -186,9 +202,8 @@ class UvcVideoSource:
                 raise RuntimeError("UvcVideoSource is already started")
             self._stop = threading.Event()
             self._warned_monotonic = False
-            stream = self._factory(
-                self._device, self._width, self._height, self._fps, self._exposure
-            )
+            device = resolve_device(self._device, match=self._match, lister=self._lister)
+            stream = self._factory(device, self._width, self._height, self._fps, self._exposure)
             try:
                 stream.set_control("auto_exposure", AUTO_EXPOSURE_MANUAL)
                 stream.set_control("exposure_time_absolute", self._exposure)

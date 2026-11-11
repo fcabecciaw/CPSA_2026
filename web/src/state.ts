@@ -10,6 +10,7 @@ import type {
   ErrorPayload,
   HandsPayload,
   HelloPayload,
+  LogLevel,
   MedicalStatePayload,
   ModeProgressPayload,
   ServerMessage,
@@ -18,6 +19,7 @@ import type {
 } from "./protocol";
 
 export const MAX_DECISIONS = 20;
+export const MAX_LOGS = 50;
 
 export interface DecisionEntry {
   seq: number;
@@ -31,11 +33,21 @@ export interface ErrorEntry {
   receivedAt: number;
 }
 
+export interface LogEntry {
+  seq: number;
+  wall: string;
+  receivedAt: number;
+  level: LogLevel;
+  source: string;
+  message: string;
+}
+
 export interface DashboardState {
   hello: HelloPayload | null;
   status: StatusPayload | null;
   medical: MedicalStatePayload | null;
   decisions: DecisionEntry[];
+  logs: LogEntry[];
   episode: EpisodePayload | null;
   hands: HandsPayload | null;
   modeProgress: ModeProgressPayload | null;
@@ -51,7 +63,7 @@ export interface DashboardState {
   lastMessageAt: number;
 }
 
-export type StateRegion = "mode" | "live" | "feed" | "episode" | "hands";
+export type StateRegion = "mode" | "live" | "feed" | "episode" | "hands" | "logs";
 
 export class DashboardStore {
   readonly state: DashboardState = {
@@ -59,6 +71,7 @@ export class DashboardStore {
     status: null,
     medical: null,
     decisions: [],
+    logs: [],
     episode: null,
     hands: null,
     modeProgress: null,
@@ -94,7 +107,10 @@ export class DashboardStore {
     switch (message.type) {
       case "hello":
         this.state.hello = message.data;
-        return ["mode"];
+        // A new connection gets the server's recent log history again; start
+        // from it instead of mixing entries from the previous connection.
+        this.state.logs = [];
+        return ["mode", "logs"];
 
       case "status": {
         this.state.status = message.data;
@@ -128,6 +144,25 @@ export class DashboardStore {
 
       case "pong":
         return [];
+
+      case "log": {
+        const duplicate = this.state.logs.some((item) => item.seq === message.seq);
+        if (!duplicate) {
+          // Oldest first, bounded: the panel shows the newest MAX_LOGS lines.
+          this.state.logs = [
+            ...this.state.logs,
+            {
+              seq: message.seq,
+              wall: message.wall,
+              receivedAt,
+              level: message.data.level,
+              source: message.data.source,
+              message: message.data.message,
+            },
+          ].slice(-MAX_LOGS);
+        }
+        return ["logs"];
+      }
 
       case "medical.state": {
         this.state.medical = message.data;

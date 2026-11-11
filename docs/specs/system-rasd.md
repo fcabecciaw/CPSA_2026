@@ -303,3 +303,13 @@ These are requirements on observable structure. `$plan` decides the exact module
 - **Friday deadline:** the full scope (supervisor, lab, dashboard, protocol, assets) is ambitious for 3 days. `$plan` should mark a minimum viable cut: supervisor with mode switch, lab with the core gestures, a basic dashboard.
 - **Model availability:** finger-keypoint quality depends on the quick training run.
 - **Assets:** finding licensed, separable models.
+
+## Revision 2026-11-11: camera-only medical trigger
+
+See `docs/specs/vision-2d-rasd.md`, "Revision 2026-11-11".
+
+- **FR-401 MODIFIED:** the medical mode runs with a configurable trigger, `imu` (the behavior up to now, unchanged) or `vision` (camera-only, no IMU devices). With `vision`:
+  - the IMU parts of FR-402 (IMU connection status) report `n/a`;
+  - the tag comes from vision.
+- **FR-203 MODIFIED:** `imu_not_found` applies only with `trigger = imu`.
+- **NFR-02 (isolation):** unchanged. The camera-only medical mode SHALL install and run without the BLE extras.

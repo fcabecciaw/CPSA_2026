@@ -34,10 +34,12 @@ from cpsa.domain.model import (
     VisionAssessment,
 )
 from cpsa.vision.contacts2d import detect_contacts
+from cpsa.vision.trigger import TriggerConfig, VisionTrigger
 from cpsa.vision.types import EpisodeReport, PersonPose, TrackedFrame, VideoFrame
 from tests.application.test_config import SHIPPED
 from tests.fakes import FakeClock, MemorySink, RecordingActuator, RecordingGui
 from tests.unit import vision_fixtures as fx
+from tests.unit.test_oscillation import _flapping_frames
 
 STRONG_META = {"duty": 100, "duration": 900}
 MILD_META = {"duty": 40, "duration": 700}
@@ -959,3 +961,265 @@ def test_a_raising_observer_is_logged_and_does_not_change_the_report(
     assert observed.peak_severity is baseline.peak_severity
     assert observed.labels == baseline.labels
     assert "Vision observer failed" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# AC-020..AC-022: continuous camera-only watch path (plan F8)
+# ---------------------------------------------------------------------------
+
+
+def _continuous_verifier(
+    tmp_path: Path,
+    *,
+    config: VisionConfig | None = None,
+    estimator: PoseBook | None = None,
+    clock: FakeClock | None = None,
+    trigger: VisionTrigger | None = None,
+    fires: list[Detection] | None = None,
+) -> tuple[VisionVerifier, ManualVideoSource, PoseBook, FakeClock, list[Detection]]:
+    frames = episode_frames()
+    source = ManualVideoSource()
+    book = estimator if estimator is not None else PoseBook(frames)
+    fake_clock = clock if clock is not None else FakeClock(9.0)
+    fired = fires if fires is not None else []
+    verifier = VisionVerifier(
+        source,
+        book,
+        None,
+        config if config is not None else _config(tmp_path),
+        fake_clock,
+        fx.LAYOUT,
+        log_dir=tmp_path / "logs",
+        continuous=True,
+        trigger=trigger if trigger is not None else VisionTrigger(TriggerConfig()),
+        on_detection=fired.append,
+    )
+    return verifier, source, book, fake_clock, fired
+
+
+def test_continuous_mode_needs_a_trigger_and_a_callback(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="trigger"):
+        VisionVerifier(
+            ManualVideoSource(),
+            PoseBook(episode_frames()),
+            None,
+            _config(tmp_path),
+            FakeClock(9.0),
+            fx.LAYOUT,
+            continuous=True,
+        )
+
+
+def test_continuous_watch_analyzes_idle_frames_on_the_grid(tmp_path: Path) -> None:
+    config = _config(tmp_path, queue_max=512, preroll_s=1.0)
+    verifier, source, book, _, _ = _continuous_verifier(tmp_path, config=config)
+    frames = [frame for frame in episode_frames() if frame.t <= 15.0]
+    verifier.start()
+    try:
+        emit_range(source, frames, 9.0, 15.0)
+
+        # 6 s at 10 fps is 60 grid points; AC-020 asks for at least 90 %.
+        wait_until(lambda: len(book.calls) >= 54)
+        assert verifier.episode_id is None
+    finally:
+        verifier.stop()
+
+    assert 54 <= len(book.calls) <= 61
+
+
+def test_continuous_watch_survives_a_failed_frame(tmp_path: Path) -> None:
+    config = _config(tmp_path, queue_max=512)
+    frames = episode_frames()
+    failing = int(frames[42].seq)
+    estimator = PoseBook(frames, fail_on={failing})
+    verifier, source, book, _, _ = _continuous_verifier(
+        tmp_path, config=config, estimator=estimator
+    )
+    verifier.start()
+    try:
+        emit_range(source, frames, 9.0, 11.0)
+
+        wait_until(lambda: failing in book.calls)
+        wait_until(lambda: any(call > failing for call in book.calls))
+    finally:
+        verifier.stop()
+
+    assert failing in book.calls
+
+
+def test_continuous_watch_fires_on_two_contacts_and_clears_on_episode_end(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, queue_max=512)
+    clock = FakeClock(9.0)
+    verifier, source, _, _, fired = _continuous_verifier(tmp_path, config=config, clock=clock)
+    frames = episode_frames()
+    verifier.start()
+    try:
+        emit_range(source, frames, 9.0, 14.0)
+        wait_until(lambda: bool(fired))
+
+        fire = fired[0]
+        assert fire.tag in (Tag.NON_DANGEROUS, Tag.DANGEROUS)
+        # The fire needs the second contact, which starts at 11.6 s.
+        assert 11.5 <= fire.window_end_ts <= 14.0
+        assert fire.features == ()
+
+        clock.t = 14.0
+        verifier.observe(fire)
+        wait_until(lambda: verifier.episode_id is not None)
+        clock.t = 200.0
+        wait_until(lambda: verifier.last_report is not None)
+        wait_until(lambda: len(fired) >= 2)
+
+        assert fired[-1].tag is Tag.NON_STEREOTIPY
+    finally:
+        verifier.stop()
+
+
+def _watch_tail(
+    verifier: VisionVerifier,
+    trigger: VisionTrigger,
+    t: float,
+    *,
+    tracked: TrackedFrame | None = None,
+    contacts: Sequence[tuple[float, Tag]] = (),
+) -> None:
+    """Run the trigger steps of ``_watch_frame`` for one analyzed frame.
+
+    The tests feed already tracked fixture frames, so they skip the pose tracker
+    and call the same ``_remember_oscillation_frame``, ``_feed_trigger`` and
+    ``poll`` steps the watch runs after it (FR-027..FR-029). ``contacts`` is the
+    analyzer's cumulative event list, as ``contact_events`` is on the watch.
+    """
+    if tracked is not None:
+        verifier._remember_oscillation_frame(tracked)
+    verifier._watch_contacts = verifier._feed_trigger(
+        trigger, contacts, verifier._watch_contacts, t
+    )
+    verifier._emit_fire(trigger.poll(t, episode_active=False))
+
+
+def test_a_grade_upgrade_reaches_the_trigger_before_the_start(tmp_path: Path) -> None:
+    """R-02: a contact regraded over its recoil tail keeps its final grade."""
+    trigger = VisionTrigger(TriggerConfig())
+    verifier, _, _, _, fired = _continuous_verifier(tmp_path, trigger=trigger)
+
+    _watch_tail(verifier, trigger, 1.0, contacts=[(1.0, Tag.NON_DANGEROUS)])
+    assert fired == []
+
+    # The first contact is DANGEROUS by the time the second one starts the episode.
+    _watch_tail(
+        verifier,
+        trigger,
+        5.0,
+        contacts=[(1.0, Tag.DANGEROUS), (5.0, Tag.NON_DANGEROUS)],
+    )
+
+    assert len(fired) == 1
+    assert fired[0].tag is Tag.DANGEROUS
+
+
+def test_the_clear_fire_survives_a_failing_report_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-04: a failing report step must not swallow the clear fire (FR-029)."""
+    clock = FakeClock(9.0)
+    config = _config(tmp_path, queue_max=512)
+    verifier, source, _, _, fired = _continuous_verifier(tmp_path, config=config, clock=clock)
+    frames = episode_frames()
+    verifier.start()
+    try:
+        emit_range(source, frames, 9.0, 14.0)
+        wait_until(lambda: bool(fired))
+        clock.t = 14.0
+        verifier.observe(fired[0])
+        wait_until(lambda: verifier.episode_id is not None)
+        wait_until(lambda: (verifier.analyzed_until_t or 0.0) >= 14.0 - 1e-9)
+
+        def broken_report(now: float) -> None:
+            raise RuntimeError("report failed")
+
+        monkeypatch.setattr(verifier._analyzer, "report", broken_report)
+        with pytest.raises(RuntimeError, match="report failed"):
+            verifier._finish_episode(clock.monotonic())
+    finally:
+        verifier.stop()
+
+    assert fired[-1].tag is Tag.NON_STEREOTIPY
+
+
+def test_continuous_watch_starts_on_sustained_flapping_alone(tmp_path: Path) -> None:
+    """AC-021 at the verifier wiring: flapping starts an episode without a contact.
+
+    The oscillation detector needs about a second of samples before it reports
+    flapping (R-10), so five seconds of fixture frames carry the three seconds of
+    continuous oscillation the trigger requires.
+    """
+    trigger = VisionTrigger(TriggerConfig())
+    verifier, _, _, _, fired = _continuous_verifier(tmp_path, trigger=trigger)
+
+    for index, tracked in enumerate(_flapping_frames(seconds=5.0)):
+        if index % 3 == 0:  # the watch analyzes on the 10 fps grid
+            _watch_tail(verifier, trigger, tracked.t, tracked=tracked)
+
+    assert [detection.tag for detection in fired] == [Tag.NON_DANGEROUS]
+    assert 12.9 <= fired[0].window_end_ts <= 15.0
+
+
+def test_continuous_watch_does_not_start_on_short_flapping(tmp_path: Path) -> None:
+    """AC-021 at the verifier wiring: two seconds of flapping do not start one."""
+    trigger = VisionTrigger(TriggerConfig())
+    verifier, _, _, _, fired = _continuous_verifier(tmp_path, trigger=trigger)
+
+    for index, tracked in enumerate(_flapping_frames(seconds=2.0)):
+        if index % 3 == 0:
+            _watch_tail(verifier, trigger, tracked.t, tracked=tracked)
+
+    assert fired == []
+
+
+def test_continuous_watch_respects_the_refractory_after_a_real_episode(
+    tmp_path: Path,
+) -> None:
+    """AC-022 at the verifier wiring: the clear of a real episode starts the refractory."""
+    config = _config(
+        tmp_path,
+        queue_max=512,
+        idle_timeout_s=0.5,
+        analysis=replace(load(SHIPPED).vision.analysis, activity_window_s=0.5),
+    )
+    clock = FakeClock(9.0)
+    trigger = VisionTrigger(TriggerConfig())
+    verifier, source, _, _, fired = _continuous_verifier(
+        tmp_path, config=config, clock=clock, trigger=trigger
+    )
+    verifier.start()
+    try:
+        emit_range(source, episode_frames(), 9.0, 14.0)
+        wait_until(lambda: bool(fired))
+        clock.t = fired[0].window_end_ts
+        verifier.observe(fired[0])
+        wait_until(lambda: verifier.episode_id is not None)
+        wait_until(lambda: (verifier.analyzed_until_t or 0.0) >= 14.0 - 1e-9)
+
+        # The episode ends at 14.5 s, so the trigger holds back starts until 19.5 s.
+        clock.t = 14.5
+        wait_until(lambda: verifier.last_report is not None)
+        assert fired[-1].tag is Tag.NON_STEREOTIPY
+        cleared = len(fired)
+
+        _watch_tail(verifier, trigger, 15.8, contacts=[(15.8, Tag.NON_DANGEROUS)])
+        _watch_tail(
+            verifier,
+            trigger,
+            16.0,
+            contacts=[(15.8, Tag.NON_DANGEROUS), (16.0, Tag.NON_DANGEROUS)],
+        )
+        assert fired[cleared:] == []
+
+        # The first poll after ``refractory_s`` starts a new episode.
+        _watch_tail(verifier, trigger, 19.6)
+        assert fired[-1].tag is Tag.NON_DANGEROUS
+    finally:
+        verifier.stop()

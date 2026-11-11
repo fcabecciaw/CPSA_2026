@@ -287,3 +287,58 @@
 - Q-03 cannot be checked until sessions are recorded.
 - Hand-shape accuracy depends on the fine-tuned model's hand keypoints.
 - The depth and calibration tasks of `docs/plans/vision-toolchain.md` are off the required path.
+
+## Revision 2026-11-11: camera-only trigger (approved by the user)
+
+**Why:** the BlueCoin IMUs proved unreliable on the booth's Bluetooth setup. The medical demo must also run with the camera alone. The IMU-triggered behavior stays available.
+
+**Baseline evidence:**
+- Episodes start only from an IMU detection: `src/cpsa/application/vision_verifier.py`, `VisionVerifier.verify` and `observe` set `_want_active`.
+- Inference runs only during episodes (FR-001).
+- Contacts, approach severity and oscillation already exist as pure code: `cpsa.vision.contacts2d`, `cpsa.vision.assessment.severity_of` / `severity_of_approach`, `cpsa.vision.oscillation`.
+- After T10, a 512×384 frame costs about 21–25 ms on the KV260 (DPU 18.5 ms plus cv2 letterbox).
+
+**Changes to existing requirements (scoped to the new trigger mode):**
+- **FR-001 MODIFIED:** its rule "SHALL NOT run pose inference outside an active episode" applies only with `trigger = imu`.
+- **FR-023 MODIFIED:** with `trigger = vision`, the clock offset and IMU consistency are reported as `null`.
+- **FR-024 MODIFIED:** with `trigger = vision` there is no IMU-only fallback. FR-032 applies instead.
+
+**Added requirements:**
+- **FR-026** (MUST): The medical mode SHALL have a configurable trigger source, `imu` (the behavior up to now) or `vision` (camera-only). WITH `trigger = vision`, it SHALL start and run with no BlueCoin or other IMU present, and SHALL NOT scan for or connect to IMUs.
+- **FR-027** (MUST): WHILE `trigger = vision` and the mode runs, the system SHALL run pose inference and subject tracking continuously on the analyzed-frame grid (`analysis_fps`), with no external detection.
+- **FR-028** (MUST): WITH `trigger = vision`, the system SHALL start an episode WHEN either:
+  - (a) at least `N` hand-to-face contacts (FR-014 definition) occur within `T` seconds; or
+  - (b) rocking or hand flapping (FR-019) is detected continuously for at least `D` seconds.
+
+  Defaults: `N = 2`, `T = 10 s`, `D = 3 s`. All three are configurable.
+- **FR-029** (MUST): WITH `trigger = vision`:
+  - an episode SHALL continue while contacts or oscillation persist, and SHALL end after the idle time of FR-003 without such activity;
+  - a new episode SHALL NOT start within a configurable refractory period after an episode ends (default: the dispatch cooldown).
+- **FR-030** (MUST): WITH `trigger = vision`, each episode start and each FR-020 follow-up SHALL produce a decision with:
+  - verdict `CONFIRMED`;
+  - a tag from vision: the FR-016 severity for contact episodes, and `NON_DANGEROUS` for rocking- or flapping-only episodes (consistent with FR-019).
+
+  The decision SHALL go through the same cooldown, actuation policy, event log and `Gui` publishing as IMU decisions.
+- **FR-031** (MUST): In both trigger modes, WHEN no actuator is configured or available, detection, assessment, the event log and the dashboard SHALL continue.
+- **FR-032** (MUST): WITH `trigger = vision`, WHEN the camera or DPU fails, the mode SHALL report `camera_missing`, `camera_error` or `dpu_error` in the supervisor status, stop detection, and leave the supervisor operable.
+- **NFR-007** (MUST): WITH `trigger = vision`, continuous analysis on the KV260 SHALL sustain at least `analysis_fps` analyzed frames per second (default 10). The web server SHALL stay responsive (Q-02 still sets the target rate).
+
+**Added acceptance criteria:**
+- **AC-019** [FR-026]: With `trigger = vision` and every BlueCoin off, the medical mode reaches `running`, and `status.imu` is `n/a`.
+- **AC-020** [FR-027, NFR-007]: Over 60 s with no trigger, at least 90 % of `analysis_fps × 60` frames are analyzed on the board.
+- **AC-021** [FR-028]: On recorded or synthetic input:
+  - 2 contacts within 10 s start one episode;
+  - 1 contact starts none;
+  - 2 contacts 12 s apart start none;
+  - 3 s of flapping starts an episode, and 2 s of flapping starts none.
+- **AC-022** [FR-029]: The episode ends after the idle time. No episode starts within the refractory period, and one starts again after it.
+- **AC-023** [FR-030]: An episode start yields one `medical.decision` with the vision tag and verdict `CONFIRMED`, an event-log entry, and an actuation when an actuator is present.
+- **AC-024** [FR-031]: With no actuator, AC-023 holds except for the actuation.
+- **AC-025** [FR-032]: Unplugging the camera with `trigger = vision` gives `camera_*` in `status.errors`. The supervisor keeps serving the UI.
+- **AC-026** [regression]: With `trigger = imu`, every existing behavior and test is unchanged.
+
+**Open decisions (non-blocking):**
+- **Q-06** [FR-028]: final `N`, `T` and `D` after a booth rehearsal.
+- **Q-07** [FR-029]: the refractory default.
+
+**Readiness:** READY for `$plan`. Risk: contact detection quality depends on the HaGRID-trained model (the current COCO-only model has weak wrists and hands).

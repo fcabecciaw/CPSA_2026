@@ -20,7 +20,10 @@ from blue_st_sdk.node import NodeListener, NodeStatus
 from bluepy.btle import BTLEDisconnectError
 
 from cpsa.adapters.ble_lock import ble_reconnection_lock
-from cpsa.adapters.bluecoin.fusion_feature import FeatureMemsSensorFusionCompact
+from cpsa.adapters.bluecoin.fusion_feature import (
+    FeatureMemsSensorFusionCompact,
+    register_fusion_feature,
+)
 from cpsa.adapters.bluecoin.listeners import SampleListener
 from cpsa.domain.model import SampleKind, Side
 from cpsa.ports import SampleCallback
@@ -38,6 +41,7 @@ class BlueCoinSource:
     """``SensorSource`` for the left and right BlueCoin, identified by BLE name."""
 
     def __init__(self, left_name: str, right_name: str):
+        register_fusion_feature()  # before any scan builds the node features
         self._names = {Side.LEFT: left_name, Side.RIGHT: right_name}
         self._nodes: dict[str, Any] = {}
         self._threads: list[BlueCoinThread] = []

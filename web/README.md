@@ -46,6 +46,10 @@ are no font files, images or scripts fetched from the network.
    with confidence 0 are hidden. With no frame it shows “In attesa di
    episodio…”.
 
+Trigger source: when `medical.state.trigger` is `vision` (camera-only mode), the live
+status shows an "Attivazione: telecamera" tile and the IMU tile reads "Non usato (solo
+telecamera)". With `imu`, or when the field is absent (older server), the display is unchanged.
+
 ## Protocol handling
 
 - `src/protocol.ts` is written by hand from `docs/protocol/v1/*.schema.json`.
@@ -86,6 +90,9 @@ skeleton.
 The mock is behind `import.meta.env.DEV` and a dynamic `import()`. Vite removes
 the branch and the module from the production bundle; `web/dist` contains no
 fixture data and no mock badge.
+
+`?mock=1&trigger=vision` replays the camera-only variant (`trigger: vision`, `imu: n/a`,
+camera and vision lines in the connection log).
 
 ## Layout and accessibility
 

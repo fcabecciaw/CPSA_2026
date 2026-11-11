@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import socket as socket_lib
 import threading
 import time
@@ -96,6 +97,20 @@ def publish_state(server: WebServer, topic: str, data: dict[str, Any]) -> None:
     assert done.wait(TIMEOUT_S)
 
 
+def publish_event(server: WebServer, topic: str, data: dict[str, Any]) -> None:
+    """Publish an event through the loop and wait until it has been applied."""
+    loop = server._loop
+    assert loop is not None
+    done = threading.Event()
+
+    def apply() -> None:
+        server._handle_event(topic, dict(data))
+        done.set()
+
+    loop.call_soon_threadsafe(apply)
+    assert done.wait(TIMEOUT_S)
+
+
 def wait_until(predicate: Callable[[], bool], timeout: float = TIMEOUT_S) -> None:
     deadline = time.monotonic() + timeout
     while not predicate():
@@ -143,6 +158,61 @@ def test_connect_receives_hello_then_the_full_snapshot(tmp_path: Path) -> None:
             assert messages[1]["data"]["mode"] == "medical"
 
         run(scenario)
+
+
+def log_event(index: int) -> dict[str, Any]:
+    return {
+        "level": "warning" if index % 7 == 0 else "info",
+        "source": f"bluecoin:CPSA_L{index % 3}",
+        "message": f"connection line {index}",
+    }
+
+
+def test_a_new_client_gets_the_recent_log_events_after_the_snapshot(tmp_path: Path) -> None:
+    """A reconnecting dashboard continues the log timeline it was showing."""
+    with running_server(tmp_path) as (server, _):
+        publish_state(server, "status", status_data())
+        total = server_module.LOG_REPLAY_SIZE + 5
+        for index in range(total):
+            publish_event(server, "log", log_event(index))
+
+        async def scenario() -> list[dict[str, Any]]:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.ws_connect(f"http://127.0.0.1:{server.port}/ws") as ws,
+            ):
+                return [await receive(ws) for _ in range(2 + server_module.LOG_REPLAY_SIZE)]
+
+        messages = run(scenario)
+        assert [message["type"] for message in messages[:2]] == ["hello", "status"]
+        logs = messages[2:]
+        assert [message["type"] for message in logs] == ["log"] * server_module.LOG_REPLAY_SIZE
+        assert [message["data"]["message"] for message in logs] == [
+            f"connection line {index}"
+            for index in range(total - server_module.LOG_REPLAY_SIZE, total)
+        ]
+        for message in messages:
+            validate_server_message(message)
+
+
+def test_a_live_log_event_is_delivered_and_valid(tmp_path: Path) -> None:
+    with running_server(tmp_path) as (server, _):
+        publish_state(server, "status", status_data())
+
+        async def scenario() -> dict[str, Any]:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.ws_connect(f"http://127.0.0.1:{server.port}/ws") as ws,
+            ):
+                await receive(ws)  # hello
+                await receive(ws)  # status
+                publish_event(server, "log", log_event(1))
+                return await receive(ws)
+
+        message = run(scenario)
+        assert message["type"] == "log"
+        assert message["data"] == log_event(1)
+        validate_server_message(message)
 
 
 def test_medical_states_are_not_snapshot_in_idle(tmp_path: Path) -> None:
@@ -225,6 +295,36 @@ def test_mode_set_is_forwarded_with_the_client_seq_and_errors_quote_it(tmp_path:
                 validate_server_message(message)
 
         run(scenario)
+
+
+def test_every_client_command_is_logged_with_type_data_seq_and_peer(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    with running_server(tmp_path) as (server, _):
+
+        async def scenario() -> None:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.ws_connect(f"http://127.0.0.1:{server.port}/ws") as ws,
+            ):
+                await receive(ws)
+                await ws.send_json(
+                    {"v": 1, "type": "mode.set", "seq": 4, "data": {"mode": "medical"}}
+                )
+
+        with caplog.at_level(logging.INFO, logger="cpsa.web"):
+            run(scenario)
+
+    records = [
+        record.getMessage() for record in caplog.records if "Client command" in record.getMessage()
+    ]
+    assert any(
+        "type=mode.set" in message
+        and "{'mode': 'medical'}" in message
+        and "seq=4" in message
+        and "peer=127.0.0.1:" in message
+        for message in records
+    ), records
 
 
 def test_four_clients_are_served(tmp_path: Path) -> None:

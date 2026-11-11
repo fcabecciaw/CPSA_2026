@@ -365,6 +365,41 @@ def test_letterbox_rejects_bad_input() -> None:
         unletterbox([], 0.0, (0.0, 0.0))
 
 
+def test_letterbox_uses_the_injected_resize() -> None:
+    image = np.full((90, 160, 3), 80, dtype=np.uint8)
+    calls: list[tuple[tuple[int, ...], int, int]] = []
+
+    def resize(rgb: NDArray[np.uint8], out_height: int, out_width: int) -> NDArray[np.uint8]:
+        calls.append((rgb.shape, out_height, out_width))
+        return np.full((out_height, out_width, 3), 7, dtype=np.uint8)
+
+    letterboxed, scale, pad = letterbox(image, (240, 320), resize=resize)
+
+    assert calls == [((90, 160, 3), 180, 320)]
+    assert scale == pytest.approx(2.0)
+    assert pad == pytest.approx((0.0, 30.0))
+    assert np.all(letterboxed[:30] == 114)
+    assert np.all(letterboxed[30:210] == 7)
+    assert np.all(letterboxed[210:] == 114)
+
+
+def test_numpy_and_opencv_resize_agree_within_one_lsb() -> None:
+    pytest.importorskip("cv2")
+    from cpsa.adapters.pose.resize import LETTERBOX_RESIZE
+
+    assert LETTERBOX_RESIZE is not None
+    rng = np.random.default_rng(7)
+    image = rng.integers(0, 256, size=(480, 640, 3), dtype=np.uint8)
+
+    with_cv2, cv2_scale, cv2_pad = letterbox(image, (384, 512), resize=LETTERBOX_RESIZE)
+    with_numpy, numpy_scale, numpy_pad = letterbox(image, (384, 512))
+
+    assert with_cv2.shape == with_numpy.shape == (384, 512, 3)
+    assert (cv2_scale, cv2_pad) == (numpy_scale, numpy_pad)
+    difference = np.abs(with_cv2.astype(np.int16) - with_numpy.astype(np.int16))
+    assert int(difference.max()) <= 1
+
+
 def test_quantize_fix_point_scales_and_saturates() -> None:
     values = np.array([0.0, 1.0, -1.0, 0.5, -0.5])
 

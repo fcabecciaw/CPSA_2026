@@ -12,6 +12,7 @@ import type {
   HandShape,
   HandSide,
   ImuState,
+  LogLevel,
   Mode,
   ModeState,
   ModeStep,
@@ -25,7 +26,7 @@ export const TAG_LABEL: Record<Tag, string> = {
   NO_CLASS: "Nessuna classe",
   NON_DANGEROUS: "Non pericoloso",
   DANGEROUS: "Pericoloso",
-  NON_STEREOTYPY: "Non stereotipia",
+  NON_STEREOTIPY: "Non stereotipia",
 };
 
 export const VERDICT_LABEL: Record<Verdict, string> = {
@@ -48,6 +49,17 @@ export const IMU_LABEL: Record<ImuState, string> = {
   connected: "Connesso",
   lost: "Perso",
 };
+
+/**
+ * Live-tile copy for the medical activation source (`medical.state.trigger`,
+ * IF-451 revision 2026-11-11). With `imu` the live tiles are unchanged, so
+ * only the camera-only variant has copy.
+ */
+export const TRIGGER_TILE_LABEL = "Attivazione";
+export const TRIGGER_VISION_LABEL = "telecamera";
+
+/** F11: with the camera-only trigger `imu` is "n/a"; it is not an error. */
+export const IMU_UNUSED_LABEL = "Non usato (solo telecamera)";
 
 export const MODE_LABEL: Record<Mode, string> = {
   idle: "Idle",
@@ -75,6 +87,19 @@ export const CAMERA_LABEL: Record<CameraState, string> = {
   ok: "ok",
   missing: "assente",
   error: "errore",
+};
+
+export const LOG_LEVEL_LABEL: Record<LogLevel, string> = {
+  info: "info",
+  warning: "avviso",
+  error: "errore",
+};
+
+/** Icons are paired with the level text, never used as the only cue. */
+export const LOG_LEVEL_ICON: Record<LogLevel, string> = {
+  info: "i",
+  warning: "!",
+  error: "×",
 };
 
 export const ERROR_LABEL: Record<ErrorCode, string> = {

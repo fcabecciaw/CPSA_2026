@@ -17,7 +17,8 @@ stays the single source of the container-side PTQ flow):
    :class:`cpsa.adapters.pose.dpu.DpuPoseEstimator` (RGB, letterbox to the
    deploy input, ``float32 / 255``); the letterbox below is a Python 3.8 port
    of ``cpsa.vision.pose_decode.letterbox`` and is checked bit-for-bit against
-   it by ``tests/unit/test_eval_quant.py`` on the host;
+   it by ``tests/unit/test_eval_quant.py`` on the host (the board's OpenCV
+   resize differs by at most one LSB from this NumPy path);
 3. run the test mode on M val images;
 4. read each output tensor's ``fix_point`` from the exported quantized
    ``.xmodel`` (``fix`` op attribute -- the value the compiler carries to the
@@ -55,6 +56,7 @@ import json
 import sys
 import time
 from collections.abc import Sequence
+from functools import lru_cache
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -76,31 +78,44 @@ DEFAULT_INPUT_SIZE = (480, 640)
 # ---------------------------------------------------------------------------
 
 
-def _resize_bilinear(
-    image: np.ndarray,
-    out_height: int,
-    out_width: int,
-) -> np.ndarray:
-    """Resize an ``(H, W, 3)`` uint8 image with bilinear interpolation."""
+@lru_cache(maxsize=8)
+def _bilinear_table(
+    height: int, width: int, out_height: int, out_width: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Source indices and weights of the runtime's half-pixel-centred resize."""
 
-    height, width = image.shape[:2]
-    if (height, width) == (out_height, out_width):
-        return image.copy()
     y = (np.arange(out_height, dtype=np.float64) + 0.5) * (height / out_height) - 0.5
     x = (np.arange(out_width, dtype=np.float64) + 0.5) * (width / out_width) - 0.5
     y0 = np.clip(np.floor(y).astype(np.intp), 0, height - 1)
     x0 = np.clip(np.floor(x).astype(np.intp), 0, width - 1)
     y1 = np.clip(y0 + 1, 0, height - 1)
     x1 = np.clip(x0 + 1, 0, width - 1)
-    wy = np.clip(y - y0, 0.0, 1.0)[:, None, None]
-    wx = np.clip(x - x0, 0.0, 1.0)[None, :, None]
-    top_left = image[y0][:, x0].astype(np.float64)
-    top_right = image[y0][:, x1].astype(np.float64)
-    bottom_left = image[y1][:, x0].astype(np.float64)
-    bottom_right = image[y1][:, x1].astype(np.float64)
-    top = top_left * (1.0 - wx) + top_right * wx
-    bottom = bottom_left * (1.0 - wx) + bottom_right * wx
-    resized = top * (1.0 - wy) + bottom * wy
+    wy = np.clip(y - y0, 0.0, 1.0).astype(np.float32)[:, None, None]
+    wx = np.clip(x - x0, 0.0, 1.0).astype(np.float32)[None, :, None]
+    for array in (y0, y1, wy, x0, x1, wx):
+        array.setflags(write=False)
+    return y0, y1, wy, x0, x1, wx
+
+
+def _resize_bilinear(
+    image: np.ndarray,
+    out_height: int,
+    out_width: int,
+) -> np.ndarray:
+    """Resize an ``(H, W, 3)`` uint8 image with bilinear interpolation.
+
+    Same vertical-then-horizontal float32 passes as the runtime, so the calib
+    and test-mode inputs match ``cpsa.vision.pose_decode.letterbox`` bit for bit
+    (the board's injected OpenCV resize is within one LSB of it).
+    """
+
+    height, width = image.shape[:2]
+    if (height, width) == (out_height, out_width):
+        return image.copy()
+    y0, y1, wy, x0, x1, wx = _bilinear_table(height, width, out_height, out_width)
+    source = image.astype(np.float32)
+    rows = source[y0] * (np.float32(1.0) - wy) + source[y1] * wy
+    resized = rows[:, x0] * (np.float32(1.0) - wx) + rows[:, x1] * wx
     return np.clip(np.rint(resized), 0, 255).astype(np.uint8)
 
 

@@ -27,6 +27,9 @@ from cpsa.vision.types import EpisodeReport, KeypointLayout, TrackedFrame
 #: ``medical.state.imu`` and ``Mode.health()["imu"]`` values (IF-301, F4).
 ImuStatus = Literal["n/a", "searching", "connected", "lost"]
 
+#: ``medical.state.trigger``: the episode trigger source (FR-026, F11).
+Trigger = Literal["imu", "vision"]
+
 #: Distinctive actuator-policy parameter keys, used only when the id prefix is unknown.
 _KIND_BY_PARAM: Final[Mapping[str, ActuatorKind]] = {
     "file": ActuatorKind.SPEAKER,
@@ -96,13 +99,20 @@ def state(
     tag: Tag | None,
     episode: Mapping[str, Any] | None,
     last_decision: Mapping[str, Any] | None,
+    *,
+    trigger: Trigger = "imu",
 ) -> dict[str, Any]:
-    """Build the ``medical.state`` payload (IF-451)."""
+    """Build the ``medical.state`` payload (IF-451).
+
+    ``trigger`` is the configured episode trigger source; with ``vision`` the
+    mode is camera-only and ``imu`` is ``"n/a"`` (F11).
+    """
     return {
         "imu": imu,
         "tag": None if tag is None else tag.name,
         "episode": None if episode is None else dict(episode),
         "last_decision": None if last_decision is None else dict(last_decision),
+        "trigger": trigger,
     }
 
 

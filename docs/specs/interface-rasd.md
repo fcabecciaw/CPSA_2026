@@ -293,3 +293,11 @@ Frontend visuals are out of scope; the fields they need are reserved here.
 **Nonblocking risks:**
 - The 30 Hz full-state messages on the A53 CPU need NFR-I1 checked on the board.
 - glTF node naming depends on the asset sourcing.
+
+## Revision 2026-11-11: camera-only medical trigger (protocol v1, compatible addition)
+
+- **IF-451 ADDED field:** `medical.state.trigger` is `"imu"` or `"vision"`.
+  - With `"vision"`, `imu` is `"n/a"` and `tag` is the latest vision-derived tag.
+  - Clients that do not know the field ignore it (IF-103).
+- **IF-301:** with `trigger = vision`, `status.imu` is `"n/a"`.
+- **IF-452:** with `trigger = vision`, `medical.decision.tag` is the vision tag, `verdict` is `"CONFIRMED"`, and `vision` carries the assessment.

@@ -16,7 +16,7 @@ from typing import Any
 
 from cpsa.domain.model import DecisionRecord, Tag
 from cpsa.ports import Clock, Publisher
-from cpsa.protocol.medical import ImuStatus, decision, episode, hands, state
+from cpsa.protocol.medical import ImuStatus, Trigger, decision, episode, hands, state
 from cpsa.vision.types import EpisodeReport, KeypointLayout, TrackedFrame
 
 logger = logging.getLogger(__name__)
@@ -35,6 +35,7 @@ class WebGui:
         layout: keypoint layout of the pose model used by the verifier.
         frame_w, frame_h: camera frame size in pixels, for ``medical.hands``.
         clock: monotonic clock shared with the runtime, for the 15 Hz throttle.
+        trigger: episode trigger source reported in ``medical.state`` (F11).
     """
 
     def __init__(
@@ -44,12 +45,15 @@ class WebGui:
         frame_w: int,
         frame_h: int,
         clock: Clock,
+        *,
+        trigger: Trigger = "imu",
     ) -> None:
         self._publisher = publisher
         self._layout = layout
         self._frame_w = int(frame_w)
         self._frame_h = int(frame_h)
         self._clock = clock
+        self._trigger = trigger
         self._lock = threading.Lock()
         self._tag: Tag | None = None
         self._last_decision: dict[str, Any] | None = None
@@ -135,7 +139,7 @@ class WebGui:
             tag = self._tag
             episode_state = None if self._episode is None else dict(self._episode)
             last_decision = None if self._last_decision is None else dict(self._last_decision)
-        return state(imu, tag, episode_state, last_decision)
+        return state(imu, tag, episode_state, last_decision, trigger=self._trigger)
 
     # -- publisher calls ---------------------------------------------------
 

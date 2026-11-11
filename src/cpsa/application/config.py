@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TypeVar
+from typing import Literal, TypeVar, cast
 
 import yaml
 
@@ -27,10 +27,21 @@ from cpsa.vision.oscillation import OscillationConfig
 from cpsa.vision.skeleton import SkeletonConfig
 from cpsa.vision.subject import SubjectConfig
 from cpsa.vision.tracker2d import Tracker2DConfig
+from cpsa.vision.trigger import TriggerConfig
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 VISION_MODEL_KINDS = ("onnx", "xmodel")
 SUPERVISOR_MODES = ("idle", "medical")
+MEDICAL_TRIGGERS = ("imu", "vision")
+"""Episode trigger sources (FR-026)."""
+
+TriggerMode = Literal["imu", "vision"]
+DEFAULT_CAMERA_MATCH = "F200"
+"""Card-name fragment used when ``vision.camera.device`` is ``auto``.
+
+The adapters own the discovery itself; the application layer may not import
+them, so the default the demo camera reports is repeated here.
+"""
 EnumT = TypeVar("EnumT", bound=Enum)
 
 
@@ -136,9 +147,14 @@ class VisionModelConfig:
 
 @dataclass(frozen=True)
 class VisionCameraConfig:
-    """RGB-only UVC camera settings used by the vision pipeline."""
+    """RGB-only UVC camera settings used by the vision pipeline.
+
+    ``device`` may be ``auto``; ``match`` is the card-name fragment that
+    :attr:`cpsa.adapters.camera.devices.resolve_device` looks for then.
+    """
 
     device: str
+    match: str
     width: int
     height: int
     fps: float
@@ -227,6 +243,20 @@ class SupervisorConfig:
 
 
 @dataclass(frozen=True)
+class MedicalConfig:
+    """Episode trigger source and the vision-trigger thresholds (FR-026..FR-030).
+
+    A document without a ``medical`` section means ``trigger: imu``. With
+    ``trigger: vision`` the medical mode runs camera-only: it never scans for or
+    connects to a BlueCoin. The thresholds are the validated Task F7 dataclass;
+    ``vision_trigger.refractory_s`` defaults to ``dispatch.cooldown_s``.
+    """
+
+    trigger: TriggerMode = "imu"
+    vision_trigger: TriggerConfig = field(default_factory=TriggerConfig)
+
+
+@dataclass(frozen=True)
 class Config:
     log: LogConfig
     bluecoins: BlueCoinsConfig
@@ -235,6 +265,7 @@ class Config:
     actuators: ActuatorsConfig
     camera: CameraConfig
     vision: VisionConfig
+    medical: MedicalConfig = field(default_factory=MedicalConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     supervisor: SupervisorConfig = field(default_factory=SupervisorConfig)
 
@@ -275,13 +306,17 @@ def parse(data: object) -> Config:
         if supervisor_section is not None
         else SupervisorConfig()
     )
+    cooldown_s = dispatch.positive("cooldown_s")
     verification_deadline_s = dispatch.positive("verification_deadline_s")
+    medical = _medical_config(root.optional_section("medical"), cooldown_s)
 
     if vision.fast_budget_s >= verification_deadline_s:
         raise ConfigError(
             "vision.fast_budget_s",
             "must be less than dispatch.verification_deadline_s",
         )
+    if medical.trigger == "vision" and not vision.enabled:
+        raise ConfigError("medical.trigger", "vision requires vision.enabled: true")
 
     config = Config(
         log=LogConfig(
@@ -300,7 +335,7 @@ def parse(data: object) -> Config:
             stale_ms=sync.positive("stale_ms"),
         ),
         dispatch=DispatchConfig(
-            cooldown_s=dispatch.positive("cooldown_s"),
+            cooldown_s=cooldown_s,
             verification_deadline_s=verification_deadline_s,
         ),
         actuators=ActuatorsConfig(
@@ -332,6 +367,7 @@ def parse(data: object) -> Config:
             ),
         ),
         vision=vision,
+        medical=medical,
         server=server,
         supervisor=supervisor,
     )
@@ -370,6 +406,30 @@ def _supervisor_config(supervisor: _Section) -> SupervisorConfig:
     """Build the validated optional ``supervisor`` section."""
     config = SupervisorConfig(default_mode=supervisor.choice("default_mode", SUPERVISOR_MODES))
     supervisor.reject_unknown()
+    return config
+
+
+def _medical_config(medical: _Section | None, cooldown_s: float) -> MedicalConfig:
+    """Build the validated optional ``medical`` section (F9).
+
+    An absent section is the IMU trigger with the default thresholds. A null
+    ``vision_trigger.refractory_s`` means ``dispatch.cooldown_s``.
+    """
+    if medical is None:
+        return MedicalConfig(vision_trigger=TriggerConfig(refractory_s=cooldown_s))
+    trigger = medical.choice("trigger", MEDICAL_TRIGGERS)
+    thresholds = medical.section("vision_trigger")
+    config = MedicalConfig(
+        trigger=cast(TriggerMode, trigger),
+        vision_trigger=TriggerConfig(
+            min_contacts=thresholds.positive_int("min_contacts"),
+            contact_window_s=thresholds.positive("contact_window_s"),
+            oscillation_min_s=thresholds.positive("oscillation_min_s"),
+            refractory_s=thresholds.optional_non_negative("refractory_s", cooldown_s),
+        ),
+    )
+    for section in (medical, thresholds):
+        section.reject_unknown()
     return config
 
 
@@ -488,6 +548,7 @@ def _vision_config(vision: _Section) -> VisionConfig:
             ),
             camera=VisionCameraConfig(
                 device=camera.text("device"),
+                match=camera.optional_text("match", DEFAULT_CAMERA_MATCH),
                 width=camera.positive_int("width"),
                 height=camera.positive_int("height"),
                 fps=camera.positive("fps"),
@@ -579,6 +640,12 @@ class _Section:
             raise ConfigError(self._key(name), "expected a non-empty string")
         return value
 
+    def optional_text(self, name: str, default: str) -> str:
+        """Return the non-empty string at ``name``, or ``default`` when absent."""
+        if name not in self._data:
+            return default
+        return self.text(name)
+
     def choice(self, name: str, options: tuple[str, ...]) -> str:
         value = self.text(name)
         if value not in options:
@@ -620,6 +687,13 @@ class _Section:
         if number > 1.0:
             raise ConfigError(self._key(name), "expected a number between 0 and 1")
         return number
+
+    def optional_non_negative(self, name: str, default: float) -> float:
+        """Return the non-negative number at ``name``, or ``default`` when it is null or absent."""
+        if name not in self._data or self._data[name] is None:
+            self._used.add(name)
+            return default
+        return self.non_negative(name)
 
     def pair(self, name: str) -> tuple[float, float]:
         value = self._get(name)

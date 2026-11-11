@@ -42,8 +42,8 @@ actuators:
     duration_ms: 2500              # LED turns itself off after this time
 
 camera:                            # Creative VF0800 (Intel RealSense F200) over V4L2
-  rgb_device: /dev/video0          # RGB node, YUYV 640x480 @ 30 fps
-  depth_device: /dev/video2        # depth node, Z16 640x480 @ 30 fps
+  rgb_device: auto                 # auto: node whose card contains F200 and offers YUYV
+  depth_device: auto               # auto: F200 node offering Z16 (survives a USB re-plug)
   width: 640                       # frames are captured at the model input size
   height: 480
   fps: 30
@@ -68,7 +68,8 @@ vision:                            # 2D pose episode analysis on the KV260 DPU
     conf_thr: 0.25                 # minimum person score
     iou_thr: 0.45                  # NMS IoU threshold
   camera:                          # RGB-only UVC node used by the vision pipeline
-    device: /dev/video0
+    device: auto                   # auto: pick the node by card name (USB re-plug safe)
+    match: F200                    # card-name fragment used when device is auto
     width: 640
     height: 480
     fps: 30
@@ -162,3 +163,13 @@ server:
 # F6: mode selected by cpsa-supervisor at startup.
 supervisor:
   default_mode: medical           # idle | medical
+
+# Camera-only medical mode (FR-026): the BlueCoins are never scanned or connected,
+# and the vision trigger starts and ends the episodes instead of the IMU.
+medical:
+  trigger: vision
+  vision_trigger:
+    min_contacts: 2               # N: contacts within the window that start an episode
+    contact_window_s: 10.0        # T: seconds the N contacts must fall within
+    oscillation_min_s: 3.0        # D: seconds of continuous rocking or flapping
+    refractory_s: null            # no new start this long after an episode ends; null = dispatch.cooldown_s

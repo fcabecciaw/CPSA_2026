@@ -179,6 +179,12 @@
           "additionalProperties": true
         }
       ]
+    },
+    "trigger": {
+      "enum": [
+        "imu",
+        "vision"
+      ]
     }
   },
   "required": [
