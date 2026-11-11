@@ -132,7 +132,7 @@ Caution: HaGRID's own `rock` label is the "horns" sign, so it maps to `none`. `n
 
 All are additive. Each is pinned by the named test.
 
-**F-A — `cpsa.vision.irdepth`.** Pinned by `tests/unit/test_irdepth.py` (golden 2×2 `INZI` buffer; CLAHE parameters).
+**F-A — `cpsa.vision.irdepth` (decode, constants) + `cpsa.adapters.camera.irdepth.ir_to_input` (cv2 CLAHE; moved to adapters because the `vision` layer may import only NumPy).** Pinned by `tests/unit/test_irdepth.py` (golden 2×2 `INZI` buffer; CLAHE parameters).
 
 ```python
 INZI_BYTES_PER_PIXEL = 3
@@ -161,7 +161,7 @@ def lift_keypoints(kpts2d, depth_raw, intrinsics: Intrinsics, depth: DepthModel,
 
 `Intrinsics` and `DepthModel` are reused from `cpsa.vision.calibration`.
 
-**F-C — `cpsa.vision.hand_perception.HandPerception`.** Pinned by `tests/application/test_hand_perception.py` with a fake source and a fake estimator.
+**F-C — `cpsa.application.hand_perception.HandPerception`** (moved from `vision` to satisfy `tests/architecture/test_layers.py`; the constructor takes a required keyword `preprocess` callable, and `cpsa.board.hand_modes` passes `ir_to_input`). Pinned by `tests/application/test_hand_perception.py` with a fake source and a fake estimator.
 
 ```python
 HandPerception(source: IrDepthSource-like, estimator: PoseEstimator, intrinsics: Intrinsics,
@@ -288,9 +288,9 @@ The order of priority is T1, then the Kaggle launch, then everything else. T1, T
 **Depends on:** G1 (the base contains the medical work).
 
 **Files:**
-- new `src/cpsa/vision/irdepth.py` (F-A);
+- new `src/cpsa/vision/irdepth.py` (F-A decode and constants; `ir_to_input` lives in `src/cpsa/adapters/camera/irdepth.py`);
 - new `src/cpsa/vision/hand3d.py` (F-B);
-- new `src/cpsa/vision/hand_perception.py` (F-C);
+- new `src/cpsa/application/hand_perception.py` (F-C);
 - `src/cpsa/vision/layouts.py`: add `HAND21` (MediaPipe names `wrist, thumb_cmc…pinky_tip`, the 20 bones) to `LAYOUTS`; existing layouts unchanged;
 - new `IrDepthSource` in `src/cpsa/adapters/camera/f200.py` or a new `irdepth.py` next to it: depth node chosen by the card-name match plus the `INZI` format; 640×480 at 30 fps; XU settings reused from `F200Source` (`confidence=1`, `filter=6`); delivers `(seq, t, ir, depth_raw)` from one thread;
 - tests: `tests/unit/test_irdepth.py`, `tests/unit/test_hand3d.py`, `tests/unit/test_layouts.py` (hand21 cases), `tests/application/test_hand_perception.py`, `tests/contract/test_irdepth_source.py` (fake linuxpy stream, as in `test_uvc_source.py`).
