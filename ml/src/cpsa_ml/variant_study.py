@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,6 +65,7 @@ __all__ = [
     "build_metrics_payload",
     "build_mixed_data_yaml",
     "dataset_root",
+    "log_epoch_time",
     "prepare_study_data",
     "publish_artifacts",
     "train_study",
@@ -791,6 +794,51 @@ def build_metrics_payload(
 # ---------------------------------------------------------------------------
 
 
+def log_epoch_time(trainer: Any) -> None:
+    """Print the wall time of the training loop that just finished.
+
+    ``on_train_epoch_end`` runs before validation and before Ultralytics
+    updates ``trainer.epoch_time``, so the duration is measured from the epoch
+    start it recorded when the loop began.  Under DDP every rank raises the
+    callback; only rank 0 prints, or each epoch would be reported twice.
+
+    Args:
+        trainer: The ``BaseTrainer`` of the running job.
+    """
+
+    if int(os.environ.get("RANK", "-1")) not in {-1, 0}:
+        return
+    now = time.time()
+    started = getattr(trainer, "epoch_time_start", None)
+    seconds = now - started if started is not None else 0.0
+    epoch = int(getattr(trainer, "epoch", 0)) + 1
+    epochs = getattr(trainer, "epochs", None)
+    total = now - getattr(trainer, "train_time_start", now)
+    label = f"{epoch}/{epochs}" if epochs else str(epoch)
+    print(
+        f"[epoch {label}] {seconds:.0f} s of training, {total:.0f} s since training started",
+        flush=True,
+    )
+
+
+def _enable_epoch_timing(model: Any) -> None:
+    """Register :func:`log_epoch_time` on a model, before ``train`` is called.
+
+    Ultralytics 8.4.203 pickles ``trainer.callbacks`` into the script its DDP
+    launcher generates (``ultralytics.utils.dist.generate_ddp_file``) and
+    rebuilds the trainer there with ``_callbacks=...``, so the module-level
+    callback also runs in the ``device="0,1"`` workers.  A model without a
+    callback registry cannot report epochs and is left alone.
+
+    Args:
+        model: ``ultralytics.YOLO`` wrapper.
+    """
+
+    add_callback = getattr(model, "add_callback", None)
+    if add_callback is not None:
+        add_callback("on_train_epoch_end", log_epoch_time)
+
+
 def train_variant(
     entry: VariantEntry, config: StudyConfig, *, data: StudyData | None = None
 ) -> dict[str, Any]:
@@ -837,6 +885,7 @@ def train_variant(
             raise FileNotFoundError(f"resume checkpoint for {entry.name} not found: {checkpoint}")
         print(f"[{entry.name}] resuming from {checkpoint}")
         model = YOLO(str(checkpoint), task="pose", verbose=False)
+        _enable_epoch_timing(model)
         model.train(resume=str(checkpoint))
         # `/kaggle/working` does not survive between sessions: the transfer
         # report of the interrupted run travels next to the published last.pt.
@@ -855,6 +904,7 @@ def train_variant(
 
         model = load_yolo(config.schema, variant="n", activation=entry.activation)
         transfer = transfer_coco_weights(config.coco_weights, model)
+        _enable_epoch_timing(model)
         transfer_path.write_text(json.dumps(transfer, indent=2) + "\n", encoding="utf-8")
         overrides: dict[str, Any] = dict(config.augmentations)
         if custom_augmentations is not None:

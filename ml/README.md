@@ -223,6 +223,21 @@ uv run python -m cpsa_ml.pseudolabel --video clip.mp4 --stride 5 --out data/labe
 * The recordings contain faces: keep them local, record only people who agreed,
   and do not publish the frames.
 
+## Teacher labels for HaGRID (notebook 06)
+
+Notebook 06 (`ml/notebooks/06_teacher_hagrid.ipynb`) downloads the HaGRID 30k-384p sample and labels it with the RTMW-x whole-body teacher of `cpsa_ml.pseudolabel` on a Kaggle T4. It writes `/kaggle/working/hagrid62.tar`: an uncompressed `halfbust62` YOLO-pose dataset with `data.yaml`, `images/{train,val}` and `labels/{train,val}` at the archive root (10 % val by seeded hash), plus 16 rendered samples in `/kaggle/working/samples/`.
+
+GPU use:
+- The install replaces the CPU `onnxruntime` with `onnxruntime-gpu[cuda,cudnn]`, and the first code cell proves a real CUDA session.
+- The labeler runs in its own process, so it repeats the check there. With `--device cuda` it calls `onnxruntime.preload_dlls()` before creating a model and checks `session.get_providers()` on the teacher and the detector. It raises an error instead of silently running about 20x slower on the CPU.
+- The log reports frames/s and an ETA for each chunk.
+
+Run it as a committed version (Save & Run All), then in notebook 04 use **Add Input → Notebook output → 06_teacher_hagrid**. Notebook 04 finds `hagrid62.tar`, extracts it with `cpsa_ml.datasets.staging.stage_archive` and mixes it into training through `EXTRA_DATA`. No dataset needs publishing.
+
+If the CUDA preflight fails, label on the local PC instead: `python -m cpsa_ml.pseudolabel --device cpu --teacher rtmw-l --no-hands --val-fraction 0.1`. This is slow (several frames per minute per core).
+
+Licences: HaGRID is a CC BY-SA 4.0 variant, and the derived labels inherit that notice. The RTMW teacher and rtmlib are Apache-2.0.
+
 ## Training
 
 `cpsa_ml.train.train` is a thin wrapper around `YOLO(cfg).train`:
@@ -289,7 +304,29 @@ the kept crops rises from 27% to 46%, the face share from 48% to 64%. The val
 split stays the full 4,335 GT crops, with 1,497 of them in the `h >= 160` demo
 list. Notebooks 03 and 04 expose `MIN_HEIGHT`, `HAND_REPEAT`, `FACE_REPEAT`,
 `LABELS_ROOT` (a dataset named `cpsa-halfbust-pl`, located by content) and
-`EXTRA_DATA` (a dataset named `cpsa-hagrid62`, empty when absent).
+`EXTRA_DATA` (a dataset named `cpsa-hagrid62`, or notebook 06's
+`hagrid62.tar`, empty when absent).
+
+Notebook 04 trains on the D1 mix (COCO half-bust crops at least 256 px tall
+plus the HaGRID teacher set) and stages only that subset of `cpsa-halfbust`:
+`load_manifest("halfbust62_h256")` reads the gzipped package data
+`cpsa_ml/data/halfbust62_h256.txt.gz`, which lists 16,828 of the 103,996 train
+crops with their labels, all 4,335 val crops and labels, and `data.yaml` (42,327
+paths). `stage_dataset(..., include=...)` copies only those paths after listing
+the mount with `os.walk`, so Kaggle moves ~42k files instead of 216k and reads
+no image header over `/kaggle/input`. Notebook 04's `MIN_HEIGHT = 256` keeps the
+curation height filter on the extra datasets. Regenerate the manifest after
+rebuilding the dataset:
+
+```bash
+python ml/scripts/make_height_manifest.py \
+    --root ~/Downloads/_output_/halfbust62 --min-height 256 \
+    --out ml/src/cpsa_ml/data/halfbust62_h256.txt.gz
+```
+
+The script reads only the JPEG headers, prints the counts (103,996 train crops,
+16,828 at >= 256 px) and writes the sorted POSIX relative paths, gzipped without
+a timestamp so a rerun on the same build is byte-identical.
 
 ### Fine-tuning recipe of the study
 
@@ -384,6 +421,16 @@ the attached `cpsa-halfbust` dataset (it reads `n_half` from its
 `cpsa-fullframe`. Attach both `cpsa-halfbust` and `cpsa-fullframe` to notebooks
 03/04; a missing `cpsa-fullframe` is loud but not fatal (training falls back to
 half-body images only).
+
+**Notebook 06** (`06_teacher_hagrid`) labels the HaGRID 30k-384p sample with
+the RTMW-x whole-body teacher on the GPU and writes one
+`/kaggle/working/hagrid62.tar`. Notebook 04 attaches that output directly
+(**Add Input → Notebook output → `06_teacher_hagrid`**), locates it with
+`find_inputs(INPUT, "hagrid62.tar")` and extracts it locally with
+`staging.stage_archive`, so no dataset version is published between the two
+runs. Its COCO half is the `halfbust62_h256` manifest subset
+(`MIN_HEIGHT = 256`), so staging copies ~42k crops plus one tar instead of 216k
+small files; see "Training-list curation" for the manifest itself.
 
 **Notebook 07** needs no attached dataset: it downloads the HaGRID 384p sample
 and its `annotations_with_landmarks`, plus the Ultralytics hand-keypoints zip
