@@ -131,6 +131,8 @@ def _build_verifier(
             height=camera.height,
             fps=camera.fps,
             exposure=camera.exposure,
+            gain=camera.gain,
+            power_line_hz=camera.power_line_hz,
             match=camera.match,
         )
         pose = _build_pose_estimator(settings, layout)

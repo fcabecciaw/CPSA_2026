@@ -60,6 +60,18 @@ class FakeVerifier:
         self.started = False
         self.stopped = False
         self.health_error: BaseException | None = None
+        self.perf: dict[str, float | int | None] = {
+            "analyzed_fps": 9.4,
+            "camera_fps": 30.0,
+            "decode_ms": 1.8,
+            "preprocess_ms": 0.9,
+            "dpu_ms": 4.2,
+            "postprocess_ms": 1.1,
+            "pose_ms": 6.5,
+            "track_ms": 0.7,
+            "latency_ms": 45.3,
+            "dropped": 2,
+        }
 
     def verify(self, detection: Detection) -> Verdict:
         return Verdict.UNDECIDED
@@ -69,6 +81,9 @@ class FakeVerifier:
 
     def stop(self) -> None:
         self.stopped = True
+
+    def perf_snapshot(self) -> dict[str, float | int | None]:
+        return dict(self.perf)
 
 
 class BlockingRuntime:
@@ -365,8 +380,10 @@ def test_health_reports_the_vision_state_and_the_model_stem(
         health = mode.health()
         assert health["camera"] == "ok"
         assert health["model"] == enabled.vision.model.path.stem
-        assert health["fps"] is None and health["dpu_ms"] is None
-        assert set(health) == {"imu", "camera", "model", "fps", "dpu_ms", "errors"}
+        assert health["fps"] == 9.4
+        assert health["dpu_ms"] == 4.2
+        assert health["timing"] == harness.verifier.perf
+        assert set(health) == {"imu", "camera", "model", "fps", "dpu_ms", "timing", "errors"}
     finally:
         mode.stop(2.0)
 
@@ -382,6 +399,8 @@ def test_health_with_vision_disabled_has_no_camera_or_model(
 
     assert mode.health()["camera"] is None
     assert mode.health()["model"] is None
+    assert mode.health()["fps"] is None
+    assert mode.health()["timing"] is None
 
 
 @pytest.mark.parametrize(

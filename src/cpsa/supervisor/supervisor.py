@@ -318,7 +318,9 @@ class Supervisor:
         return system.status(
             mode=mode,
             mode_state=mode_state,
-            perception={key: health.get(key) for key in ("fps", "dpu_ms", "camera", "model")},
+            perception={
+                key: health.get(key) for key in ("fps", "dpu_ms", "timing", "camera", "model")
+            },
             # Take the IMU from health whatever the mode is called: this layer is
             # mode-agnostic (R-07).
             imu=health.get("imu", "n/a"),

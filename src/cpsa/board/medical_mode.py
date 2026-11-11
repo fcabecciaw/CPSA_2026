@@ -262,10 +262,12 @@ class MedicalMode:
     # -- health ------------------------------------------------------------
 
     def health(self) -> Mapping[str, Any]:
-        """Return the F4 health keys: imu, camera, model, fps, dpu_ms, errors.
+        """Return the F4 health keys: imu, camera, model, fps, dpu_ms, timing, errors.
 
         With ``medical.trigger = vision`` the mode has no IMU, so ``imu`` is
-        always ``"n/a"`` (FR-026, F11).
+        always ``"n/a"`` (FR-026, F11). ``fps``, ``dpu_ms`` and ``timing`` come from
+        the vision verifier's rolling performance snapshot (F12/F13); they are
+        ``None`` when there is no verifier or it has no data yet.
         """
         with self._lock:
             running = self._running
@@ -293,12 +295,14 @@ class MedicalMode:
             if recorded is not None:
                 camera = _camera_code(recorded)
         model = None if not self._config.vision.enabled else self._config.vision.model.path.stem
+        perf = _verifier_perf(verifier)
         return {
             "imu": imu,
             "camera": camera,
             "model": model,
-            "fps": None,
-            "dpu_ms": None,
+            "fps": perf.get("analyzed_fps"),
+            "dpu_ms": perf.get("dpu_ms"),
+            "timing": perf or None,
             "errors": errors,
         }
 
@@ -392,6 +396,26 @@ class MedicalMode:
                     stop()
                 except Exception:
                     logger.exception("Failed to stop the vision verifier")
+
+
+def _verifier_perf(verifier: Verifier | None) -> dict[str, Any]:
+    """Return the verifier's rolling performance snapshot, or ``{}`` (F12).
+
+    ``Verifier`` (F1) has no performance member, so the snapshot is read from the
+    public ``perf_snapshot`` that ``VisionVerifier`` exposes. Implementations without
+    it (the stub, test doubles) report no metrics.
+    """
+    if verifier is None:
+        return {}
+    snapshot = getattr(verifier, "perf_snapshot", None)
+    if not callable(snapshot):
+        return {}
+    try:
+        perf = snapshot()
+    except Exception:
+        logger.exception("Vision verifier performance snapshot failed")
+        return {}
+    return dict(perf) if isinstance(perf, Mapping) else {}
 
 
 def _verifier_camera_error(verifier: Verifier) -> BaseException | None:

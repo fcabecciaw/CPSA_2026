@@ -36,7 +36,7 @@ MEDICAL_TRIGGERS = ("imu", "vision")
 """Episode trigger sources (FR-026)."""
 
 TriggerMode = Literal["imu", "vision"]
-DEFAULT_CAMERA_MATCH = "F200"
+DEFAULT_CAMERA_MATCH = "RealSense"
 """Card-name fragment used when ``vision.camera.device`` is ``auto``.
 
 The adapters own the discovery itself; the application layer may not import
@@ -159,6 +159,10 @@ class VisionCameraConfig:
     height: int
     fps: float
     exposure: int
+    gain: int | None = None
+    """Manual V4L2 ``gain``; ``None`` keeps the camera's value."""
+    power_line_hz: int | None = None
+    """Anti-flicker mains frequency (0 = off, 50, 60); ``None`` keeps the camera's value."""
 
 
 @dataclass(frozen=True)
@@ -233,6 +237,8 @@ class ServerConfig:
     port: int = 8080
     static_dir: Path = Path("web/dist")
     idle_timeout_s: float = 30.0
+    video: bool = False
+    """Serve the analyzed camera frames at ``/video.mjpeg`` (F14); off by default."""
 
 
 @dataclass(frozen=True)
@@ -397,6 +403,7 @@ def _server_config(server: _Section) -> ServerConfig:
         port=server.integer("port", 1, 65535),
         static_dir=Path(server.text("static_dir")).expanduser(),
         idle_timeout_s=server.positive("idle_timeout_s"),
+        video=server.optional_flag("video", False),
     )
     server.reject_unknown()
     return config
@@ -481,6 +488,7 @@ def _vision_config(vision: _Section) -> VisionConfig:
             init_pos_std_px=tracker.positive("init_pos_std_px"),
             init_vel_std_pxps=tracker.positive("init_vel_std_pxps"),
             init_acc_std_pxps2=tracker.positive("init_acc_std_pxps2"),
+            filter=tracker.optional_flag("filter", True),
         )
         analysis_config = AnalysisConfig(
             features=FeatureConfig(
@@ -553,6 +561,8 @@ def _vision_config(vision: _Section) -> VisionConfig:
                 height=camera.positive_int("height"),
                 fps=camera.positive("fps"),
                 exposure=camera.integer("exposure", 1, 10000),
+                gain=camera.optional_integer("gain", 1, 10000),
+                power_line_hz=camera.optional_power_line_hz("power_line_hz"),
             ),
             preroll_s=vision.positive("preroll_s"),
             lookback_s=vision.positive("lookback_s"),
@@ -658,6 +668,12 @@ class _Section:
             raise ConfigError(self._key(name), "expected true or false")
         return value
 
+    def optional_flag(self, name: str, default: bool) -> bool:
+        """Return the boolean at ``name``, or ``default`` when the key is absent."""
+        if name not in self._data:
+            return default
+        return self.flag(name)
+
     def positive(self, name: str) -> float:
         value = self._get(name)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -738,6 +754,19 @@ class _Section:
             raise ConfigError(
                 self._key(name), f"expected an integer between {minimum} and {maximum}"
             )
+        return value
+
+    def optional_integer(self, name: str, minimum: int, maximum: int) -> int | None:
+        """Return the integer at ``name`` in ``[minimum, maximum]``, or ``None`` when absent."""
+        if name not in self._data:
+            return None
+        return self.integer(name, minimum, maximum)
+
+    def optional_power_line_hz(self, name: str) -> int | None:
+        """Return ``0`` (off), ``50`` or ``60`` at ``name``, or ``None`` when absent."""
+        value = self.optional_integer(name, 0, 60)
+        if value is not None and value not in (0, 50, 60):
+            raise ConfigError(self._key(name), "expected 0, 50 or 60")
         return value
 
     def reject_unknown(self) -> None:

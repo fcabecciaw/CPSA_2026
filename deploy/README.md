@@ -138,7 +138,14 @@ The script:
 2. Rsyncs the repository to `kria@HOST:~/cpsa` (excluding `.git`, `ml/`,
    `build/`, `.venv`, `node_modules`, `runs/` and PC caches), then `web/dist`
    and the model to `~/cpsa/models/pose_halfbust62.xmodel`.
-3. Runs `uv sync --frozen --python 3.10 --extra board --extra server --extra vision`
+3. Builds the native Kalman kernel on the board: `cc -O2 -std=c99 -fPIC
+   -shared` from `native/kalman2d/kalman2d.c` into
+   `src/cpsa/adapters/native/lib/libcpsa_kalman2d.so` (see
+   [The native Kalman kernel](#the-native-kalman-kernel)). The build is skipped
+   when that library is newer than the source and the header, and a missing
+   `cc` or a failed compile only warns, because the tracker then uses its NumPy
+   kernel.
+4. Runs `uv sync --frozen --python 3.10 --extra board --extra server --extra vision`
    on the board, in a venv created with `uv venv --system-site-packages`. An
    existing venv without that flag is replaced, because `xir`/`vart` are system
    packages: it is moved to `.venv.bak-<timestamp>` and only then is a new venv
@@ -150,7 +157,7 @@ The script:
    for the camera and evidence clips; `onnxruntime` is pulled in by that extra
    but is not used with `model.kind: xmodel` (the DPU path uses the board's
    `xir`/`vart` bindings).
-4. Re-applies the two board patches that the sync reverts, both idempotent (see
+5. Re-applies the two board patches that the sync reverts, both idempotent (see
    [Board patches](#board-patches-the-deploy-re-applies)): the `blue_st_sdk`
    Python 3.10 fix, as a guarded `sed` on the installed
    `dict_put_single_element.py`, and the debug build of `warble`, built once
@@ -158,13 +165,13 @@ The script:
    `uv pip install --no-build-isolation`, verified with
    `python -c 'import mbientlab.warble'` and reported with the size of
    `libwarble.so`. `--skip-warble` skips the second one.
-5. `sudo -n setcap "cap_net_raw+eip cap_net_admin+eip"` on the venv's
+6. `sudo -n setcap "cap_net_raw+eip cap_net_admin+eip"` on the venv's
    `bluepy-helper`, skipped when `getcap` already reports the capability, and
    prints the result of `getcap`. Without it the IMU reports `imu_not_found`.
-6. Installs both units into `/etc/systemd/system`, runs `daemon-reload` and
+7. Installs both units into `/etc/systemd/system`, runs `daemon-reload` and
    enables them, starts `cpsa-dpu` once, then starts or restarts the supervisor
    exactly once (a `restart` unless `--no-restart`).
-7. Checks `systemctl is-active` for both units, then polls
+8. Checks `systemctl is-active` for both units, then polls
    `http://HOST:8080/health` for up to 120 s and reads the JSON: it requires
    `"mode_state": "running"`, so a 200 that reports `mode_state: failed` (no
    model, no BlueCoin, no camera) fails the deploy with a warning and pointers
@@ -185,10 +192,27 @@ files, but it never opens an SSH connection. A missing local prerequisite is
 reported as a warning in dry-run so that the plan is still printed; a real
 deploy stops there.
 
+## The native Kalman kernel
+
+The tracker's per-frame Kalman predict/update runs in C (`native/kalman2d/kalman2d.c`,
+frozen ABI in `kalman2d.h`; see `docs/plans/native-kalman2d.md`). `uv sync` does
+not build it: step 3 compiles it on the board into
+`~/cpsa/src/cpsa/adapters/native/lib/libcpsa_kalman2d.so`, a git-ignored
+artifact that is also excluded from the rsync, so a host-built x86-64 library
+can never reach the board and shadow the aarch64 one. The step skips the
+compile when that library is newer than both the source and the header, and it
+prints the library path and size; when `cc` is missing or the compile fails it
+warns and continues, because `load_native_kalman()` then logs one WARNING and
+the tracker runs its NumPy kernel (the demo is unaffected). The board's Ubuntu
+22.04 ships `cc` (gcc 11.4), so the build needs no extra package; by hand the
+command is
+`cc -O2 -std=c99 -fPIC -shared -o src/cpsa/adapters/native/lib/libcpsa_kalman2d.so native/kalman2d/kalman2d.c -lm`,
+and `tools/bench_kalman.py` reports the NumPy and native medians (AC-K5).
+
 ## Board patches the deploy re-applies
 
 Two packages on the board need a fix that `uv sync --frozen` undoes on every
-deploy. The bring-up applied them by hand; step 4 of the deploy now applies and
+deploy. The bring-up applied them by hand; step 7 of the deploy now applies and
 verifies both, so a fresh deploy leaves the board in the state the demo needs.
 Both steps live on the board, need no PC-side preparation and are idempotent: a
 second run of the deploy changes nothing.
@@ -331,7 +355,7 @@ PC's `python3 -m pip`. When the sync fails, the script stops and puts the
 previous venv back, so an offline board keeps the demo it had; without
 `--wheels` the sync needs a package index or a warm uv cache.
 
-Offline also covers the debug `warble` (step 4): the sdist in `wheels/` is used
+Offline also covers the debug `warble` (step 7): the sdist in `wheels/` is used
 instead of a download, the sha256 from `uv.lock` is still checked, and
 `setuptools`/`wheel` come from the same directory. The build itself runs on the
 board, so the build tools from One-time board setup must be installed; once the

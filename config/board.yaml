@@ -156,5 +156,6 @@ vision:                            # 2D pose episode analysis; off until a train
 #   port: 8080                       # one port for HTTP and WebSocket
 #   static_dir: web/dist             # built frontend served at / and /assets/
 #   idle_timeout_s: 30               # close a WebSocket with no reads for this long
+#   video: false                     # live camera frames on /video.mjpeg (F14; demo only)
 # supervisor:
 #   default_mode: medical            # mode started at boot: idle or medical

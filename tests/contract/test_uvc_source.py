@@ -219,6 +219,32 @@ def test_invalid_settings_are_rejected(width: int, height: int, fps: float, expo
         )
 
 
+def test_gain_and_power_line_controls_are_applied_when_configured() -> None:
+    stream = FakeStream([_Captured(ts=1.0, data=yuyv(8, 4, 128), monotonic=True)])
+    source, _ = make_source(stream, gain=160, power_line_hz=50)
+    frames: list[VideoFrame] = []
+    source.start(frames.append)
+    try:
+        wait_until(lambda: len(frames) == 1)
+    finally:
+        source.stop()
+
+    assert stream.controls == {
+        "auto_exposure": 1,
+        "exposure_time_absolute": 300,
+        "gain": 160,
+        "power_line_frequency": 1,
+    }
+
+
+@pytest.mark.parametrize(("gain", "power_line_hz"), [(0, None), (None, 55)])
+def test_invalid_gain_or_power_line_is_rejected(
+    gain: int | None, power_line_hz: int | None
+) -> None:
+    with pytest.raises(ValueError):
+        make_source(FakeStream([]), gain=gain, power_line_hz=power_line_hz)
+
+
 def test_decode_yuyv_rejects_a_truncated_buffer() -> None:
     with pytest.raises(ValueError):
         decode_yuyv(b"\x80\x80", 8, 4)
@@ -228,8 +254,8 @@ def test_auto_device_opens_the_node_selected_from_the_listing(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     listing = [
-        VideoNode("/dev/video0", "F200 Depth", frozenset({"Z16"})),
-        VideoNode("/dev/video3", "F200 RGB", frozenset({"YUYV"})),
+        VideoNode("/dev/video0", "Intel(R) RealSense(TM) 3D Camer", frozenset({"Z16"})),
+        VideoNode("/dev/video3", "Intel(R) RealSense(TM) 3D Camer", frozenset({"YUYV"})),
     ]
     source = UvcVideoSource(
         "auto",
@@ -248,7 +274,7 @@ def test_auto_device_opens_the_node_selected_from_the_listing(
 
 
 def test_auto_device_resolves_again_on_a_restart() -> None:
-    listing = [VideoNode("/dev/video0", "F200 RGB", frozenset({"YUYV"}))]
+    listing = [VideoNode("/dev/video0", "Intel(R) RealSense(TM) 3D Camer", frozenset({"YUYV"}))]
     factory = Factory(FakeStream([]))
     source = UvcVideoSource(
         "auto",
@@ -261,7 +287,7 @@ def test_auto_device_resolves_again_on_a_restart() -> None:
     )
     source.start(lambda frame: None)
     source.stop()
-    listing[0] = VideoNode("/dev/video1", "F200 RGB", frozenset({"YUYV"}))
+    listing[0] = VideoNode("/dev/video1", "Intel(R) RealSense(TM) 3D Camer", frozenset({"YUYV"}))
     source.start(lambda frame: None)
     source.stop()
 

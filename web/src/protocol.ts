@@ -96,11 +96,34 @@ export interface HelloPayload {
   models: ModelInfo[];
 }
 
+/**
+ * F13 `status.perception.timing`: the verifier's rolling performance window.
+ * Every stage is milliseconds (fps for the two rates) and may be `null` when
+ * the estimator does not report it; `dropped` is a cumulative integer.
+ */
+export interface PerceptionTiming {
+  analyzed_fps: number | null;
+  camera_fps: number | null;
+  decode_ms: number | null;
+  preprocess_ms: number | null;
+  dpu_ms: number | null;
+  postprocess_ms: number | null;
+  pose_ms: number | null;
+  track_ms: number | null;
+  latency_ms: number | null;
+  dropped: number;
+}
+
 export interface Perception {
   fps: number | null;
   dpu_ms: number | null;
   camera: CameraState | null;
   model: string | null;
+  /**
+   * Optional since F13: an older server omits it, so `null` means "not sent",
+   * not an error. The status bar then falls back to `fps` and `dpu_ms`.
+   */
+  timing: PerceptionTiming | null;
 }
 
 export interface StatusPayload {
@@ -201,6 +224,12 @@ export interface HandsPayload {
   h: number;
   keypoints: Keypoint[];
   subject_box: [number, number, number, number] | null;
+  /**
+   * F14: the analyzed frame sequence number this pose belongs to, the same
+   * value the video stream sends as `X-Frame-Seq`. Additive and optional, so
+   * an older server yields `null`.
+   */
+  seq: number | null;
 }
 
 interface Envelope<T extends string, P> {
@@ -372,10 +401,45 @@ function parseStatus(data: JsonObject): StatusPayload {
       dpu_ms: nullableNumberField(perception, "dpu_ms"),
       camera: nullableEnumField(perception, "camera", CAMERA_STATES),
       model: nullableStringField(perception, "model"),
+      timing: parseTiming(perception.timing),
     },
     imu: enumField(data, "imu", IMU_STATES),
     errors: reqArray(data, "errors", (value) => enumValue(value, ERROR_CODES, "errors[]")),
     uptime_s: reqNumber(data, "uptime_s"),
+  };
+}
+
+/**
+ * F13 `status.perception.timing`, parsed leniently on purpose: the field is
+ * additive, so an absent value (older server), a non-object or a single bad
+ * entry must never drop the whole `status` message. A bad entry becomes
+ * `null` (rendered as "—"); a bad `dropped` becomes 0, since the contract
+ * always carries an integer there.
+ */
+function parseTiming(value: unknown): PerceptionTiming | null {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const timing = value as JsonObject;
+  const stage = (key: string): number | null => {
+    const raw = timing[key];
+    return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+  };
+  const dropped = timing.dropped;
+  return {
+    analyzed_fps: stage("analyzed_fps"),
+    camera_fps: stage("camera_fps"),
+    decode_ms: stage("decode_ms"),
+    preprocess_ms: stage("preprocess_ms"),
+    dpu_ms: stage("dpu_ms"),
+    postprocess_ms: stage("postprocess_ms"),
+    pose_ms: stage("pose_ms"),
+    track_ms: stage("track_ms"),
+    latency_ms: stage("latency_ms"),
+    dropped:
+      typeof dropped === "number" && Number.isInteger(dropped) && dropped >= 0
+        ? dropped
+        : 0,
   };
 }
 
@@ -504,7 +568,14 @@ function parseHands(data: JsonObject): HandsPayload {
       return [x, y, conf];
     }),
     subject_box: parseSubjectBox(data.subject_box),
+    // F14: additive frame counter; a value a newer server shapes differently
+    // must not cost the pose, so anything but a non-negative integer is null.
+    seq: optionalSequence(data.seq),
   };
+}
+
+function optionalSequence(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
 }
 
 function parseSubjectBox(value: unknown): [number, number, number, number] | null {

@@ -54,8 +54,10 @@ p {
   overflow-wrap: break-word;
 }
 
+/* Desktop and booth: the dashboard fits the window; panels clip or scroll inside. */
 .app {
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   gap: clamp(10px, 0.8vw, 18px);
@@ -266,6 +268,46 @@ p {
   font-weight: 700;
 }
 
+.health-note {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+/* --- Timings (F13) ------------------------------------------------------- */
+
+.timing {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.15rem 0.7rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.timing-label {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.timing-item {
+  display: flex;
+  gap: 0.26rem;
+  font-size: 0.7rem;
+}
+
+.timing-key {
+  color: var(--muted);
+}
+
+.timing-value {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .tone-ok {
   color: var(--ok);
 }
@@ -309,6 +351,7 @@ p {
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(300px, 0.95fr) minmax(430px, 1.35fr) minmax(340px, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: clamp(10px, 0.8vw, 16px);
 }
 
@@ -760,9 +803,58 @@ p {
 }
 
 .canvas-wrap canvas {
+  /* Positioned and stacked so it paints over the absolutely placed video. */
+  position: relative;
+  z-index: 1;
   display: block;
   width: 100%;
   height: 100%;
+}
+
+/*
+ * F14 camera stream, under the transparent canvas. Sizing and mirroring are
+ * written inline by `SkeletonView`, reusing the skeleton's letterbox and
+ * mirror math, so the bones land on the person in the image.
+ */
+.video {
+  position: absolute;
+  top: 0;
+  left: 0;
+  max-width: none;
+  max-height: none;
+  object-fit: fill;
+  pointer-events: none;
+  user-select: none;
+  transform: scaleX(-1);
+  transform-origin: center;
+}
+
+.video[hidden] {
+  display: none;
+}
+
+.video-note {
+  position: absolute;
+  bottom: 0.5rem;
+  left: 0.55rem;
+  margin: 0;
+  padding: 0.12rem 0.45rem;
+  color: var(--muted-strong);
+  font-size: 0.7rem;
+  font-weight: 600;
+  background: rgb(7 13 23 / 75%);
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+.video-note[hidden] {
+  display: none;
+}
+
+/* With the stream visible the empty-state scrim would dim the camera frame. */
+.canvas-wrap.has-video .canvas-empty {
+  background: transparent;
+  text-shadow: 0 1px 4px rgb(0 0 0 / 85%);
 }
 
 .canvas-empty {
@@ -880,11 +972,17 @@ noscript {
   }
 
   .skeleton-panel {
-    min-height: 22rem;
+    min-height: 18rem;
   }
 }
 
 @media (max-width: 780px) {
+  /* Phones stack the panels: let the page scroll instead of fitting it. */
+  .app {
+    height: auto;
+    min-height: 100vh;
+  }
+
   .masthead {
     grid-template-columns: 1fr;
   }

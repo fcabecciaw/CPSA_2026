@@ -8,10 +8,22 @@
     "mode": "medical",
     "mode_state": "running",
     "perception": {
-      "fps": null,
-      "dpu_ms": null,
+      "fps": 9.5,
+      "dpu_ms": 4.2,
       "camera": "ok",
-      "model": "pose_halfbust62"
+      "model": "pose_halfbust62",
+      "timing": {
+        "analyzed_fps": 9.5,
+        "camera_fps": 30.0,
+        "decode_ms": 1.8,
+        "preprocess_ms": 0.9,
+        "dpu_ms": 4.2,
+        "postprocess_ms": 1.1,
+        "pose_ms": 6.5,
+        "track_ms": 0.7,
+        "latency_ms": 45.3,
+        "dropped": 0
+      }
     },
     "imu": "connected",
     "errors": [],

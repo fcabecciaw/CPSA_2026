@@ -154,6 +154,34 @@ def test_references_are_returned_as_a_copy() -> None:
     assert model.reference_fw["left_forearm"] == pytest.approx(1.0)
 
 
+def test_cached_references_follow_new_samples_and_reset() -> None:
+    model = _model(ref_min_frames=10, ref_frames=10)  # never freezes: samples keep changing
+    _collect(model, frames=1)
+    assert dict(model.reference_fw) == pytest.approx({name: 1.0 for name in model.reference_fw})
+
+    _collect(model, frames=1, scale=0.5)  # a shorter arm: median of [1.0, 0.5]
+    assert dict(model.reference_fw) == pytest.approx({name: 0.75 for name in model.reference_fw})
+
+    model.reset()
+    assert dict(model.reference_fw) == {}
+
+
+def test_cached_references_are_invalidated_by_restore() -> None:
+    source = _model(ref_min_frames=10, ref_frames=10)
+    _collect(source, frames=1, scale=1.0)
+    _collect(source, frames=2, scale=0.5)
+    expected = dict(source.reference_fw)
+    assert expected["left_forearm"] == pytest.approx(0.5)
+
+    target = _model(ref_min_frames=10, ref_frames=10)
+    _collect(target, frames=3, scale=1.0)
+    assert target.reference_fw["left_forearm"] == pytest.approx(1.0)
+
+    target.restore(source.state())
+    assert dict(target.reference_fw) == pytest.approx(expected)
+    assert dict(target.reference_fw) != pytest.approx({name: 1.0 for name in expected})
+
+
 def test_invalid_shapes_raise() -> None:
     model = _model()
     with pytest.raises(ValueError):

@@ -53,7 +53,13 @@ def test_status_is_schema_valid() -> None:
     )
 
     validate_server_message(_message("status", data))
-    assert data["perception"] == {"fps": 9.5, "dpu_ms": 4.2, "camera": "ok", "model": "pose"}
+    assert data["perception"] == {
+        "fps": 9.5,
+        "dpu_ms": 4.2,
+        "camera": "ok",
+        "model": "pose",
+        "timing": None,
+    }
 
 
 def test_status_fills_not_applicable_perception_values() -> None:
@@ -65,6 +71,73 @@ def test_status_fills_not_applicable_perception_values() -> None:
         "dpu_ms": None,
         "camera": None,
         "model": None,
+        "timing": None,
+    }
+
+
+def test_status_carries_the_performance_snapshot_rounded_to_one_decimal() -> None:
+    snapshot = {
+        "analyzed_fps": 9.456,
+        "camera_fps": 29.96,
+        "decode_ms": 1.84,
+        "preprocess_ms": 0.94,
+        "dpu_ms": 4.24,
+        "postprocess_ms": 1.16,
+        "pose_ms": 6.51,
+        "track_ms": 0.72,
+        "latency_ms": 45.33,
+        "dropped": 3,
+    }
+
+    data = system.status(
+        mode="medical",
+        mode_state="running",
+        perception={"fps": 9.456, "dpu_ms": 4.24, "camera": "ok", "timing": snapshot},
+        imu="connected",
+        errors=[],
+        uptime_s=12.5,
+    )
+
+    validate_server_message(_message("status", data))
+    assert data["perception"]["fps"] == 9.5
+    assert data["perception"]["dpu_ms"] == 4.2
+    assert data["perception"]["timing"] == {
+        "analyzed_fps": 9.5,
+        "camera_fps": 30.0,
+        "decode_ms": 1.8,
+        "preprocess_ms": 0.9,
+        "dpu_ms": 4.2,
+        "postprocess_ms": 1.2,
+        "pose_ms": 6.5,
+        "track_ms": 0.7,
+        "latency_ms": 45.3,
+        "dropped": 3,
+    }
+
+
+def test_status_timing_keeps_every_key_with_nulls_and_no_drops() -> None:
+    data = system.status(
+        mode="medical",
+        mode_state="running",
+        perception={"timing": {"analyzed_fps": None, "dpu_ms": None}},
+        imu="connected",
+        errors=[],
+        uptime_s=1.0,
+    )
+
+    validate_server_message(_message("status", data))
+    timing = data["perception"]["timing"]
+    assert timing == {
+        "analyzed_fps": None,
+        "camera_fps": None,
+        "decode_ms": None,
+        "preprocess_ms": None,
+        "dpu_ms": None,
+        "postprocess_ms": None,
+        "pose_ms": None,
+        "track_ms": None,
+        "latency_ms": None,
+        "dropped": 0,
     }
 
 

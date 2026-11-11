@@ -1,3 +1,4 @@
+import logging
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -508,3 +509,14 @@ def test_a_real_contacts_fire_without_an_actuator_still_publishes_the_decision(
     record = sink.records[0]
     assert record.decision is not None
     assert not record.decision.actuated
+
+
+def test_the_real_vision_start_is_verified_without_a_timeout(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """AC-S3: the start detection is assessed from already-tracked frames."""
+    with caplog.at_level(logging.WARNING, logger="cpsa.vision"):
+        publisher, _ = replay_real_contact_episode(tmp_path, [], end=True)
+
+    assert confirmed_decisions(publisher)
+    assert "timed out" not in caplog.text

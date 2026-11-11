@@ -17,6 +17,7 @@ import {
   REGION_LABEL,
   SIDE_LABEL,
   STATUS_LABELS,
+  TIMING_LABELS,
   TRIGGER_TILE_LABEL,
   TRIGGER_VISION_LABEL,
   actuatorText,
@@ -31,6 +32,7 @@ import {
   tagLabel,
   verdictLabel,
 } from "./labels";
+import type { PerceptionTiming } from "./protocol";
 import { MAX_DECISIONS, MAX_LOGS, type DashboardState } from "./state";
 
 export interface DashboardElements {
@@ -41,6 +43,7 @@ export interface DashboardElements {
   modeStatus: HTMLElement;
   modeError: HTMLElement;
   health: HTMLElement;
+  timing: HTMLElement;
   notice: HTMLElement;
   liveTiles: HTMLElement;
   episodeTitle: HTMLElement;
@@ -61,6 +64,7 @@ export function collectElements(): DashboardElements {
     modeStatus: byId("mode-status"),
     modeError: byId("mode-error"),
     health: byId("health"),
+    timing: byId("timing"),
     notice: byId("notice"),
     liveTiles: byId("live-tiles"),
     episodeTitle: byId("episode-title"),
@@ -147,6 +151,8 @@ export function renderMode(
       connection.phase === "open"
         ? "In attesa dello stato dal server…"
         : "In attesa di connessione…";
+    // Clear the camera/FPS/timing readouts with the lost snapshot.
+    renderHealth(elements, state);
     return;
   }
 
@@ -180,6 +186,7 @@ function renderHealth(elements: DashboardElements, state: DashboardState): void 
   clear(elements.health);
   const status = state.status;
   if (status === null) {
+    renderTiming(elements, null);
     return;
   }
 
@@ -213,16 +220,24 @@ function renderHealth(elements: DashboardElements, state: DashboardState): void 
     ),
   );
 
-  const fps = status.perception.fps;
+  // F13: the timing snapshot is the precise source; `fps` and `dpu_ms` stay
+  // as fallbacks for a server that predates the field.
+  const timing = status.perception.timing;
+  const fps = timing?.analyzed_fps ?? status.perception.fps;
+  const cameraFps = timing?.camera_fps ?? null;
   elements.health.appendChild(
     healthItem(
       STATUS_LABELS.fps,
       fps === null ? "—" : `${formatNumber(fps)} fps`,
       fps === null ? "tone-muted" : "tone-ok",
+      cameraFps === null
+        ? undefined
+        : `Fotogrammi analizzati; la telecamera ne produce ${formatNumber(cameraFps)} al secondo`,
+      cameraFps === null ? undefined : `(telecamera ${formatNumber(cameraFps)} fps)`,
     ),
   );
 
-  const dpu = status.perception.dpu_ms;
+  const dpu = timing?.dpu_ms ?? status.perception.dpu_ms;
   elements.health.appendChild(
     healthItem(
       STATUS_LABELS.dpu,
@@ -234,9 +249,59 @@ function renderHealth(elements: DashboardElements, state: DashboardState): void 
   elements.health.appendChild(
     healthItem(STATUS_LABELS.uptime, formatUptime(status.uptime_s), "tone-muted"),
   );
+
+  renderTiming(elements, timing);
 }
 
-function healthItem(key: string, value: string, tone: string, title?: string): HTMLLIElement {
+/**
+ * F13: one compact line with every stage of the analysed frame. A missing
+ * snapshot (older server) or a null stage reads "—", so the line keeps its
+ * position and the operator can tell "no data" from "zero".
+ */
+function renderTiming(elements: DashboardElements, timing: PerceptionTiming | null): void {
+  clear(elements.timing);
+  elements.timing.appendChild(el("li", "timing-label", STATUS_LABELS.timing));
+
+  const average = "media mobile sugli ultimi 5 s";
+  const rows: readonly [string, string, string][] = [
+    [TIMING_LABELS.decode, timingText(timing?.decode_ms), `Decodifica del fotogramma, ${average}`],
+    [TIMING_LABELS.preprocess, timingText(timing?.preprocess_ms), `Pre-elaborazione, ${average}`],
+    [TIMING_LABELS.dpu, timingText(timing?.dpu_ms), `Inferenza sulla DPU, ${average}`],
+    [TIMING_LABELS.postprocess, timingText(timing?.postprocess_ms), `Post-elaborazione, ${average}`],
+    [TIMING_LABELS.track, timingText(timing?.track_ms), `Tracciamento, ${average}`],
+    [TIMING_LABELS.latency, timingText(timing?.latency_ms), `Ritardo dalla cattura alla posa, ${average}`],
+    [
+      TIMING_LABELS.dropped,
+      timing === null ? "—" : formatNumber(timing.dropped, 0),
+      "Fotogrammi scartati dall'avvio (coda di analisi piena)",
+    ],
+  ];
+
+  for (const [label, value, title] of rows) {
+    const item = el("li", "timing-item");
+    item.appendChild(el("span", "timing-key", label));
+    const amount = el(
+      "span",
+      value === "—" ? "timing-value tone-muted" : "timing-value",
+      value,
+    );
+    amount.title = title;
+    item.appendChild(amount);
+    elements.timing.appendChild(item);
+  }
+}
+
+function timingText(value: number | null | undefined): string {
+  return value == null ? "—" : `${formatNumber(value)} ms`;
+}
+
+function healthItem(
+  key: string,
+  value: string,
+  tone: string,
+  title?: string,
+  note?: string,
+): HTMLLIElement {
   const item = el("li", "health-item");
   item.appendChild(el("span", "health-key", key));
   const amount = el("span", `health-value ${tone}`, value);
@@ -244,7 +309,20 @@ function healthItem(key: string, value: string, tone: string, title?: string): H
     amount.title = title;
   }
   item.appendChild(amount);
+  if (note !== undefined) {
+    item.appendChild(el("span", "health-note", note));
+  }
   return item;
+}
+
+/**
+ * F14: the stream belongs to the medical dashboard only, and only while the
+ * camera reports `ok`. Mock mode is excluded by the caller, since there is no
+ * backend to stream from.
+ */
+export function shouldStreamVideo(state: DashboardState): boolean {
+  const status = state.status;
+  return status !== null && status.mode === "medical" && status.perception.camera === "ok";
 }
 
 export function renderNotice(

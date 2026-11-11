@@ -7,10 +7,24 @@ the envelope per connection, so nothing here reads the clock or a socket.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 from cpsa.protocol import PROTOCOL_VERSION
+
+TIMING_KEYS = (
+    "analyzed_fps",
+    "camera_fps",
+    "decode_ms",
+    "preprocess_ms",
+    "dpu_ms",
+    "postprocess_ms",
+    "pose_ms",
+    "track_ms",
+    "latency_ms",
+)
+"""Numeric keys of ``status.perception.timing`` (F12/F13), in snapshot order."""
 
 
 def envelope(
@@ -55,20 +69,50 @@ def status(
     errors: Sequence[str],
     uptime_s: float,
 ) -> dict[str, Any]:
-    """Supervisor ``status`` data (IF-301)."""
+    """Supervisor ``status`` data (IF-301, F13).
+
+    ``perception.timing`` is the vision performance snapshot: ``None`` or an object
+    with exactly the :data:`TIMING_KEYS` plus the cumulative ``dropped`` count. The
+    server always sends the key in medical mode; clients also accept it missing.
+    """
     return {
         "mode": mode,
         "mode_state": mode_state,
         "perception": {
-            "fps": perception.get("fps"),
-            "dpu_ms": perception.get("dpu_ms"),
+            "fps": _rounded(perception.get("fps")),
+            "dpu_ms": _rounded(perception.get("dpu_ms")),
             "camera": perception.get("camera"),
             "model": perception.get("model"),
+            "timing": timing(perception.get("timing")),
         },
         "imu": imu,
         "errors": list(errors),
         "uptime_s": uptime_s,
     }
+
+
+def timing(value: object) -> dict[str, float | int | None] | None:
+    """Normalise a performance snapshot for the wire (F13).
+
+    Returns ``None`` when the mode reported no snapshot, otherwise an object with
+    exactly the F12 keys, each rounded to one decimal or ``None``, and ``dropped`` as
+    a non-negative integer.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    payload: dict[str, float | int | None] = {key: _rounded(value.get(key)) for key in TIMING_KEYS}
+    dropped = value.get("dropped")
+    count = 0 if isinstance(dropped, bool) or not isinstance(dropped, int) else dropped
+    payload["dropped"] = max(0, count)
+    return payload
+
+
+def _rounded(value: object) -> float | None:
+    """Return ``value`` as a finite number rounded to one decimal, or ``None``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return round(number, 1) if math.isfinite(number) else None
 
 
 def mode_progress(mode: str, step: str, error: Mapping[str, str] | None = None) -> dict[str, Any]:

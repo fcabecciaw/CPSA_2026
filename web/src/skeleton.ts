@@ -12,6 +12,20 @@ import type { HandsPayload, Keypoint } from "./protocol";
 export const LAYOUT_NAME = "HALFBUST_62";
 export const EXPECTED_POINTS = 62;
 
+/** F14 stream endpoint, same origin, served by the dashboard's aiohttp server. */
+export const VIDEO_URL = "/video.mjpeg";
+
+/** Copy shown while no stream is running (contract: F14 web consumer). */
+export const VIDEO_PLACEHOLDER = "Video non disponibile";
+
+/** Retry backoff of the `<img>` stream: 2 s, then doubling, capped at 10 s. */
+const RETRY_BASE_MS = 2_000;
+const RETRY_MAX_MS = 10_000;
+
+/** Used only until the first frame reveals the real camera size. */
+const FALLBACK_WIDTH = 640;
+const FALLBACK_HEIGHT = 480;
+
 type Edge = readonly [number, number];
 
 const BODY_EDGES: readonly Edge[] = [
@@ -94,6 +108,9 @@ const HIDDEN_ALPHA = 0;
 
 export class SkeletonView {
   private readonly canvas: HTMLCanvasElement;
+  private readonly wrap: HTMLElement;
+  private readonly video: HTMLImageElement;
+  private readonly videoNote: HTMLElement;
   private readonly empty: HTMLElement;
   private readonly meta: HTMLElement;
   private readonly context: CanvasRenderingContext2D;
@@ -104,15 +121,66 @@ export class SkeletonView {
 
   private hands: HandsPayload | null = null;
 
-  constructor(canvas: HTMLCanvasElement, empty: HTMLElement, meta: HTMLElement) {
+  /** The stream is wanted (medical mode, camera ok, no mock) and not stopped. */
+  private videoWanted = false;
+  /** A stream is attached and its frames paint under the canvas. */
+  private videoLive = false;
+  private videoAttempt = 0;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private readonly onVideoLoad = (): void => {
+    if (!this.videoWanted) {
+      return;
+    }
+    // A fresh frame is flowing: restart the backoff and drop the placeholder.
+    this.videoAttempt = 0;
+    this.videoNote.hidden = true;
+    this.scheduleDraw();
+  };
+
+  private readonly onVideoError = (): void => {
+    if (!this.videoWanted) {
+      return;
+    }
+    this.videoAttempt += 1;
+    const delay = Math.min(RETRY_BASE_MS * 2 ** (this.videoAttempt - 1), RETRY_MAX_MS);
+    this.video.hidden = true;
+    this.videoLive = false;
+    this.videoNote.textContent = `${VIDEO_PLACEHOLDER} · nuovo tentativo tra ${Math.round(delay / 1000)} s`;
+    this.videoNote.hidden = false;
+    this.scheduleDraw();
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+    }
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      if (this.videoWanted) {
+        this.attachVideo();
+      }
+    }, delay);
+  };
+
+  constructor(
+    canvas: HTMLCanvasElement,
+    empty: HTMLElement,
+    meta: HTMLElement,
+    video: HTMLImageElement,
+    videoNote: HTMLElement,
+  ) {
     const context = canvas.getContext("2d");
     if (context === null) {
       throw new Error("Canvas 2D non disponibile in questo browser");
     }
     this.canvas = canvas;
+    this.wrap = canvas.parentElement ?? canvas;
     this.empty = empty;
     this.meta = meta;
+    this.video = video;
+    this.videoNote = videoNote;
     this.context = context;
+
+    this.video.addEventListener("load", this.onVideoLoad);
+    this.video.addEventListener("error", this.onVideoError);
 
     this.observer =
       typeof ResizeObserver === "undefined"
@@ -131,9 +199,57 @@ export class SkeletonView {
     this.draw();
   }
 
+  /**
+   * F14: show the camera stream under the skeleton. The caller decides
+   * availability (medical mode with `perception.camera == "ok"`, never in the
+   * mock); this view owns the retry backoff and the placeholder copy.
+   */
+  setVideo(available: boolean): void {
+    if (available === this.videoWanted) {
+      return;
+    }
+    this.videoWanted = available;
+    if (available) {
+      this.videoAttempt = 0;
+      this.attachVideo();
+    } else {
+      this.detachVideo();
+    }
+  }
+
+  private attachVideo(): void {
+    this.videoLive = true;
+    this.video.hidden = false;
+    this.videoNote.hidden = true;
+    // The retry counter only busts the cache between attempts; the stream
+    // itself ignores the query string.
+    this.video.src = this.videoAttempt === 0 ? VIDEO_URL : `${VIDEO_URL}?retry=${this.videoAttempt}`;
+    this.draw();
+  }
+
+  private detachVideo(): void {
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    this.videoAttempt = 0;
+    this.videoLive = false;
+    this.video.removeAttribute("src");
+    this.video.hidden = true;
+    this.videoNote.textContent = VIDEO_PLACEHOLDER;
+    this.videoNote.hidden = false;
+    this.draw();
+  }
+
   destroy(): void {
     this.observer?.disconnect();
     window.removeEventListener("resize", this.onWindowResize);
+    this.video.removeEventListener("load", this.onVideoLoad);
+    this.video.removeEventListener("error", this.onVideoError);
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
     if (this.drawFrame !== null) {
       cancelAnimationFrame(this.drawFrame);
       this.drawFrame = null;
@@ -219,18 +335,24 @@ export class SkeletonView {
     const context = this.context;
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, rect.width, rect.height);
-    context.fillStyle = COLORS.background;
-    context.fillRect(0, 0, rect.width, rect.height);
+    this.wrap.classList.toggle("has-video", this.videoLive);
+    if (!this.videoLive) {
+      // Over the stream the canvas must stay transparent, so the camera frame
+      // under it is visible and only the bones are painted.
+      context.fillStyle = COLORS.background;
+      context.fillRect(0, 0, rect.width, rect.height);
+    }
 
     const hands = this.hands;
+    this.layoutVideo(hands, rect);
     if (hands === null || hands.layout !== LAYOUT_NAME || hands.keypoints.length === 0) {
       return;
     }
 
-    const view = viewFor(hands);
-    const scale = Math.min(rect.width / view.width, rect.height / view.height);
-    const offsetX = (rect.width - view.width * scale) / 2;
-    const offsetY = (rect.height - view.height * scale) / 2;
+    // Over the camera stream the whole frame is shown (no subject zoom), so the
+    // bones and the mirrored image share one letterbox and stay aligned.
+    const view = this.videoLive ? fullView(hands.w, hands.h) : viewFor(hands);
+    const { scale, offsetX, offsetY } = frameFor(view, rect);
     const mapX = (x: number): number => offsetX + (hands.w - x - view.x) * scale;
     const mapY = (y: number): number => offsetY + (y - view.y) * scale;
     const unit = Math.min(rect.width, rect.height);
@@ -290,6 +412,38 @@ export class SkeletonView {
 
     context.globalAlpha = 1;
   }
+
+  /**
+   * Places the camera frame under the canvas with the exact mapping the bones
+   * use: same letterbox (`frameFor`) and the same horizontal mirroring
+   * (`scaleX(-1)` around the frame's own centre). Keypoints in camera pixels
+   * therefore land on the person in the image. Without a pose yet, the whole
+   * camera frame is used at the image's natural size.
+   */
+  private layoutVideo(hands: HandsPayload | null, rect: DOMRect): void {
+    if (!this.videoLive) {
+      return;
+    }
+    const pose = hands !== null && hands.layout === LAYOUT_NAME ? hands : null;
+    const width =
+      pose !== null
+        ? pose.w
+        : this.video.naturalWidth > 0
+          ? this.video.naturalWidth
+          : FALLBACK_WIDTH;
+    const height =
+      pose !== null
+        ? pose.h
+        : this.video.naturalHeight > 0
+          ? this.video.naturalHeight
+          : FALLBACK_HEIGHT;
+    const { scale, offsetX, offsetY } = frameFor(fullView(width, height), rect);
+
+    this.video.style.width = `${width * scale}px`;
+    this.video.style.height = `${height * scale}px`;
+    this.video.style.left = `${offsetX}px`;
+    this.video.style.top = `${offsetY}px`;
+  }
 }
 
 interface ViewWindow {
@@ -299,11 +453,31 @@ interface ViewWindow {
   height: number;
 }
 
+interface Frame {
+  scale: number;
+  offsetX: number;
+  offsetY: number;
+}
+
+/** Letterbox the camera-pixel window inside the CSS box, centred. */
+function frameFor(view: ViewWindow, rect: { width: number; height: number }): Frame {
+  const scale = Math.min(rect.width / view.width, rect.height / view.height);
+  return {
+    scale,
+    offsetX: (rect.width - view.width * scale) / 2,
+    offsetY: (rect.height - view.height * scale) / 2,
+  };
+}
+
 /**
  * Frame the subject box when the server sends one, so the skeleton fills a
  * booth screen instead of sitting in the middle of the 640×480 camera frame.
  * The mapping stays in camera pixels; this only chooses the visible window.
  */
+function fullView(width: number, height: number): ViewWindow {
+  return { x: 0, y: 0, width, height };
+}
+
 function viewFor(hands: HandsPayload): ViewWindow {
   const full: ViewWindow = { x: 0, y: 0, width: hands.w, height: hands.h };
   const box = hands.subject_box;

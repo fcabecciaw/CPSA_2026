@@ -57,6 +57,7 @@ def running_server(
     *,
     on_command: Callable[[str, dict[str, Any], int | None], None] | None = None,
     idle_timeout_s: float = 30.0,
+    video: bool = False,
 ) -> Iterator[tuple[WebServer, list[tuple[str, dict[str, Any], int | None]]]]:
     static = tmp_path / "dist"
     (static / "assets").mkdir(parents=True)
@@ -74,6 +75,7 @@ def running_server(
         port=0,
         static_dir=static,
         idle_timeout_s=idle_timeout_s,
+        video=video,
     )
     server = WebServer(config, handler, "test-version")
     server.start()
@@ -771,3 +773,132 @@ def test_publisher_drops_events_after_stop(tmp_path: Path) -> None:
     # Publishing after stop must not raise or block.
     server.state("status", status_data())
     server.event("mode.progress", {"mode": "medical", "step": "ready", "error": None})
+
+
+# ---------------------------------------------------------------------------
+# F14: /video.mjpeg
+# ---------------------------------------------------------------------------
+
+
+def camera_frame(seq: int, width: int = 64, height: int = 48) -> Any:
+    """A small RGB frame with a moving block, so different seqs give different JPEGs."""
+    import numpy as np
+
+    image = np.zeros((height, width, 3), dtype=np.uint8)
+    image[:, :, 0] = 40
+    image[8:24, 4 + (seq % 8) * 4 : 24 + (seq % 8) * 4, 1] = 220
+    return image
+
+
+def decode_jpeg(payload: bytes) -> Any:
+    import cv2
+    import numpy as np
+
+    return cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+
+
+async def read_video_part(
+    response: aiohttp.ClientResponse, timeout: float = TIMEOUT_S
+) -> tuple[dict[str, str], bytes]:
+    """Read one multipart part: its headers and its JPEG payload."""
+    header_block = await asyncio.wait_for(response.content.readuntil(b"\r\n\r\n"), timeout=timeout)
+    header_lines = header_block.decode("ascii").split("\r\n")
+    assert header_lines[0] == f"--{server_module.VIDEO_BOUNDARY}", header_lines[0]
+    headers: dict[str, str] = {}
+    for line in header_lines[1:]:
+        if not line:
+            continue
+        name, _, value = line.partition(": ")
+        headers[name] = value
+    length = int(headers["Content-Length"])
+    payload = await asyncio.wait_for(response.content.readexactly(length), timeout=timeout)
+    assert await asyncio.wait_for(response.content.readexactly(2), timeout=timeout) == b"\r\n"
+    return headers, payload
+
+
+def test_video_stream_sends_one_multipart_part_per_offered_frame(tmp_path: Path) -> None:
+    with running_server(tmp_path, video=True) as (server, _):
+
+        async def scenario() -> tuple[dict[str, str], bytes]:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(f"http://127.0.0.1:{server.port}/video.mjpeg") as response,
+            ):
+                assert response.status == 200
+                assert response.headers["Content-Type"] == (
+                    f"multipart/x-mixed-replace; boundary={server_module.VIDEO_BOUNDARY}"
+                )
+                assert response.headers["Cache-Control"] == "no-store"
+                wait_until(lambda: server._video_clients == 1)
+                server.offer_video_frame(1, camera_frame(1))
+                return await read_video_part(response)
+
+        headers, payload = run(scenario)
+
+    assert headers["Content-Type"] == "image/jpeg"
+    assert headers["X-Frame-Seq"] == "1"
+    assert int(headers["Content-Length"]) == len(payload)
+    image = decode_jpeg(payload)
+    assert image is not None
+    assert image.shape == (48, 64, 3)
+
+
+def test_video_stream_serves_a_second_frame_after_the_first(tmp_path: Path) -> None:
+    with running_server(tmp_path, video=True) as (server, _):
+
+        async def scenario() -> list[tuple[dict[str, str], bytes]]:
+            parts: list[tuple[dict[str, str], bytes]] = []
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(f"http://127.0.0.1:{server.port}/video.mjpeg") as response,
+            ):
+                wait_until(lambda: server._video_clients == 1)
+                for seq in (1, 2):
+                    server.offer_video_frame(seq, camera_frame(seq))
+                    parts.append(await read_video_part(response))
+            return parts
+
+        parts = run(scenario)
+
+    assert [int(headers["X-Frame-Seq"]) for headers, _ in parts] == [1, 2]
+    assert all(decode_jpeg(payload) is not None for _, payload in parts)
+
+
+def test_video_endpoint_is_404_json_when_disabled(tmp_path: Path) -> None:
+    with running_server(tmp_path) as (server, _):
+
+        async def scenario() -> tuple[int, dict[str, Any]]:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(f"http://127.0.0.1:{server.port}/video.mjpeg") as response,
+            ):
+                return response.status, await response.json()
+
+        status, body = run(scenario)
+
+    assert status == 404
+    assert body == {"error": "video_disabled"}
+
+
+def test_offered_frames_are_ignored_without_a_client(tmp_path: Path) -> None:
+    with running_server(tmp_path, video=True) as (server, _):
+        server.offer_video_frame(1, camera_frame(1))
+        time.sleep(0.05)
+        assert server._video_latest is None
+        assert server._video_frame is None
+
+
+def test_the_video_request_ends_when_the_client_disconnects(tmp_path: Path) -> None:
+    with running_server(tmp_path, video=True) as (server, _):
+
+        async def scenario() -> None:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(f"http://127.0.0.1:{server.port}/video.mjpeg") as response,
+            ):
+                assert response.status == 200
+                response.close()
+
+        run(scenario)
+        wait_until(lambda: server._video_clients == 0)
+        wait_until(lambda: server._video_encoder is None)

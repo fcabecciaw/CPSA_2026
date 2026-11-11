@@ -8,3 +8,6 @@ __pycache__/
 .ruff_cache/
 build/
 /data/
+# Built on the host by the tests and on the board by deploy/deploy.sh (step 3);
+# never committed, because the two architectures differ.
+src/cpsa/adapters/native/lib/libcpsa_kalman2d.so

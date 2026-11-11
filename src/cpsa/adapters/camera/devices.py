@@ -23,8 +23,12 @@ logger = logging.getLogger(__name__)
 AUTO = "auto"
 """Device value that asks the source to discover its V4L2 node."""
 
-DEFAULT_MATCH = "F200"
-"""Card-name fragment that the demo camera reports over V4L2."""
+DEFAULT_MATCH = "RealSense"
+"""Card-name fragment that the demo camera reports over V4L2.
+
+The kernel truncates the F200 card name to 31 characters
+(``"Intel(R) RealSense(TM) 3D Camer"``), so it never contains ``"F200"``.
+"""
 
 RGB_FOURCC = "YUYV"
 DEPTH_FOURCC = "Z16"

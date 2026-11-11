@@ -206,9 +206,24 @@ class VisionObserver(Protocol):
         ...
 
     def on_tracked(self, tracked: TrackedFrame) -> None:
-        """One analyzed, tracked frame of the active episode."""
+        """One analyzed, tracked frame, during an episode and while watching (F8, F14)."""
         ...
 
     def on_report(self, report: EpisodeReport) -> None:
         """The final report of an episode that just ended."""
+        ...
+
+
+@runtime_checkable
+class VisionFrameObserver(Protocol):
+    """Receives the RGB image of every analyzed camera frame (F14).
+
+    Called from the vision verifier's worker thread, before ``on_tracked``, and only
+    when the observer implements it. The image is the decoded, unmirrored camera frame
+    at camera size: implementations must not copy or encode it on that thread, and must
+    return quickly; the verifier logs and swallows any exception.
+    """
+
+    def on_frame_image(self, seq: int, t: float, rgb: NDArray[np.uint8]) -> None:
+        """One analyzed frame: ``seq`` and camera timestamp ``t``, ``(H, W, 3)`` RGB."""
         ...

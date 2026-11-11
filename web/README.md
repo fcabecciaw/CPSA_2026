@@ -29,7 +29,11 @@ are no font files, images or scripts fetched from the network.
 
 1. **Header and control bar** — UNICA/EOLAB identity, connection state with
    round-trip time, `mode` and `mode_state`, camera/model/errors health, FPS,
-   DPU time and uptime. The operator toggle sends `mode.set` for `idle` or
+   DPU time and uptime. FPS and DPU come from `status.perception.timing` when
+   the server sends it (`fps`/`dpu_ms` are the fallback), with the camera rate
+   as secondary text next to the analysed one. A compact “Tempi” line lists
+   Decodifica, Pre, DPU, Post, Tracking, Latenza and Scartati (“—” when the
+   server reports `null`). The operator toggle sends `mode.set` for `idle` or
    `medical`; `mode.progress` steps and `error` messages appear in the bar.
 2. **Stato live** — IMU state, the current tag (text plus colour), and whether
    an episode is active.
@@ -46,6 +50,15 @@ are no font files, images or scripts fetched from the network.
    with confidence 0 are hidden. With no frame it shows “In attesa di
    episodio…”.
 
+   Under the transparent canvas sits the camera stream (`<img
+   src="/video.mjpeg">`, alt “Video della telecamera”). It is shown only in
+   medical mode with `perception.camera == "ok"`; the image is placed by
+   `SkeletonView` with the same letterbox and the same mirroring as the bones,
+   so keypoints in camera pixels land on the person in the frame. A failed
+   stream shows “Video non disponibile” and retries after 2 s, doubling up to
+   10 s. The mock never opens the stream (`?mock=1` has no backend) and keeps
+   the placeholder.
+
 Trigger source: when `medical.state.trigger` is `vision` (camera-only mode), the live
 status shows an "Attivazione: telecamera" tile and the IMU tile reads "Non usato (solo
 telecamera)". With `imu`, or when the field is absent (older server), the display is unchanged.
@@ -56,6 +69,11 @@ telecamera)". With `imu`, or when the field is absent (older server), the displa
   The parser checks the envelope and each known payload, ignores unknown
   message types and unknown fields (IF-103), and returns `invalid` for
   malformed known messages so the connection bar can report them.
+  `status.perception.timing` (F13) is additive and parsed leniently: missing,
+  `null` or wrongly shaped → `null`, a single bad stage → `null` for that stage,
+  a bad `dropped` → 0, and unknown extra keys are ignored. A malformed
+  load-bearing field (e.g. `status.mode`) still makes the message `invalid`.
+  `medical.hands.seq` (F14) is an optional frame counter, `null` when absent.
 - `src/client.ts` connects to `ws://<host>/ws` (or `wss:` on HTTPS) and stamps
   every command (`ping`, `mode.set`) with a per-connection `seq` starting at 1
   and reset on reconnect, so `error.ref_seq` can identify the command it
@@ -83,9 +101,11 @@ plausible HALFBUST_62 pose at the fixture's 1.4 Hz, ends the episode after 22 s
 with the example contact summary, then starts a new one. It also answers
 `ping` with `pong` and implements `mode.set`/`mode.progress`, including the
 `busy` error; leaving `medical` drops its `medical.*` states, so the tiles go
-back to their “not active” copy. The pose is synthesized in `src/mock.ts`
-because the example frame has all keypoints at one point and would not show the
-skeleton.
+back to their “not active” copy. It reports plausible F13 `timing` values so
+the “Tempi” line and the FPS caption can be built without a server, and it
+never opens the video stream: the skeleton panel keeps its placeholder. The
+pose is synthesized in `src/mock.ts` because the example frame has all
+keypoints at one point and would not show the skeleton.
 
 The mock is behind `import.meta.env.DEV` and a dynamic `import()`. Vite removes
 the branch and the module from the production bundle; `web/dist` contains no
@@ -103,7 +123,9 @@ camera and vision lines in the connection log).
   WCAG AA 4.5:1 contrast threshold (most above 8:1).
 - Severity is always written out (e.g. “Pericoloso”), never colour alone; the
   newest decision also carries the word “ultima”. The skeleton canvas has an
-  `aria-label` describing the number of visible points, and the mode buttons
+  `aria-label` describing the number of visible points, and its stream image an
+  `alt` (“Video della telecamera”) that is hidden with the image; the “Video non
+  disponibile” placeholder is real text, so it is read out. The mode buttons
   expose `aria-pressed` and are disabled during a switch.
 - No animations or flashing patterns are used.
 

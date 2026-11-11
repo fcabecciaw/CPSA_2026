@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any, Final, Literal
 
 from cpsa.domain.model import (
@@ -74,11 +75,18 @@ def episode(report: EpisodeReport) -> dict[str, Any]:
     }
 
 
+# Protocol identifiers of the keypoint layouts (docs/protocol/v1, IF-454): the
+# dashboard draws a skeleton only for the layout id it knows, which differs from
+# the vision code's internal ``KeypointLayout.name``.
+PROTOCOL_LAYOUT_IDS: Final[Mapping[str, str]] = MappingProxyType({"halfbust62": "HALFBUST_62"})
+
+
 def hands(tracked: TrackedFrame, layout: KeypointLayout, w: int, h: int) -> dict[str, Any]:
     """Build the ``medical.hands`` payload for one analyzed frame (IF-454).
 
     Keypoints are in camera-frame pixels, in ``layout`` order. A keypoint the
-    tracker never measured has non-finite coordinates and confidence 0.
+    tracker never measured has non-finite coordinates and confidence 0. ``seq`` is
+    the frame sequence number, the same one the video stream stamps on its parts (F14).
     """
     keypoints = [
         [_coordinate(x), _coordinate(y), _coordinate(conf)]
@@ -86,7 +94,8 @@ def hands(tracked: TrackedFrame, layout: KeypointLayout, w: int, h: int) -> dict
     ]
     box = tracked.box
     return {
-        "layout": layout.name,
+        "seq": int(tracked.seq),
+        "layout": PROTOCOL_LAYOUT_IDS.get(layout.name, layout.name),
         "w": int(w),
         "h": int(h),
         "keypoints": keypoints,

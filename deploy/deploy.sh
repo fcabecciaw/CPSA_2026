@@ -223,6 +223,9 @@ rsync_excludes=(
   --exclude '.pytest_cache/'
   --exclude '.mypy_cache/'
   --exclude '.ruff_cache/'
+  # A host-built Kalman kernel must never reach the board; step 3 builds the
+  # aarch64 one there, and the skip rule below would otherwise trust it.
+  --exclude 'src/cpsa/adapters/native/lib/libcpsa_kalman2d.so'
 )
 run rsync -az "${rsync_opts[@]}" "${rsync_excludes[@]}" "$repo_root/" "${ssh_target}:${REMOTE_HOME}/${REMOTE_DIR}/"
 
@@ -231,13 +234,49 @@ remote "mkdir -p \"${REMOTE_HOME}/${REMOTE_DIR}/models\" \"${REMOTE_HOME}/${REMO
 run rsync -az "${rsync_opts[@]}" --delete "$repo_root/web/dist/" "${ssh_target}:${REMOTE_HOME}/${REMOTE_DIR}/web/dist/"
 run rsync -az "${rsync_opts[@]}" "$model" "${ssh_target}:${REMOTE_HOME}/${REMOTE_DIR}/${REMOTE_MODEL}"
 
+note "step 3: building the native Kalman kernel on the board"
+# The tracker's Kalman kernel is a C artifact, not a Python package, so `uv sync`
+# does not build it. The build is skipped when the board's own library is newer
+# than its sources; a missing compiler or a failed build only warns, because the
+# tracker then runs the NumPy kernel and the demo is unaffected (NFR-001).
+kalman_build=$(sed -e "s|@REMOTE_DIR@|${REMOTE_HOME}/${REMOTE_DIR}|g" <<'REMOTE'
+set -e
+cd "@REMOTE_DIR@" || { echo "deploy: error: cannot change directory to @REMOTE_DIR@" >&2; exit 1; }
+source_file="native/kalman2d/kalman2d.c"
+header_file="native/kalman2d/kalman2d.h"
+library="src/cpsa/adapters/native/lib/libcpsa_kalman2d.so"
+
+if [ ! -f "$source_file" ]; then
+  echo "deploy: warning: $source_file is not in the synced tree, so the native Kalman kernel was not built; the tracker uses its NumPy kernel" >&2
+  exit 0
+fi
+if [ -f "$library" ] && [ "$library" -nt "$source_file" ] &&
+  { [ ! -f "$header_file" ] || [ "$library" -nt "$header_file" ]; }; then
+  echo "deploy: the native Kalman kernel is up to date: $PWD/$library ($(wc -c < "$library") bytes)"
+  exit 0
+fi
+if ! command -v cc >/dev/null 2>&1; then
+  echo "deploy: warning: cc is not installed, so $library was not built; the tracker uses its NumPy Kalman kernel (deploy/README.md)" >&2
+  exit 0
+fi
+mkdir -p "$(dirname "$library")"
+if ! cc -O2 -std=c99 -fPIC -shared -o "$library" "$source_file" -lm; then
+  rm -f "$library"
+  echo "deploy: warning: building $library failed, so the tracker uses its NumPy Kalman kernel (deploy/README.md)" >&2
+  exit 0
+fi
+echo "deploy: built the native Kalman kernel: $PWD/$library ($(wc -c < "$library") bytes)"
+REMOTE
+)
+remote "$kalman_build"
+
 if [[ -n "$wheels" ]]; then
-  note "step 3: syncing offline wheels"
+  note "step 4: syncing offline wheels"
   remote "mkdir -p \"${REMOTE_HOME}/${REMOTE_DIR}/wheels\""
   run rsync -az "${rsync_opts[@]}" "$wheels/" "${ssh_target}:${REMOTE_HOME}/${REMOTE_DIR}/wheels/"
 fi
 
-note "step 4: syncing the Python environment on the board"
+note "step 5: syncing the Python environment on the board"
 # The VART `xir`/`vart` bindings live in the system dist-packages
 # (docs/notes/vart-kv260.md), so the venv must be created with
 # --system-site-packages. A venv made without it cannot import them and the DPU
@@ -278,7 +317,7 @@ fail_venv() {
   exit 1
 }
 
-# A marker left by an earlier deploy must not restore the wrong venv in step 5.
+# A marker left by an earlier deploy must not restore the wrong venv in step 6.
 rm -f .venv.previous
 
 if ! command -v uv >/dev/null 2>&1; then
@@ -322,16 +361,16 @@ fi
 
 if [ -n "$backup" ]; then
   printf '%s\n' "$backup" > .venv.previous
-  echo "deploy: the previous .venv is kept at $PWD/$backup; step 5 puts it back if xir/vart do not import" >&2
+  echo "deploy: the previous .venv is kept at $PWD/$backup; step 6 puts it back if xir/vart do not import" >&2
 fi
 echo "deploy: .venv is ready"
 REMOTE
 )
 remote "$uv_sync"
 
-note "step 5: checking that the VART bindings import from the venv"
+note "step 6: checking that the VART bindings import from the venv"
 # Without xir/vart the DPU pose estimator cannot start; report it here instead of
-# letting the demo fail later with an unrelated error (R-11). When step 4 rebuilt
+# letting the demo fail later with an unrelated error (R-11). When step 5 rebuilt
 # the venv and the bindings still do not import, the previous venv goes back so
 # the board keeps a working demo (R-21).
 check_env=$(sed -e "s|@REMOTE_DIR@|${REMOTE_HOME}/${REMOTE_DIR}|g" <<'REMOTE'
@@ -365,7 +404,7 @@ REMOTE
 )
 remote "$check_env"
 
-note "step 6: restoring the board patches that uv sync reverts"
+note "step 7: restoring the board patches that uv sync reverts"
 # `uv sync --frozen` puts the released packages back, and two of them do not
 # work on this board (bring-up 2026-11-11):
 #   - blue_st_sdk's utils/dict_put_single_element.py uses
@@ -376,8 +415,8 @@ note "step 6: restoring the board patches that uv sync reverts"
 #     "*** buffer overflow detected ***" as soon as the MetaWear connects, so
 #     the debug build is built once from the locked sdist, kept in
 #     ~/cpsa-build and installed again on every deploy.
-# Both steps are idempotent and run after step 5, so the venv they patch is the
-# one the deploy keeps (step 5 moves a venv without xir/vart back out).
+# Both steps are idempotent and run after step 6, so the venv they patch is the
+# one the deploy keeps (step 6 moves a venv without xir/vart back out).
 warble_version=""
 warble_sdist_url=""
 warble_sdist_sha=""
@@ -574,6 +613,10 @@ else
         }
       fi
     fi
+    # setup.py moves the built libwarble.so* into mbientlab/warble/ of the
+    # source tree and refuses to overwrite them ("Destination path ... already
+    # exists"), so a copy left by an earlier deploy breaks this install.
+    rm -f "$src"/mbientlab/warble/libwarble.so*
     echo "deploy: installing the debug warble from $src"
     if ! uv pip install --python .venv/bin/python --no-build-isolation "$src"; then
       echo "deploy: error: uv pip install of the debug warble failed (deploy/README.md)" >&2
@@ -604,7 +647,7 @@ REMOTE
 )
 remote "$post_sync"
 
-note "step 7: granting raw-socket capabilities to the bluepy helper"
+note "step 8: granting raw-socket capabilities to the bluepy helper"
 # Idempotent: the capability is granted only when it is missing. The unit runs as
 # kria, so the capability sits on the helper, not on the service. `sudo -n` keeps
 # the remote shell from hanging on a password prompt (BatchMode SSH has no tty).
@@ -619,7 +662,7 @@ bluepy_caps+=' echo "deploy: capabilities set: $(getcap "$helper")";'
 bluepy_caps+=' else echo "deploy: warning: could not run \"sudo -n setcap\" (password-less sudo is required over BatchMode SSH); run it by hand: sudo setcap \"cap_net_raw+eip cap_net_admin+eip\" $helper (deploy/README.md); the IMU will report imu_not_found" >&2; fi'
 remote "$bluepy_caps"
 
-note "step 8: installing and enabling the systemd units"
+note "step 9: installing and enabling the systemd units"
 units='deploy/systemd/cpsa-dpu.service deploy/systemd/cpsa-supervisor.service'
 remote "set -e; cd \"${REMOTE_HOME}/${REMOTE_DIR}\" || { echo 'deploy: error: cannot change directory to ${REMOTE_HOME}/${REMOTE_DIR}' >&2; exit 1; }; sudo install -m 0644 ${units} /etc/systemd/system/; sudo systemctl daemon-reload; sudo systemctl enable cpsa-dpu.service cpsa-supervisor.service"
 # Enable only, then start each unit once: `enable --now` followed by `restart`
@@ -666,7 +709,7 @@ else
     warn "health reports mode=${mode:-unknown} mode_state=${mode_state:-unknown}, not mode_state=running"
     warn "the files, the units and the venv are installed, but the demo is not running."
     warn "common causes: the DPU app is not loaded, models/pose_halfbust62.xmodel or the"
-    warn "camera is missing, bluepy-helper has no capabilities (see step 7) or no"
+    warn "camera is missing, bluepy-helper has no capabilities (see step 8) or no"
     warn "BlueCoin is powered on."
     warn "inspect: ssh ${ssh_target} 'journalctl -u cpsa-supervisor -e'"
     exit 1

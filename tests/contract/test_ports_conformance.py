@@ -1,6 +1,7 @@
 """Adapters and test fakes satisfy the port protocols they stand in for."""
 
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -9,9 +10,19 @@ from cpsa import ports
 from cpsa.adapters.clock import SystemClock
 from cpsa.adapters.event_log import JsonlEventSink
 from cpsa.adapters.gui_null import NullGui
+from cpsa.adapters.gui_web import WebGui
 from cpsa.adapters.verifier_stub import StubVerifier
 from cpsa.domain.model import DecisionRecord, Detection, Tag, Verdict
+from cpsa.vision.layouts import HALFBUST_62
 from tests import fakes
+
+
+class _Publisher:
+    """The ``Publisher`` member ``WebGui`` needs; it records nothing here."""
+
+    def state(self, type: str, data: Mapping[str, object]) -> None: ...
+
+    def event(self, type: str, data: Mapping[str, object]) -> None: ...
 
 
 @pytest.mark.parametrize(
@@ -29,6 +40,11 @@ from tests import fakes
         (fakes.FakeSensorSource(), ports.SensorSource),
         (fakes.MemorySink(), ports.EventSink),
         (fakes.RecordingGui(), ports.Gui),
+        (WebGui(_Publisher(), HALFBUST_62, 640, 480, fakes.FakeClock()), ports.VisionObserver),
+        (
+            WebGui(_Publisher(), HALFBUST_62, 640, 480, fakes.FakeClock()),
+            ports.VisionFrameObserver,
+        ),
     ],
     ids=lambda value: type(value).__name__,
 )

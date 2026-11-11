@@ -1,16 +1,22 @@
-"""HTTP and WebSocket server for the demo UI (IF-101..205).
+"""HTTP and WebSocket server for the demo UI (IF-101..205, F14).
 
-One port serves the static frontend, ``GET /health`` and the ``/ws`` WebSocket, in
-a dedicated asyncio thread. The server is also the implementation of the
-:class:`cpsa.ports.Publisher` port: producers call :meth:`WebServer.state` and
-:meth:`WebServer.event` from any thread, and each client gets its own envelope,
-``seq`` counter, latest-wins state map and bounded event queue.
+One port serves the static frontend, ``GET /health``, ``GET /video.mjpeg`` and the
+``/ws`` WebSocket, in a dedicated asyncio thread. The server is also the
+implementation of the :class:`cpsa.ports.Publisher` port: producers call
+:meth:`WebServer.state` and :meth:`WebServer.event` from any thread, and each client
+gets its own envelope, ``seq`` counter, latest-wins state map and bounded event
+queue.
+
+The video stream is fed by :meth:`WebServer.offer_video_frame` from the vision
+thread: the newest offered frame is encoded once, off the event loop, and shared by
+every connected client at up to :data:`VIDEO_MAX_FPS` frames per second.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import logging
 import threading
@@ -22,7 +28,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
+import numpy as np
 from aiohttp import WSMsgType, web
+from numpy.typing import NDArray
 
 from cpsa.protocol import PROTOCOL_VERSION, system
 
@@ -50,6 +58,18 @@ CLOSE_TIMEOUT_S = 1.0
 
 LOG_REPLAY_SIZE = 50
 """How many recent ``log`` events are replayed to a newly connected client."""
+
+VIDEO_BOUNDARY = "cpsaframe"
+"""Multipart boundary of ``/video.mjpeg`` (F14)."""
+
+VIDEO_MAX_FPS = 30.0
+"""Encoded frames per second shared by every video client (F14)."""
+
+VIDEO_JPEG_QUALITY = 70
+"""JPEG quality of the streamed frames (F14)."""
+
+VIDEO_DISCONNECT_CHECK_S = 0.5
+"""How often an idle video response checks that its client is still connected."""
 
 MODES = ("idle", "medical")
 CAPABILITIES = (
@@ -85,6 +105,9 @@ class ServerSettings(Protocol):
 
     @property
     def idle_timeout_s(self) -> float: ...
+
+    @property
+    def video(self) -> bool: ...
 
 
 @dataclass(eq=False)
@@ -138,6 +161,16 @@ class WebServer:
             maxlen=MAX_PENDING_PUBLISH
         )
         self._loop_running = False
+        # /video.mjpeg (F14): the newest offered frame, the encoded frame shared by
+        # every client, and the encoder task that runs at most VIDEO_MAX_FPS.
+        self._video_enabled = bool(config.video)
+        self._video_wake: asyncio.Event | None = None
+        self._video_waiters: set[asyncio.Event] = set()
+        self._video_encoder: asyncio.Task[None] | None = None
+        self._video_clients = 0
+        self._video_latest: tuple[int, NDArray[np.uint8]] | None = None
+        self._video_frame: tuple[int, bytes] | None = None
+        self._video_next_encode_at = 0.0
 
     @property
     def port(self) -> int:
@@ -213,6 +246,12 @@ class WebServer:
 
     async def _start_async(self) -> None:
         loop = asyncio.get_running_loop()
+        self._video_wake = asyncio.Event()
+        self._video_waiters.clear()
+        self._video_latest = None
+        self._video_frame = None
+        self._video_clients = 0
+        self._video_next_encode_at = 0.0
         self._runner = web.AppRunner(self._build_app(), access_log=None)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self._config.host, self._config.port)
@@ -233,6 +272,11 @@ class WebServer:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._watchdog
             self._watchdog = None
+        # Wake the video responses so they observe _stopping and return; the runner
+        # cleanup below waits for them, so none outlives this loop.
+        for waiter in self._video_waiters:
+            waiter.set()
+        await self._stop_video_encoder()
         for client in list(self._clients):
             await self._drop(client, "server stopping")
         if self._runner is not None:
@@ -318,6 +362,7 @@ class WebServer:
         app = web.Application()
         app.router.add_get("/", self._index)
         app.router.add_get("/health", self._health)
+        app.router.add_get("/video.mjpeg", self._video)
         app.router.add_get("/assets/{path:.*}", self._asset)
         app.router.add_get("/ws", self._websocket)
         return app
@@ -349,6 +394,150 @@ class WebServer:
                 "uptime_s": status.get("uptime_s", DEFAULT_STATUS["uptime_s"]),
             }
         )
+
+    # -- video stream (F14) ------------------------------------------------
+
+    def offer_video_frame(self, seq: int, rgb: NDArray[np.uint8]) -> None:
+        """Offer one analyzed camera frame to ``/video.mjpeg``; never blocks (F14).
+
+        Called from the vision verifier's thread with the decoded, unmirrored
+        ``(H, W, 3)`` RGB image. The array is kept by reference: only the event loop
+        encodes it, in an executor, and shares the JPEG with every client. Frames are
+        ignored when the stream is disabled or no client is connected.
+        """
+        if not self._video_enabled:
+            return
+        loop = self._loop
+        if loop is None or loop.is_closed() or self._stopping:
+            return
+        try:
+            loop.call_soon_threadsafe(self._accept_video_frame, int(seq), rgb)
+        except RuntimeError:
+            logger.debug("Dropping a video frame offered after the server stopped")
+
+    def _accept_video_frame(self, seq: int, rgb: NDArray[np.uint8]) -> None:
+        """Keep the newest offered frame (event loop thread)."""
+        if self._stopping or self._video_clients <= 0:
+            return
+        self._video_latest = (seq, rgb)
+        wake = self._video_wake
+        if wake is not None:
+            wake.set()
+
+    async def _video(self, request: web.Request) -> web.StreamResponse:
+        """Stream the analyzed camera frames as ``multipart/x-mixed-replace`` (F14)."""
+        if not self._video_enabled:
+            return web.json_response({"error": "video_disabled"}, status=404)
+        response = web.StreamResponse(
+            headers={
+                "Content-Type": f"multipart/x-mixed-replace; boundary={VIDEO_BOUNDARY}",
+                "Cache-Control": "no-store",
+            }
+        )
+        await response.prepare(request)
+        self._video_clients += 1
+        self._ensure_video_encoder()
+        seen = 0
+        try:
+            while not self._stopping:
+                frame = await self._next_video_frame(seen, request)
+                if frame is None:
+                    break
+                seen = frame[0]
+                await self._write_video_part(response, seen, frame[1])
+        except ConnectionError:
+            logger.debug("Video client disconnected", exc_info=True)
+        finally:
+            self._video_clients -= 1
+            if self._video_clients <= 0:
+                await self._stop_video_encoder()
+        return response
+
+    async def _next_video_frame(self, seen: int, request: web.Request) -> tuple[int, bytes] | None:
+        """Wait for an encoded frame newer than ``seen``; ``None`` when the client must go."""
+        while not self._stopping:
+            if request.transport is None:
+                return None
+            frame = self._video_frame
+            if frame is not None and frame[0] > seen:
+                return frame
+            waiter = asyncio.Event()
+            self._video_waiters.add(waiter)
+            try:
+                frame = self._video_frame
+                if frame is not None and frame[0] > seen:
+                    return frame
+                with contextlib.suppress(asyncio.TimeoutError):
+                    # The timeout only re-checks a client that disconnected while no
+                    # frame was available: aiohttp surfaces that on the next write.
+                    await asyncio.wait_for(waiter.wait(), timeout=VIDEO_DISCONNECT_CHECK_S)
+            finally:
+                self._video_waiters.discard(waiter)
+        return None
+
+    @staticmethod
+    async def _write_video_part(response: web.StreamResponse, seq: int, jpeg: bytes) -> None:
+        """Write one multipart part and let aiohttp drain it (F14)."""
+        header = (
+            f"--{VIDEO_BOUNDARY}\r\n"
+            "Content-Type: image/jpeg\r\n"
+            f"Content-Length: {len(jpeg)}\r\n"
+            f"X-Frame-Seq: {seq}\r\n\r\n"
+        ).encode("ascii")
+        # aiohttp 3.14 made write() awaitable (and drains itself); 3.9 returns None
+        # and needs an explicit drain.
+        written = response.write(header + jpeg + b"\r\n")
+        if inspect.isawaitable(written):
+            await written
+        else:
+            await response.drain()
+
+    def _ensure_video_encoder(self) -> None:
+        task = self._video_encoder
+        if task is None or task.done():
+            loop = asyncio.get_running_loop()
+            self._video_encoder = loop.create_task(self._video_encoder_loop())
+
+    async def _stop_video_encoder(self) -> None:
+        task = self._video_encoder
+        self._video_encoder = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def _video_encoder_loop(self) -> None:
+        """Encode the newest offered frame at up to ``VIDEO_MAX_FPS`` (F14).
+
+        Runs in the event loop only to start and pace the work: the JPEG encoding
+        itself happens in the default executor, so a slow encode never stalls the
+        WebSocket clients.
+        """
+        loop = asyncio.get_running_loop()
+        wake = self._video_wake
+        if wake is None:
+            return
+        while True:
+            offer = self._video_latest
+            if offer is None:
+                wake.clear()
+                await wake.wait()
+                continue
+            self._video_latest = None
+            seq, rgb = offer
+            delay = self._video_next_encode_at - loop.time()
+            if delay > 0.0:
+                await asyncio.sleep(delay)
+            try:
+                jpeg = await loop.run_in_executor(None, _encode_jpeg, rgb)
+            except Exception:
+                logger.exception("Encoding a video frame failed")
+                continue
+            self._video_next_encode_at = loop.time() + 1.0 / VIDEO_MAX_FPS
+            self._video_frame = (seq, jpeg)
+            for waiter in self._video_waiters:
+                waiter.set()
 
     # -- WebSocket ---------------------------------------------------------
 
@@ -559,6 +748,23 @@ class WebServer:
             return
         client.events.append((topic, data))
         client.wake.set()
+
+
+def _encode_jpeg(rgb: NDArray[np.uint8]) -> bytes:
+    """Encode one RGB camera frame as a baseline JPEG (F14); runs in an executor."""
+    import cv2
+
+    image = np.asarray(rgb)
+    if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
+        raise ValueError(f"rgb must be an (H, W, 3) uint8 image, got {image.shape}/{image.dtype}")
+    ok, buffer = cv2.imencode(
+        ".jpg",
+        cv2.cvtColor(image, cv2.COLOR_RGB2BGR),
+        [cv2.IMWRITE_JPEG_QUALITY, VIDEO_JPEG_QUALITY],
+    )
+    if not ok:
+        raise RuntimeError("cv2.imencode could not encode the frame")
+    return bytes(buffer.tobytes())
 
 
 def _command_ref_seq(message: Mapping[str, Any]) -> int | None:

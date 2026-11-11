@@ -48,6 +48,89 @@
             "string",
             "null"
           ]
+        },
+        "timing": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "analyzed_fps": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "camera_fps": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "decode_ms": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "preprocess_ms": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "dpu_ms": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "postprocess_ms": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "pose_ms": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "track_ms": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "latency_ms": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "dropped": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "analyzed_fps",
+                "camera_fps",
+                "decode_ms",
+                "preprocess_ms",
+                "dpu_ms",
+                "postprocess_ms",
+                "pose_ms",
+                "track_ms",
+                "latency_ms",
+                "dropped"
+              ],
+              "additionalProperties": false
+            }
+          ]
         }
       },
       "required": [

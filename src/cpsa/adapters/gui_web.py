@@ -1,10 +1,11 @@
 """Web dashboard adapter: publishes the medical topics through the ``Publisher`` port.
 
 ``WebGui`` is both the runtime's ``Gui`` (IF-704) and the vision verifier's
-``VisionObserver`` (F2). It translates domain and vision objects into protocol
+``VisionObserver`` (F2, F14). It translates domain and vision objects into protocol
 payloads with :mod:`cpsa.protocol.medical` and never blocks the caller: the
 publisher queues or replaces messages, and every failure is logged and swallowed
-so an observer can never change a verdict.
+so an observer can never change a verdict. The RGB image of each analyzed frame is
+forwarded unmodified to a publisher that offers ``/video.mjpeg``.
 """
 
 from __future__ import annotations
@@ -13,6 +14,9 @@ import logging
 import threading
 from collections.abc import Mapping
 from typing import Any
+
+import numpy as np
+from numpy.typing import NDArray
 
 from cpsa.domain.model import DecisionRecord, Tag
 from cpsa.ports import Clock, Publisher
@@ -113,6 +117,20 @@ class WebGui:
                 return
             self._last_hands_t = now
         self._state("medical.hands", hands(tracked, self._layout, self._frame_w, self._frame_h))
+
+    def on_frame_image(self, seq: int, t: float, rgb: NDArray[np.uint8]) -> None:
+        """Hand one analyzed RGB frame to the video stream, without copying it (F14).
+
+        The server adapter owns the encoder and the frame pacing; a publisher without
+        live video (the fake mode, a test double) simply has no ``offer_video_frame``.
+        """
+        offer = getattr(self._publisher, "offer_video_frame", None)
+        if not callable(offer):
+            return
+        try:
+            offer(seq, rgb)
+        except Exception:
+            logger.exception("Publisher rejected a video frame")
 
     def on_report(self, report: EpisodeReport) -> None:
         """Send the full ``medical.episode`` event for a finished report."""

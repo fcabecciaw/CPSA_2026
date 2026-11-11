@@ -235,3 +235,39 @@ def test_publisher_failures_never_escape_an_observer_callback() -> None:
     gui.on_episode("ep", 1.0, False)
     gui.on_tracked(tracked_frame())
     gui.on_report(report())
+
+
+class VideoPublisher(FakePublisher):
+    """A publisher that also accepts live video frames, like the web server (F14)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.frames: list[tuple[int, Any]] = []
+
+    def offer_video_frame(self, seq: int, rgb: Any) -> None:
+        self.frames.append((seq, rgb))
+
+
+def test_analyzed_frames_are_forwarded_to_a_video_publisher_unchanged() -> None:
+    publisher = VideoPublisher()
+    gui, _ = make_gui(publisher)
+    rgb = np.zeros((48, 64, 3), dtype=np.uint8)
+    rgb[0, 0, 0] = 7
+
+    gui.on_frame_image(7, 42.0, rgb)
+
+    assert publisher.frames == [(7, rgb)]
+    assert publisher.frames[0][1] is rgb
+    assert publisher.states == []
+
+
+def test_a_publisher_without_video_and_a_failing_one_never_raise() -> None:
+    plain, _ = make_gui(FakePublisher())
+    plain.on_frame_image(7, 42.0, np.zeros((1, 1, 3), dtype=np.uint8))
+
+    class BrokenVideoPublisher(BrokenPublisher):
+        def offer_video_frame(self, seq: int, rgb: Any) -> None:
+            raise RuntimeError("encoder gone")
+
+    broken, _ = make_gui(BrokenVideoPublisher())
+    broken.on_frame_image(7, 42.0, np.zeros((1, 1, 3), dtype=np.uint8))

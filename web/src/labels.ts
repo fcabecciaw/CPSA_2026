@@ -246,4 +246,19 @@ export const STATUS_LABELS = {
   fps: "FPS",
   dpu: "DPU",
   uptime: "Attivo da",
+  timing: "Tempi",
+} as const;
+
+/**
+ * F13 stage labels of the compact "Tempi" line. Technical keys stay in the
+ * protocol; onlookers read Italian.
+ */
+export const TIMING_LABELS = {
+  decode: "Decodifica",
+  preprocess: "Pre",
+  dpu: "DPU",
+  postprocess: "Post",
+  track: "Tracking",
+  latency: "Latenza",
+  dropped: "Scartati",
 } as const;

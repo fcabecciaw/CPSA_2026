@@ -95,6 +95,7 @@ class SkeletonModel:
             side: self._joint_pair(names) for side, names in _FOREARM_JOINTS.items()
         }
         self._face_width_px: float | None = None
+        self._reference_cache: dict[str, float] | None = None
 
     def _joint_pair(self, names: tuple[str, str]) -> tuple[int, int] | None:
         first, second = names
@@ -109,13 +110,18 @@ class SkeletonModel:
         The value is the median of the samples collected so far; it stops
         changing once the bone reference is frozen. A bone is absent until its
         first sample. The mapping is a copy; mutating it does not change the
-        model.
+        model. The medians are cached until the sample buffers change: the
+        tracker reads the references twice per frame (plausibility check and
+        foreshortening) and in steady state every bone is frozen, so recomputing
+        them per call is pure overhead on the live-analysis path.
         """
-        references: dict[str, float] = {}
-        for name, samples in self._samples.items():
-            if samples:
-                references[name] = float(np.median(np.asarray(samples, dtype=np.float64)))
-        return references
+        if self._reference_cache is None:
+            self._reference_cache = {
+                name: float(np.median(np.asarray(samples, dtype=np.float64)))
+                for name, samples in self._samples.items()
+                if samples
+            }
+        return dict(self._reference_cache)
 
     def reset(self) -> None:
         """Forget the references; the next session recollects them."""
@@ -123,6 +129,7 @@ class SkeletonModel:
             self._samples[name].clear()
             self._frozen[name] = False
         self._face_width_px = None
+        self._reference_cache = None
 
     def state(self) -> dict[str, object]:
         """Return a JSON-serializable snapshot of the session-level references.
@@ -165,6 +172,7 @@ class SkeletonModel:
         if width is not None and (not isinstance(width, (int, float)) or isinstance(width, bool)):
             raise ValueError("face_width_px must be a number or null")
         self._face_width_px = None if width is None else float(width)
+        self._reference_cache = None
 
     def _points_and_conf(
         self, xy: ArrayLike, conf: ArrayLike
@@ -206,6 +214,7 @@ class SkeletonModel:
             if not np.isfinite(length):
                 continue
             self._samples[name].append(length)
+            self._reference_cache = None
             if len(self._samples[name]) >= cfg.ref_min_frames:
                 self._frozen[name] = True
 

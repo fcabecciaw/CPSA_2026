@@ -24,6 +24,7 @@ from cpsa.domain.model import (
     VisionAssessment,
 )
 from cpsa.protocol.medical import ImuStatus, decision, episode, hands, state
+from cpsa.vision.layouts import HALFBUST_62
 from cpsa.vision.types import Contact, EpisodeReport, KeypointLayout, TrackedFrame
 from tests.contract.protocol_schemas import validate_server_message
 from tests.unit import vision_fixtures as fx
@@ -262,6 +263,17 @@ def test_hands_matches_the_schema_in_frame_pixels() -> None:
     assert payload["subject_box"] == [0.0, 0.0, 50.0, 60.0]
 
 
+def test_hands_names_the_demo_layout_with_the_dashboard_id() -> None:
+    # The dashboard (web/src/skeleton.ts LAYOUT_NAME) draws only "HALFBUST_62".
+    keypoints = len(HALFBUST_62.names)
+    tracked = frame(np.zeros((keypoints, 2)), np.zeros(keypoints))
+
+    payload = hands(tracked, HALFBUST_62, 640, 480)
+
+    validate_server_message(envelope("medical.hands", payload))
+    assert payload["layout"] == "HALFBUST_62"
+
+
 def test_hands_reports_unseen_keypoints_at_the_origin() -> None:
     tracked = frame(
         np.array([[np.nan, np.nan], [30.0, 40.0], [np.nan, np.nan]]),
@@ -273,6 +285,15 @@ def test_hands_reports_unseen_keypoints_at_the_origin() -> None:
     validate_server_message(envelope("medical.hands", payload))
     assert payload["keypoints"] == [[0.0, 0.0, 0.0], [30.0, 40.0, 0.5], [0.0, 0.0, 0.0]]
     assert payload["subject_box"] is None
+
+
+def test_hands_carries_the_frame_seq_of_the_video_stream() -> None:
+    tracked = frame(np.zeros((3, 2)), np.zeros(3))
+
+    payload = hands(tracked, LAYOUT, 640, 480)
+
+    validate_server_message(envelope("medical.hands", payload))
+    assert payload["seq"] == int(tracked.seq)
 
 
 # ---------------------------------------------------------------------------

@@ -11,10 +11,12 @@ import json
 import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -976,6 +978,7 @@ def _continuous_verifier(
     clock: FakeClock | None = None,
     trigger: VisionTrigger | None = None,
     fires: list[Detection] | None = None,
+    observer: object | None = None,
 ) -> tuple[VisionVerifier, ManualVideoSource, PoseBook, FakeClock, list[Detection]]:
     frames = episode_frames()
     source = ManualVideoSource()
@@ -990,6 +993,7 @@ def _continuous_verifier(
         fake_clock,
         fx.LAYOUT,
         log_dir=tmp_path / "logs",
+        observer=observer,  # type: ignore[arg-type]
         continuous=True,
         trigger=trigger if trigger is not None else VisionTrigger(TriggerConfig()),
         on_detection=fired.append,
@@ -1077,7 +1081,7 @@ def test_continuous_watch_fires_on_two_contacts_and_clears_on_episode_end(
         verifier.stop()
 
 
-def _watch_tail(
+def _stream_tail(
     verifier: VisionVerifier,
     trigger: VisionTrigger,
     t: float,
@@ -1085,17 +1089,17 @@ def _watch_tail(
     tracked: TrackedFrame | None = None,
     contacts: Sequence[tuple[float, Tag]] = (),
 ) -> None:
-    """Run the trigger steps of ``_watch_frame`` for one analyzed frame.
+    """Run the trigger steps of ``_stream_frame`` for one analyzed frame.
 
     The tests feed already tracked fixture frames, so they skip the pose tracker
     and call the same ``_remember_oscillation_frame``, ``_feed_trigger`` and
-    ``poll`` steps the watch runs after it (FR-027..FR-029). ``contacts`` is the
-    analyzer's cumulative event list, as ``contact_events`` is on the watch.
+    ``poll`` steps the stream runs after it (FR-027..FR-029). ``contacts`` is the
+    analyzer's cumulative event list, as ``contact_events`` is on the stream.
     """
     if tracked is not None:
         verifier._remember_oscillation_frame(tracked)
-    verifier._watch_contacts = verifier._feed_trigger(
-        trigger, contacts, verifier._watch_contacts, t
+    verifier._stream_contacts = verifier._feed_trigger(
+        trigger, contacts, verifier._stream_contacts, t
     )
     verifier._emit_fire(trigger.poll(t, episode_active=False))
 
@@ -1105,11 +1109,11 @@ def test_a_grade_upgrade_reaches_the_trigger_before_the_start(tmp_path: Path) ->
     trigger = VisionTrigger(TriggerConfig())
     verifier, _, _, _, fired = _continuous_verifier(tmp_path, trigger=trigger)
 
-    _watch_tail(verifier, trigger, 1.0, contacts=[(1.0, Tag.NON_DANGEROUS)])
+    _stream_tail(verifier, trigger, 1.0, contacts=[(1.0, Tag.NON_DANGEROUS)])
     assert fired == []
 
     # The first contact is DANGEROUS by the time the second one starts the episode.
-    _watch_tail(
+    _stream_tail(
         verifier,
         trigger,
         5.0,
@@ -1118,6 +1122,44 @@ def test_a_grade_upgrade_reaches_the_trigger_before_the_start(tmp_path: Path) ->
 
     assert len(fired) == 1
     assert fired[0].tag is Tag.DANGEROUS
+
+
+class _RecordingTrigger(VisionTrigger):
+    """A real trigger that also records every contact start and grade it is fed."""
+
+    def __init__(self) -> None:
+        super().__init__(TriggerConfig())
+        self.fed: list[tuple[float, Tag]] = []
+
+    def contact(self, t_start: float, severity: Tag) -> None:
+        self.fed.append((float(t_start), severity))
+        super().contact(t_start, severity)
+
+
+def test_a_grade_upgrade_is_refed_after_pruning_dropped_older_contacts(tmp_path: Path) -> None:
+    """F17: ``prune`` shifts the event list; an upgrade must still reach the trigger.
+
+    The feed state used to be positional, so after the analyzer dropped a leading
+    event an upgraded contact could match the tag that used to sit at its index
+    and never be re-fed, leaving the trigger on its old grade for good.
+    """
+    verifier, _, _, _, _ = _continuous_verifier(tmp_path)
+    trigger = _RecordingTrigger()
+
+    verifier._stream_contacts = verifier._feed_trigger(
+        trigger,
+        [(1.0, Tag.DANGEROUS), (2.0, Tag.NON_DANGEROUS)],
+        verifier._stream_contacts,
+        2.0,
+    )
+
+    # ``prune`` dropped the older contact, so the upgrade now sits at index 0,
+    # where the fed state already held ``DANGEROUS``.
+    verifier._stream_contacts = verifier._feed_trigger(
+        trigger, [(2.0, Tag.DANGEROUS)], verifier._stream_contacts, 2.1
+    )
+
+    assert trigger.fed[-1] == (2.0, Tag.DANGEROUS)
 
 
 def test_the_clear_fire_survives_a_failing_report_step(
@@ -1140,7 +1182,7 @@ def test_the_clear_fire_survives_a_failing_report_step(
         def broken_report(now: float) -> None:
             raise RuntimeError("report failed")
 
-        monkeypatch.setattr(verifier._analyzer, "report", broken_report)
+        monkeypatch.setattr(verifier._stream, "report", broken_report)
         with pytest.raises(RuntimeError, match="report failed"):
             verifier._finish_episode(clock.monotonic())
     finally:
@@ -1161,7 +1203,7 @@ def test_continuous_watch_starts_on_sustained_flapping_alone(tmp_path: Path) -> 
 
     for index, tracked in enumerate(_flapping_frames(seconds=5.0)):
         if index % 3 == 0:  # the watch analyzes on the 10 fps grid
-            _watch_tail(verifier, trigger, tracked.t, tracked=tracked)
+            _stream_tail(verifier, trigger, tracked.t, tracked=tracked)
 
     assert [detection.tag for detection in fired] == [Tag.NON_DANGEROUS]
     assert 12.9 <= fired[0].window_end_ts <= 15.0
@@ -1174,7 +1216,7 @@ def test_continuous_watch_does_not_start_on_short_flapping(tmp_path: Path) -> No
 
     for index, tracked in enumerate(_flapping_frames(seconds=2.0)):
         if index % 3 == 0:
-            _watch_tail(verifier, trigger, tracked.t, tracked=tracked)
+            _stream_tail(verifier, trigger, tracked.t, tracked=tracked)
 
     assert fired == []
 
@@ -1209,8 +1251,8 @@ def test_continuous_watch_respects_the_refractory_after_a_real_episode(
         assert fired[-1].tag is Tag.NON_STEREOTIPY
         cleared = len(fired)
 
-        _watch_tail(verifier, trigger, 15.8, contacts=[(15.8, Tag.NON_DANGEROUS)])
-        _watch_tail(
+        _stream_tail(verifier, trigger, 15.8, contacts=[(15.8, Tag.NON_DANGEROUS)])
+        _stream_tail(
             verifier,
             trigger,
             16.0,
@@ -1219,7 +1261,495 @@ def test_continuous_watch_respects_the_refractory_after_a_real_episode(
         assert fired[cleared:] == []
 
         # The first poll after ``refractory_s`` starts a new episode.
-        _watch_tail(verifier, trigger, 19.6)
+        _stream_tail(verifier, trigger, 19.6)
         assert fired[-1].tag is Tag.NON_DANGEROUS
     finally:
         verifier.stop()
+
+
+# ---------------------------------------------------------------------------
+# Plan S: one continuous stream analyzer (AC-S1..AC-S5)
+# ---------------------------------------------------------------------------
+
+
+def test_every_stream_frame_is_estimated_exactly_once(tmp_path: Path) -> None:
+    """AC-S1: idle, episode-start and episode frames each run the estimator once."""
+    config = _config(tmp_path, queue_max=512, idle_timeout_s=0.5)
+    clock = FakeClock(9.0)
+    verifier, source, book, _, fired = _continuous_verifier(tmp_path, config=config, clock=clock)
+    frames = episode_frames()
+    verifier.start()
+    try:
+        for frame in frames[:151]:  # 9.0 .. 14.0 s
+            source.emit(frame)
+        wait_until(lambda: bool(fired))
+        clock.t = fired[0].window_end_ts
+        verifier.observe(fired[0])
+        wait_until(lambda: verifier.episode_id is not None)
+        for frame in frames[151:181]:  # 14.0 .. 15.0 s, inside the episode
+            source.emit(frame)
+        wait_until(lambda: (verifier.analyzed_until_t or 0.0) >= frames[180].t - 1e-9)
+        clock.t = 200.0
+        wait_until(lambda: verifier.last_report is not None)
+        for frame in frames[181:211]:  # 15.0 .. 16.0 s, idle again
+            source.emit(frame)
+        wait_until(lambda: (verifier.analyzed_until_t or 0.0) >= frames[210].t - 1e-9)
+        stream = verifier._stream
+        assert stream is not None
+        pushed = [int(frame.seq) for frame in stream.frames]
+        estimated = list(book.calls)
+    finally:
+        verifier.stop()
+
+    # The episode start estimates no frame a second time, the pre-roll is not replayed.
+    assert pushed
+    assert estimated[-len(pushed) :] == pushed
+    assert len(set(estimated)) == len(estimated)
+
+
+def test_an_episode_window_never_resets_the_stream_tracker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC-S2: the window keeps the tracker and the frames the stream already has."""
+    config = _config(tmp_path, queue_max=512, idle_timeout_s=0.5)
+    clock = FakeClock(9.0)
+    verifier, source, _, _, fired = _continuous_verifier(tmp_path, config=config, clock=clock)
+    frames = episode_frames()
+    verifier.start()
+    try:
+        for frame in frames[:151]:  # 9.0 .. 14.0 s
+            source.emit(frame)
+        wait_until(lambda: bool(fired))
+        stream = verifier._stream
+        assert stream is not None
+        resets: list[float] = []
+        original = stream._tracker.reset
+        monkeypatch.setattr(stream._tracker, "reset", lambda: (resets.append(1.0), original()))
+        tracked_at_fire = len(stream.frames)
+
+        clock.t = fired[0].window_end_ts
+        verifier.observe(fired[0])
+        wait_until(lambda: stream.window_open)
+        # The stream keeps the frames and the pose history from before ``t_start``.
+        assert stream.frames[0].t < stream.t_start
+        assert len(stream.frames) <= tracked_at_fire  # no pre-roll replay at the start
+
+        for frame in frames[151:181]:  # 14.0 .. 15.0 s, inside the episode
+            source.emit(frame)
+        wait_until(lambda: (verifier.analyzed_until_t or 0.0) >= frames[180].t - 1e-9)
+        clock.t = 200.0
+        wait_until(lambda: verifier.last_report is not None)
+        assert not stream.window_open
+        for frame in frames[181:211]:  # 15.0 .. 16.0 s, idle again
+            source.emit(frame)
+        wait_until(lambda: (verifier.analyzed_until_t or 0.0) >= frames[210].t - 1e-9)
+    finally:
+        verifier.stop()
+
+    assert resets == []
+    assert verifier._stream is stream
+    assert stream.episode_id.startswith("stream-")
+
+
+def test_verify_answers_a_vision_start_from_already_tracked_frames(tmp_path: Path) -> None:
+    """AC-S3: the start window is assessed at once, without a timeout."""
+    config = _config(tmp_path, queue_max=512)
+    clock = FakeClock(9.0)
+    verifier, source, _, _, _ = _continuous_verifier(tmp_path, config=config, clock=clock)
+    frames = episode_frames()
+    verifier.start()
+    try:
+        for frame in frames[:166]:  # 9.0 .. 14.5 s
+            source.emit(frame)
+        wait_until(lambda: (verifier.analyzed_until_t or 0.0) >= frames[165].t - 1e-9)
+
+        # The request window ends before the last tracked frame, so it is covered.
+        assessment = verifier.verify(detection(Tag.DANGEROUS, frames[150].t, clock))
+    finally:
+        verifier.stop()
+
+    assert "timeout" not in assessment.features
+    assert assessment.verdict is not Verdict.UNDECIDED
+
+
+def test_the_episode_report_holds_only_contacts_after_its_start(tmp_path: Path) -> None:
+    """AC-S4: the report of a window drops the contacts of the idle stream."""
+    config = _config(tmp_path, queue_max=512, idle_timeout_s=0.5)
+    clock = FakeClock(9.0)
+    verifier, source, _, _, fired = _continuous_verifier(tmp_path, config=config, clock=clock)
+    frames = episode_frames()
+    verifier.start()
+    try:
+        emit_range(source, frames, 9.0, 14.0)
+        wait_until(lambda: bool(fired))
+        clock.t = fired[0].window_end_ts
+        verifier.observe(fired[0])
+        wait_until(lambda: verifier.episode_id is not None)
+        clock.t = 200.0
+        wait_until(lambda: verifier.last_report is not None)
+        report = verifier.last_report
+    finally:
+        verifier.stop()
+
+    assert report is not None
+    # The first fixture contact ends at 10.8 s, before the episode window starts.
+    assert report.t_start > 10.8
+    assert report.contacts
+    assert all(contact.t_start >= report.t_start - 1e-9 for contact in report.contacts)
+    assert report.contact_count == len(report.contacts)
+
+
+def _ten_minutes_of_contacts() -> list[TrackedFrame]:
+    """600 s of 10 fps tracked frames: the fixture's two contacts every 12 s."""
+    base = [frame for index, frame in enumerate(episode_frames()) if index % 3 == 0]
+    frames: list[TrackedFrame] = []
+    for tile in range(50):
+        offset = tile * 12.0
+        for frame in base[1:]:
+            frames.append(
+                replace(
+                    frame,
+                    seq=len(frames) + 1,
+                    t=9.0 + offset + (float(frame.t) - 9.0),
+                )
+            )
+    return frames
+
+
+def test_the_stream_analyzer_keeps_its_memory_bounded(tmp_path: Path) -> None:
+    """AC-S5: 10 simulated minutes keep at most the retained window and the episode."""
+    frames = _ten_minutes_of_contacts()
+    config = _config(tmp_path, queue_max=512)
+    clock = FakeClock(9.0)
+    verifier, _, _, _, _ = _continuous_verifier(
+        tmp_path, config=config, clock=clock, estimator=PoseBook(frames)
+    )
+    retain_s = max(config.preroll_s, config.lookback_s + config.fast_after_s)
+    episode_s = 2.0
+    bound = int(retain_s * config.analysis_fps + episode_s * config.analysis_fps + 5)
+    peak_frames = 0
+    peak_events = 0
+    try:
+        for index, tracked in enumerate(frames):
+            clock.t = float(tracked.t)
+            verifier._stream_frame(
+                VideoFrame(
+                    seq=int(tracked.seq),
+                    t=float(tracked.t),
+                    width=640,
+                    height=480,
+                    decode=_payload(int(tracked.seq)),
+                )
+            )
+            if index % 300 == 0:
+                verifier._start_or_extend(detection(Tag.DANGEROUS, tracked.t, clock))
+            elif index % 300 == 20 and verifier._episode_active:
+                verifier._finish_episode(clock.monotonic())
+            stream = verifier._stream
+            assert stream is not None
+            peak_frames = max(peak_frames, len(stream.frames))
+            peak_events = max(peak_events, len(stream.contact_events))
+    finally:
+        verifier.stop()
+
+    assert peak_frames <= bound
+    assert peak_events <= bound
+
+
+# ---------------------------------------------------------------------------
+# F12: rolling performance snapshot
+# ---------------------------------------------------------------------------
+
+
+class _StagedPoseBook(PoseBook):
+    """``PoseBook`` that also reports DPU stage timings like the board estimator."""
+
+    STAGES = {
+        "preprocess": 1.0,
+        "dpu": 4.0,
+        "decode": 0.5,
+        "nms": 0.3,
+        "unletterbox": 0.2,
+    }
+
+    @property
+    def stage_ms(self) -> dict[str, float]:
+        return dict(self.STAGES)
+
+
+class _CallableStagePoseBook(PoseBook):
+    """``PoseBook`` whose stage timings are a callable, as the frozen F12 reads it."""
+
+    def stage_ms(self) -> dict[str, float]:
+        return {"preprocess": 2.0, "dpu": 3.0}
+
+
+class _SyncObserver:
+    """Record the observer callbacks and let the test wait for one frame."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int]] = []
+        self.images: dict[int, np.ndarray] = {}
+        self._lock = threading.Lock()
+
+    def on_episode(self, episode_id: str, t_start: float, active: bool) -> None:
+        pass
+
+    def on_report(self, report: EpisodeReport) -> None:
+        pass
+
+    def on_frame_image(self, seq: int, t: float, rgb: np.ndarray) -> None:
+        with self._lock:
+            self.calls.append(("image", seq))
+            self.images[seq] = rgb
+
+    def on_tracked(self, tracked: TrackedFrame) -> None:
+        with self._lock:
+            self.calls.append(("tracked", int(tracked.seq)))
+
+    def count(self, kind: str) -> int:
+        with self._lock:
+            return sum(1 for call in self.calls if call[0] == kind)
+
+
+def _ten_hz_frames(count: int = 20, start: float = 9.0) -> list[TrackedFrame]:
+    """Neutral frames one ``analysis_fps`` grid step apart, so every one is analyzed."""
+    return [
+        fx.make_frame(index + 1, start + index / 10.0, fx.neutral_xy()) for index in range(count)
+    ]
+
+
+PERF_KEYS = {
+    "analyzed_fps",
+    "camera_fps",
+    "decode_ms",
+    "preprocess_ms",
+    "dpu_ms",
+    "postprocess_ms",
+    "pose_ms",
+    "track_ms",
+    "latency_ms",
+    "dropped",
+}
+
+
+def test_perf_snapshot_without_data_is_null_and_dropped_is_zero(tmp_path: Path) -> None:
+    verifier, _, _, _ = make_verifier(tmp_path)
+
+    snapshot = verifier.perf_snapshot()
+
+    assert set(snapshot) == PERF_KEYS
+    assert all(value is None for key, value in snapshot.items() if key != "dropped")
+    assert snapshot["dropped"] == 0
+
+
+def _emit_synchronized(
+    source: ManualVideoSource,
+    clock: FakeClock,
+    frames: Sequence[TrackedFrame],
+    observer: _SyncObserver,
+) -> None:
+    """Emit frames one at a time, advancing the fake clock and awaiting each analysis."""
+    for index, frame in enumerate(frames):
+        clock.t = float(frame.t)
+        source.emit(frame)
+        wait_until(lambda index=index: observer.count("tracked") > index)
+
+
+def test_perf_snapshot_means_the_stage_timings_and_the_fake_clock_rates(
+    tmp_path: Path,
+) -> None:
+    frames = _ten_hz_frames()
+    observer = _SyncObserver()
+    verifier, source, book, clock, _ = _continuous_verifier(
+        tmp_path, estimator=_StagedPoseBook(frames), clock=FakeClock(9.0), observer=observer
+    )
+    verifier.start()
+    try:
+        _emit_synchronized(source, clock, frames, observer)
+        snapshot = verifier.perf_snapshot()
+    finally:
+        verifier.stop()
+
+    assert set(snapshot) == PERF_KEYS
+    # 20 frames over the 1.9 s the fake clock spans: the 10 Hz watch grid.
+    assert snapshot["camera_fps"] == pytest.approx(20 / 1.9, rel=1e-6)
+    assert snapshot["analyzed_fps"] == pytest.approx(20 / 1.9, rel=1e-6)
+    # Means of identical stage readings: preprocess alone, DPU alone, the rest summed.
+    assert snapshot["preprocess_ms"] == pytest.approx(1.0)
+    assert snapshot["dpu_ms"] == pytest.approx(4.0)
+    assert snapshot["postprocess_ms"] == pytest.approx(1.0)
+    for key in ("decode_ms", "pose_ms", "track_ms", "latency_ms"):
+        value = snapshot[key]
+        assert isinstance(value, float) and value >= 0.0
+    assert snapshot["dropped"] == 0
+    assert book.calls == [int(frame.seq) for frame in frames]
+
+    # Six seconds later the rolling 5 s window is empty again.
+    clock.advance(6.0)
+    empty = verifier.perf_snapshot()
+    assert all(value is None for key, value in empty.items() if key != "dropped")
+
+
+def test_perf_snapshot_accepts_a_callable_stage_ms(tmp_path: Path) -> None:
+    frames = _ten_hz_frames(6)
+    observer = _SyncObserver()
+    verifier, source, _, clock, _ = _continuous_verifier(
+        tmp_path, estimator=_CallableStagePoseBook(frames), clock=FakeClock(9.0), observer=observer
+    )
+    verifier.start()
+    try:
+        _emit_synchronized(source, clock, frames, observer)
+        snapshot = verifier.perf_snapshot()
+    finally:
+        verifier.stop()
+
+    assert snapshot["preprocess_ms"] == pytest.approx(2.0)
+    assert snapshot["dpu_ms"] == pytest.approx(3.0)
+    # The callable omits the postprocess stages, so the sum is unknown.
+    assert snapshot["postprocess_ms"] is None
+
+
+def test_perf_snapshot_without_stage_timings_leaves_them_null(tmp_path: Path) -> None:
+    frames = _ten_hz_frames(6)
+    observer = _SyncObserver()
+    verifier, source, _, clock, _ = _continuous_verifier(
+        tmp_path, clock=FakeClock(9.0), observer=observer
+    )
+    verifier.start()
+    try:
+        _emit_synchronized(source, clock, frames, observer)
+        snapshot = verifier.perf_snapshot()
+    finally:
+        verifier.stop()
+
+    assert snapshot["preprocess_ms"] is None
+    assert snapshot["dpu_ms"] is None
+    assert snapshot["postprocess_ms"] is None
+    assert isinstance(snapshot["decode_ms"], float)
+    assert isinstance(snapshot["pose_ms"], float)
+    assert snapshot["analyzed_fps"] is not None
+
+
+def test_perf_snapshot_counts_every_analysis_queue_drop(tmp_path: Path) -> None:
+    frames = _ten_hz_frames(4)
+    gate = threading.Event()
+    book = PoseBook(frames, gate=gate, gate_on=int(frames[0].seq))
+    verifier, source, _, _clock, _ = _continuous_verifier(
+        tmp_path, config=_config(tmp_path, queue_max=1), estimator=book
+    )
+    verifier.start()
+    try:
+        source.emit(frames[0])
+        assert book.started.wait(timeout=5.0)
+        for frame in frames[1:]:
+            source.emit(frame)
+        wait_until(lambda: verifier.perf_snapshot()["dropped"] >= 2)
+        snapshot = verifier.perf_snapshot()
+        assert isinstance(snapshot["dropped"], int)
+        assert snapshot["dropped"] == 2
+    finally:
+        gate.set()
+        verifier.stop()
+
+
+# ---------------------------------------------------------------------------
+# F14: analyzed camera frames reach the observer as an image
+# ---------------------------------------------------------------------------
+
+
+class _ImageObserver:
+    """Record ``on_frame_image`` and ``on_tracked`` in call order."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int]] = []
+        self.images: dict[int, np.ndarray] = {}
+
+    def on_episode(self, episode_id: str, t_start: float, active: bool) -> None:
+        pass
+
+    def on_report(self, report: EpisodeReport) -> None:
+        pass
+
+    def on_frame_image(self, seq: int, t: float, rgb: np.ndarray) -> None:
+        self.calls.append(("image", int(seq)))
+        self.images[int(seq)] = rgb
+
+    def on_tracked(self, tracked: TrackedFrame) -> None:
+        self.calls.append(("tracked", int(tracked.seq)))
+
+
+def test_watch_frames_reach_the_observer_as_images_and_tracked_frames(tmp_path: Path) -> None:
+    frames = _ten_hz_frames(5)
+    observer = _ImageObserver()
+    verifier, source, _, _, _ = _continuous_verifier(
+        tmp_path, estimator=PoseBook(frames), observer=observer
+    )
+    verifier.start()
+    try:
+        for frame in frames:
+            source.emit(frame)
+        wait_until(lambda: len(observer.calls) >= 2 * len(frames))
+    finally:
+        verifier.stop()
+
+    expected = [int(frame.seq) for frame in frames]
+    assert [call[0] for call in observer.calls] == ["image", "tracked"] * len(frames)
+    assert [call[1] for call in observer.calls if call[0] == "image"] == expected
+    # The image is the decoded camera frame, handed over without transformation.
+    assert observer.images[expected[0]].shape == (1, 2, 3)
+    assert int(observer.images[expected[0]][0, 0, 0]) == expected[0]
+
+
+def test_a_watch_observer_without_the_image_callback_still_gets_tracked(tmp_path: Path) -> None:
+    frames = _ten_hz_frames(4)
+    observer = _RecordingObserver()
+    verifier, source, _, _, _ = _continuous_verifier(
+        tmp_path, estimator=PoseBook(frames), observer=observer
+    )
+    verifier.start()
+    try:
+        for frame in frames:
+            source.emit(frame)
+        wait_until(lambda: sum(1 for call in observer.calls if call[0] == "tracked") >= len(frames))
+    finally:
+        verifier.stop()
+
+    assert all(call[0] == "tracked" for call in observer.calls)
+
+
+def test_episode_frames_reach_the_observer_as_images_before_on_tracked(tmp_path: Path) -> None:
+    observer = _ImageObserver()
+    report = replay_observed_episode(tmp_path, observer)
+
+    assert report is not None
+    kinds = [call[0] for call in observer.calls]
+    assert kinds.count("image") > 0
+    assert kinds.count("image") == kinds.count("tracked")
+    assert kinds[:2] == ["image", "tracked"]
+    for index, kind in enumerate(kinds):
+        if kind == "image":
+            assert kinds[index + 1] == "tracked"
+
+
+def test_oscillation_is_evaluated_at_most_at_five_hz(monkeypatch: pytest.MonkeyPatch) -> None:
+    import cpsa.application.vision_verifier as vv
+
+    calls: list[int] = []
+
+    def fake_rocking(frames: object, layout: object, cfg: object) -> bool:
+        calls.append(1)
+        return True
+
+    monkeypatch.setattr(vv, "detect_rocking", fake_rocking)
+    verifier = object.__new__(vv.VisionVerifier)
+    verifier._trigger = SimpleNamespace(config=SimpleNamespace(oscillation_min_s=3.0))  # type: ignore[assignment]
+    verifier._osc_recent = deque([SimpleNamespace(t=0.0)])  # type: ignore[assignment]
+    verifier._osc_eval = None
+    verifier._cfg = SimpleNamespace(analysis=None)  # type: ignore[assignment]
+    verifier._layout = None  # type: ignore[assignment]
+
+    results = [verifier._oscillation_active(i / 30.0) for i in range(30)]
+
+    assert all(results)
+    assert len(calls) == 5  # t = 0.0, 0.2, 0.4, 0.6, 0.8 over one second at 30 fps

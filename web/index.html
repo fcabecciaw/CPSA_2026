@@ -47,6 +47,7 @@
         <p id="mode-status" class="mode-status">In attesa di connessione…</p>
         <p id="mode-error" class="mode-error" role="status" aria-live="polite"></p>
         <ul id="health" class="health" aria-label="Salute del sistema"></ul>
+        <ul id="timing" class="timing" aria-label="Tempi di elaborazione"></ul>
         <p id="notice" class="notice" role="status" aria-live="polite"></p>
       </section>
 
@@ -74,12 +75,14 @@
             <span class="hint">HALFBUST_62 · specchiato</span>
           </header>
           <div class="canvas-wrap">
+            <img id="video" class="video" alt="Video della telecamera" hidden />
             <canvas
               id="skeleton"
               role="img"
               aria-label="Scheletro non disponibile: in attesa di dati."
             ></canvas>
             <p class="canvas-empty" id="canvas-empty">In attesa di episodio…</p>
+            <p class="video-note" id="video-note">Video non disponibile</p>
           </div>
           <div class="skeleton-footer">
             <ul class="legend" aria-label="Legenda dello scheletro">

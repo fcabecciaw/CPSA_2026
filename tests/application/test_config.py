@@ -164,7 +164,8 @@ def test_shipped_vision_defaults() -> None:
     assert vision.model.kind == "onnx"
     assert (vision.model.input_width, vision.model.input_height) == (640, 480)
     assert vision.camera.device == "/dev/video0"
-    assert vision.camera.match == "F200"
+    assert vision.camera.match == "RealSense"
+    assert vision.camera.gain is None and vision.camera.power_line_hz is None
     assert (vision.camera.width, vision.camera.height) == (640, 480)
     assert vision.fast_budget_s == 0.8
     assert vision.fast_budget_s < config.dispatch.verification_deadline_s
@@ -258,7 +259,27 @@ def test_server_and_supervisor_defaults() -> None:
     assert config.server.port == 8080
     assert config.server.static_dir == Path("web/dist")
     assert config.server.idle_timeout_s == 30.0
+    assert config.server.video is False
     assert config.supervisor.default_mode == "medical"
+
+
+def test_server_video_stream_is_opt_in() -> None:
+    data = valid()
+    data["server"] = {
+        "host": "127.0.0.1",
+        "port": 9000,
+        "static_dir": "web/dist",
+        "idle_timeout_s": 30,
+        "video": True,
+    }
+
+    assert parse(data).server.video is True
+
+
+def test_the_demo_config_enables_the_video_stream() -> None:
+    demo = REPO_ROOT / "config" / "board.demo.yaml"
+
+    assert load(demo).server.video is True
 
 
 def test_server_and_supervisor_sections_are_loaded() -> None:
@@ -290,6 +311,7 @@ def test_server_and_supervisor_sections_are_loaded() -> None:
         ("port", True),
         ("static_dir", ""),
         ("idle_timeout_s", 0),
+        ("video", "yes"),
         ("extra", True),
     ],
 )
@@ -422,3 +444,4 @@ def test_the_demo_config_is_camera_only() -> None:
     assert config.vision.enabled is True
     assert config.medical.trigger == "vision"
     assert config.medical.vision_trigger == TriggerConfig(refractory_s=config.dispatch.cooldown_s)
+    assert (config.vision.camera.gain, config.vision.camera.power_line_hz) == (160, 50)

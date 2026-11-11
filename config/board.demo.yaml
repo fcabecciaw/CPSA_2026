@@ -42,8 +42,8 @@ actuators:
     duration_ms: 2500              # LED turns itself off after this time
 
 camera:                            # Creative VF0800 (Intel RealSense F200) over V4L2
-  rgb_device: auto                 # auto: node whose card contains F200 and offers YUYV
-  depth_device: auto               # auto: F200 node offering Z16 (survives a USB re-plug)
+  rgb_device: auto                 # auto: RealSense node offering YUYV without Z16
+  depth_device: auto               # auto: RealSense node offering Z16 (survives a re-plug)
   width: 640                       # frames are captured at the model input size
   height: 480
   fps: 30
@@ -69,26 +69,31 @@ vision:                            # 2D pose episode analysis on the KV260 DPU
     iou_thr: 0.45                  # NMS IoU threshold
   camera:                          # RGB-only UVC node used by the vision pipeline
     device: auto                   # auto: pick the node by card name (USB re-plug safe)
-    match: F200                    # card-name fragment used when device is auto
+    match: RealSense               # card-name fragment for auto; the kernel truncates
+                                   # the F200 card to "Intel(R) RealSense(TM) 3D Camer"
     width: 640
     height: 480
     fps: 30
-    exposure: 300                  # manual exposure_time_absolute in 1..10000
+    exposure: 300                  # manual exposure_time_absolute in 1..10000 (100 us units)
+    gain: 160                      # manual V4L2 gain (F200 64..2540); dim booth light, 8.7% saturated
+    power_line_hz: 50              # anti-flicker for 50 Hz mains (Italy): 0 off, 50, 60
   preroll_s: 3.0                   # bounded RAM ring of raw camera frames
   lookback_s: 1.0                  # pre-roll included in an assessment window
   fast_after_s: 0.2                # live analysis after the detection window end
   fast_budget_s: 0.8               # stage-1 budget; must be < dispatch.verification_deadline_s
   idle_timeout_s: 3.0              # end an episode after this long without a detection
   stale_after_s: 0.5               # a frame older than this makes the source unhealthy
-  analysis_fps: 10                 # deterministic analyzed-frame grid (P-06)
+  analysis_fps: 30                 # deterministic analyzed-frame grid (P-06); 30 = every camera frame
   queue_max: 8                     # bounded analysis queue; oldest frame dropped when full
   imu_buffer_s: 10.0               # per-side ACC magnitude buffer used by the episode report
   evidence:
-    enabled: true
+    enabled: false                 # no clips of visitors' faces at the booth (2026-11-11)
     base_path: /home/kria/cpsa/runs/evidence
     clip_s: 2.0                    # clip centred on the peak-severity contact
     retention_days: 7              # day folders older than this are purged
   tracker:
+    filter: false                  # raw detections, no Kalman filter (2026-11-11 demo decision);
+                                   # without it the speed-based danger rules never fire
     min_conf: 0.3
     gate_chi2: 9.21
     max_predict_frames: 5
@@ -159,6 +164,7 @@ server:
   port: 8080
   static_dir: web/dist
   idle_timeout_s: 30
+  video: true                     # live camera frames on /video.mjpeg (F14, demo only)
 
 # F6: mode selected by cpsa-supervisor at startup.
 supervisor:

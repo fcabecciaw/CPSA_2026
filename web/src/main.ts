@@ -20,6 +20,7 @@ import {
   renderLog,
   renderMode,
   renderNotice,
+  shouldStreamVideo,
 } from "./views";
 
 const elements = collectElements();
@@ -28,7 +29,20 @@ const skeleton = new SkeletonView(
   byId<HTMLCanvasElement>("skeleton"),
   byId("canvas-empty"),
   byId("skeleton-meta"),
+  byId<HTMLImageElement>("video"),
+  byId("video-note"),
 );
+
+/** `?mock=1` has no backend, so it never opens the F14 stream. */
+let mockActive = false;
+
+/**
+ * F14: the stream follows the status snapshot (medical mode, camera ok) and is
+ * always off in the mock, where the panel keeps the placeholder.
+ */
+function refreshVideo(): void {
+  skeleton.setVideo(!mockActive && shouldStreamVideo(store.state));
+}
 
 const socketUrl = defaultSocketUrl();
 let connection: ConnectionInfo = {
@@ -84,6 +98,9 @@ function renderRegions(regions: StateRegion[]): void {
         break;
     }
   }
+  // The stream follows the mode/camera state, not the hands stream: a camera
+  // that stops reporting must take the video away too.
+  refreshVideo();
 }
 
 async function boot(): Promise<void> {
@@ -96,6 +113,7 @@ async function boot(): Promise<void> {
     const mock = await import("./mock");
     factory = mock.createMockSocket;
     sourceLabel = mock.MOCK_BADGE;
+    mockActive = true;
   }
 
   const client = new DashboardClient({
@@ -133,6 +151,7 @@ async function boot(): Promise<void> {
   }
 
   renderAll(elements, store.state, connection, sourceLabel, transportNotice);
+  refreshVideo();
   client.start();
 }
 

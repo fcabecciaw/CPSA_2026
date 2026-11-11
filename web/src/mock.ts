@@ -22,6 +22,7 @@ import type {
   LogPayload,
   MedicalStatePayload,
   Mode,
+  PerceptionTiming,
   ServerMessage,
   StatusPayload,
   Tag,
@@ -91,6 +92,7 @@ const LOG_LINES = TRIGGER === "vision" ? VISION_LOG_LINES : IMU_LOG_LINES;
 
 let sequence = 0;
 let monotonic = 2000;
+let frameSeq = 0;
 
 function message<T extends ServerMessage["type"]>(
   type: T,
@@ -183,14 +185,36 @@ export function createMockSocket(_url: string): SocketLike {
     const status: StatusPayload = fixture("status").data;
     status.mode = mode;
     status.mode_state = switching ? "starting" : mode === "medical" ? "running" : "stopped";
-    status.perception.fps = mode === "medical" ? 29.6 + Math.sin(Date.now() / 900) * 0.8 : null;
+    const fps = mode === "medical" ? 29.6 + Math.sin(Date.now() / 900) * 0.8 : null;
+    status.perception.fps = fps;
     status.perception.dpu_ms = mode === "medical" ? 17.8 : null;
     status.perception.camera = "ok";
     status.perception.model = mode === "medical" ? "pose_halfbust62" : null;
+    // F13: plausible rolling-window numbers, so the "Tempi" line and the FPS
+    // caption can be built before the server reports them.
+    status.perception.timing =
+      mode === "medical" && fps !== null ? mockTiming(fps) : null;
     status.imu = mode === "medical" && TRIGGER === "imu" ? imuState() : "n/a";
     status.errors = [];
     status.uptime_s = 125.4 + (Date.now() - startedAt) / 1000;
     emit(message("status", status));
+  }
+
+  function mockTiming(fps: number): PerceptionTiming {
+    const drift = Math.sin(Date.now() / 1300);
+    const round = (value: number): number => Math.round(value * 10) / 10;
+    return {
+      analyzed_fps: round(fps),
+      camera_fps: 30,
+      decode_ms: round(3.1 + drift * 0.3),
+      preprocess_ms: round(2.2 + drift * 0.2),
+      dpu_ms: round(17.8 + drift * 0.4),
+      postprocess_ms: round(4.4 + drift * 0.3),
+      pose_ms: round(25.4 + drift * 0.6),
+      track_ms: round(1.1 + drift * 0.1),
+      latency_ms: round(61.2 + drift * 2.5),
+      dropped: 0,
+    };
   }
 
   function imuState(): ImuState {
@@ -488,6 +512,8 @@ function pose(elapsedMs: number): HandsPayload {
     h: HEIGHT,
     keypoints: points,
     subject_box: [150, 60, 490, 470],
+    // F14: stands in for the analyzed frame counter the real stream reports.
+    seq: frameSeq++,
   };
 }
 

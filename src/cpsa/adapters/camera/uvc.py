@@ -35,6 +35,9 @@ logger = logging.getLogger(__name__)
 __all__ = ["UvcVideoSource"]
 
 FOURCC = "YUYV"
+POWER_LINE_MENU: dict[int, int] = {0: 0, 50: 1, 60: 2}
+"""UVC ``power_line_frequency`` menu index by mains frequency in Hz."""
+
 AUTO_EXPOSURE_MANUAL = 1
 _READ_TIMEOUT_S = 0.5
 
@@ -145,6 +148,9 @@ class UvcVideoSource:
         width, height: requested YUYV frame size.
         fps: requested frame rate.
         exposure: manual ``exposure_time_absolute`` value.
+        gain: manual ``gain`` value; ``None`` keeps the camera's value.
+        power_line_hz: anti-flicker mains frequency, ``0`` (off), ``50`` or
+            ``60``; ``None`` keeps the camera's value.
         match: case-insensitive card-name fragment used for ``"auto"``.
         device_lister: test seam returning the V4L2 nodes for ``"auto"``;
             defaults to :func:`cpsa.adapters.camera.devices.list_video_nodes`.
@@ -159,6 +165,8 @@ class UvcVideoSource:
         height: int,
         fps: float,
         exposure: int,
+        gain: int | None = None,
+        power_line_hz: int | None = None,
         match: str = DEFAULT_MATCH,
         device_lister: Callable[[], Sequence[VideoNode]] | None = None,
         stream_factory: _StreamFactory | None = None,
@@ -169,6 +177,10 @@ class UvcVideoSource:
             raise ValueError("fps must be positive")
         if exposure <= 0:
             raise ValueError("exposure must be positive")
+        if gain is not None and gain <= 0:
+            raise ValueError("gain must be positive")
+        if power_line_hz not in (None, *POWER_LINE_MENU):
+            raise ValueError("power_line_hz must be 0, 50 or 60")
         if not match.strip():
             raise ValueError("match must not be empty")
         self._device = device
@@ -178,6 +190,8 @@ class UvcVideoSource:
         self._height = int(height)
         self._fps = float(fps)
         self._exposure = int(exposure)
+        self._gain = None if gain is None else int(gain)
+        self._power_line_hz = power_line_hz
         self._factory = stream_factory if stream_factory is not None else _open_stream
         self._lifecycle = threading.Lock()
         self._stop = threading.Event()
@@ -207,6 +221,10 @@ class UvcVideoSource:
             try:
                 stream.set_control("auto_exposure", AUTO_EXPOSURE_MANUAL)
                 stream.set_control("exposure_time_absolute", self._exposure)
+                if self._gain is not None:
+                    stream.set_control("gain", self._gain)
+                if self._power_line_hz is not None:
+                    stream.set_control("power_line_frequency", POWER_LINE_MENU[self._power_line_hz])
             except Exception:
                 _close_quietly(stream)
                 raise

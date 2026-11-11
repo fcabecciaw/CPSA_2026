@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from cpsa.adapters.camera.devices import (
+    DEFAULT_MATCH,
     DEPTH_FOURCC,
     RGB_FOURCC,
     VideoNode,
@@ -53,6 +54,21 @@ def test_match_is_case_insensitive_and_skips_other_cards() -> None:
     assert select_video_node(nodes, match="f200").path == "/dev/video0"
     with pytest.raises(RuntimeError, match="no camera node"):
         select_video_node(nodes, match="C270")
+
+
+def test_the_default_match_finds_the_real_f200_card_names() -> None:
+    # Card names and formats as the KV260 kernel reports the Creative VF0800 (F200).
+    card = "Intel(R) RealSense(TM) 3D Camer"
+    nodes = [
+        VideoNode("/dev/video1", card, frozenset({RGB_FOURCC})),
+        VideoNode("/dev/video2", card, frozenset()),
+        VideoNode("/dev/video3", card, frozenset({RGB_FOURCC, DEPTH_FOURCC, "INZI", "Y10 "})),
+        VideoNode("/dev/video4", card, frozenset()),
+    ]
+
+    assert select_video_node(nodes, match=DEFAULT_MATCH).path == "/dev/video1"
+    depth = select_video_node(nodes, match=DEFAULT_MATCH, require=DEPTH_FOURCC, forbid=())
+    assert depth.path == "/dev/video3"
 
 
 def test_no_candidate_lists_what_was_found() -> None:
