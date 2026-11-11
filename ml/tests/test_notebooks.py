@@ -15,6 +15,7 @@ NOTEBOOKS = (
     "04_variant_study",
     "05_qat",
     "07_hand_pose",
+    "08_hand_topdown",
 )
 
 #: Kaggle datasets attached to each notebook.
@@ -36,10 +37,18 @@ EXPECTED_DATASETS = {
     "05_qat": ["fabiocabeccia/cpsa-halfbust", "fabiocabeccia/cpsa-checkpoints"],
     # Notebook 07 downloads HaGRID and hand-keypoints itself and needs no input.
     "07_hand_pose": [],
+    # Notebook 08 downloads the same two sources and needs no input either.
+    "08_hand_topdown": [],
 }
 
 #: Notebooks that train on a GPU (notebook 01 only builds the dataset).
-GPU_NOTEBOOKS = ("03_train_fp32", "04_variant_study", "05_qat", "07_hand_pose")
+GPU_NOTEBOOKS = (
+    "03_train_fp32",
+    "04_variant_study",
+    "05_qat",
+    "07_hand_pose",
+    "08_hand_topdown",
+)
 
 
 def _load(path: Path) -> dict:
@@ -92,6 +101,7 @@ def test_first_code_cell_pins_and_installs_cpsa_ml() -> None:
         ("04_variant_study", "train_study"),
         ("05_qat", "quantize_model"),
         ("07_hand_pose", "build_hand_dataset"),
+        ("08_hand_topdown", "build_handframe_dataset"),
     ],
 )
 def test_notebooks_are_thin_wrappers(stem: str, entry_point: str) -> None:
@@ -224,3 +234,27 @@ def test_notebook_03_uses_the_curated_list_in_the_mixed_dataset() -> None:
     source = _source("03_train_fp32")
     assert "curated_train=CURATION.train_list" in source
     assert "val_h160=CURATION.val_h160_list" in source
+
+
+def test_notebook_08_builds_the_full_frame_ir_dataset_and_exports_256x320() -> None:
+    source = _source("08_hand_topdown")
+    assert "from cpsa_ml.datasets.handframe import" in source
+    assert "HandFrameConfig" in source
+    assert "build_handframe_dataset" in source
+    assert "HagridSource" in source and "UltralyticsHandSource" in source
+    assert "USE_ULTRALYTICS" in source  # the CC BY-NC-SA source stays optional
+    assert "imgsz_hw=(256, 320)" in source
+    assert "clahe_p=0.8" in source and "hand_frac=(0.25, 0.6)" in source
+    # The training settings are the plan's: lrelu n at 320, gray-friendly augs.
+    assert 'schema="hand21"' in source
+    assert 'ACTIVATION = "lrelu"' in source
+    assert 'config_path("yolov8n-hand-lrelu.yaml")' in source
+    assert "IMGSZ = 320" in source and "EPOCHS = 60" in source and "BATCH = 64" in source
+    assert '"hsv_h": 0' in source and '"hsv_s": 0' in source and '"degrees": 180' in source
+    # The export is the deployed 256x320 graph plus the dataset metadata.
+    assert "export_onnx(best, MODEL" in source
+    assert "imgsz=(256, 320)" in source
+    assert 'shutil.copy2(OUT / "stats.json", MODEL / "stats.json")' in source or (
+        'for name in ("data.yaml", "schema.json", "stats.json")' in source
+    )
+    assert "CC BY-NC-SA" in source  # the non-commercial warning stays visible
