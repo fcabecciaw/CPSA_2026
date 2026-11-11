@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import io
 import os
 import tarfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -82,6 +84,24 @@ def test_listing_never_stats_a_file(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert (target / staging.MARKER).is_file()
 
 
+def test_stage_dataset_copies_with_plain_handles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Copying never goes through ``shutil.copyfile``, which stats both ends."""
+
+    source = _dataset(tmp_path / "source")
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise AssertionError("shutil.copyfile stats the source and the target twice")
+
+    monkeypatch.setattr(staging.shutil, "copyfile", fail)
+
+    target = stage_dataset(source, tmp_path / "target")
+
+    assert (target / "images/train/a.jpg").read_bytes() == b"a.jpg"
+    assert (target / "labels/val/c.txt").read_text(encoding="utf-8") == "0 0 0 0 0\n"
+
+
 def test_stage_dataset_copies_the_included_paths_and_data_yaml(tmp_path: Path) -> None:
     source = _dataset(tmp_path / "source")
     target = tmp_path / "target"
@@ -147,6 +167,64 @@ def test_stage_archive_returns_the_folder_that_holds_data_yaml(
     # The marker is the reuse contract: the extraction must not need the archive.
     archive.unlink()
     assert stage_archive(archive, tmp_path / "extracted") == root
+
+
+def test_stage_archive_rejects_a_traversal_member(tmp_path: Path) -> None:
+    """A member that escapes the target folder fails instead of being written."""
+
+    archive = tmp_path / "traversal.tar"
+    with tarfile.open(archive, "w") as tar:
+        payload = b"escape"
+        member = tarfile.TarInfo("../x")
+        member.size = len(payload)
+        tar.addfile(member, io.BytesIO(payload))
+
+    with pytest.raises(tarfile.TarError):
+        stage_archive(archive, tmp_path / "extracted")
+
+    assert not (tmp_path / "x").exists()
+    assert not (tmp_path / "extracted" / staging.MARKER).exists()
+
+
+def test_stage_archive_opens_the_archive_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The headers are scanned while extracting, not by a second full pass."""
+
+    build = _dataset(tmp_path / "build")
+    archive = tmp_path / "hagrid62.tar"
+    with tarfile.open(archive, "w") as tar:
+        tar.add(build, arcname="hagrid62")
+    opens: list[tuple[object, ...]] = []
+    real_open = tarfile.open
+
+    def counting_open(*args: Any, **kwargs: Any) -> tarfile.TarFile:
+        opens.append(args)
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(staging.tarfile, "open", counting_open)
+
+    root = stage_archive(archive, tmp_path / "extracted")
+
+    assert len(opens) == 1
+    assert (root / "images/train/a.jpg").read_bytes() == b"a.jpg"
+
+
+def test_stage_archive_refuses_without_the_pep706_filter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without ``tarfile.data_filter`` the archive is not extracted unchecked."""
+
+    build = _dataset(tmp_path / "build")
+    archive = tmp_path / "hagrid62.tar"
+    with tarfile.open(archive, "w") as tar:
+        tar.add(build, arcname="hagrid62")
+    monkeypatch.delattr(staging.tarfile, "data_filter")
+
+    with pytest.raises(RuntimeError, match="tarfile.data_filter"):
+        stage_archive(archive, tmp_path / "extracted")
+
+    assert not (tmp_path / "extracted" / "hagrid62").exists()
 
 
 def test_stage_archive_rejects_an_archive_without_a_dataset(tmp_path: Path) -> None:

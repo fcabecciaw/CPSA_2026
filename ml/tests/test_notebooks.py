@@ -200,6 +200,10 @@ def test_notebook_04_stages_the_manifest_and_the_teacher_archive() -> None:
     assert "Add Input" in source and "06_teacher_hagrid" in source
     assert "staging: the manifest keeps" in source
     assert "staging: teacher dataset ready" in source
+    # The teacher archive is required unless the operator opts out explicitly.
+    assert "ALLOW_NO_HAGRID = False" in source
+    assert "elif not ALLOW_NO_HAGRID:" in source
+    assert "hagrid62.tar is not attached" in source
 
 
 def test_notebook_07_builds_and_trains_the_hand_model() -> None:

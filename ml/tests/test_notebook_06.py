@@ -155,7 +155,7 @@ def test_notebook_06_documents_licenses_and_the_notebook_04_handoff() -> None:
     )
     assert "CC BY-SA 4.0" in markdown
     assert "Apache-2.0" in markdown
-    assert "fabiocabeccia/cpsa-hagrid62" in markdown
+    assert "Notebook output" in markdown
     assert "notebook 04" in markdown
     assert "stage_archive" in markdown
     assert "data.yaml" in markdown

@@ -8,8 +8,10 @@ and returns the local root. A completed copy is reused (marker file).
 
 Two staging paths keep that copy cheap:
 
-* ``stage_dataset`` lists the source with :func:`os.walk` and never issues one
-  ``stat`` per file, which over 216k files on the network mount costs hours.
+* ``stage_dataset`` lists the source with :func:`os.walk` and copies each file
+  through plain ``open`` handles, so staging issues no per-file ``stat`` at all.
+  With ``rglob`` + ``is_file()``, or ``shutil.copyfile`` (which stats both ends
+  twice per file), those round trips cost hours over 216k network-mount files.
   ``include`` restricts the copy to the POSIX relative paths of a shipped
   manifest (:func:`load_manifest`).
 * ``stage_archive`` extracts a teacher-generated ``.tar`` once, locally.
@@ -36,9 +38,19 @@ MANIFEST_PACKAGE = "cpsa_ml.data"
 
 
 def _copy(pair: tuple[Path, Path]) -> None:
+    """Copy one staged file without ``stat``-ing either end.
+
+    ``shutil.copyfile`` stats the source and the target twice per file, and on
+    Kaggle's network mount every such round trip costs about 160 ms. The parent
+    folders are created once by :func:`stage_dataset` before the pool starts.
+
+    Args:
+        pair: Source path and its destination path.
+    """
+
     source, target = pair
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source, target)
+    with open(source, "rb") as src, open(target, "wb") as dst:
+        shutil.copyfileobj(src, dst)
 
 
 def _list_files(source: Path) -> list[str]:
@@ -117,6 +129,10 @@ def stage_dataset(
             flush=True,
         )
     pairs = [(source / path, target / path) for path in listing]
+    # One mkdir per distinct parent: calling mkdir(exist_ok=True) per file would
+    # stat the folder again for every copy.
+    for parent in sorted({staged.parent for _, staged in pairs}):
+        parent.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
     step = max(len(pairs) // 10, 1)
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -170,6 +186,8 @@ def stage_archive(archive: Path | str, target: Path | str) -> Path:
 
     Raises:
         FileNotFoundError: If ``archive`` is missing or holds no ``data.yaml``.
+        RuntimeError: If this Python has no :data:`tarfile.data_filter`, so the
+            archive could only be extracted without checking member paths.
     """
 
     archive = Path(archive)
@@ -181,17 +199,23 @@ def stage_archive(archive: Path | str, target: Path | str) -> Path:
             return existing
     if not archive.is_file():
         raise FileNotFoundError(f"archive not found: {archive}")
+    # PEP 706 filter="data" rejects absolute member names, ".." escapes and
+    # device files. Python 3.12 and the 3.8-3.11 backports provide it; rather
+    # than extract a teacher archive unchecked, refuse.
+    if not hasattr(tarfile, "data_filter"):
+        raise RuntimeError(
+            f"this Python has no tarfile.data_filter (PEP 706), refusing to "
+            f"extract {archive} without member-path validation"
+        )
     target.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
+    # A single open: getmembers() scans the headers once and extract() seeks
+    # back to each member's data, where reopening the archive would scan twice.
     with tarfile.open(archive) as tar:
         members = tar.getmembers()
-    # Python 3.12 (and the PEP 706 backports) reject absolute paths and links
-    # that escape the target folder through filter="data".
-    extract_options = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
-    step = max(len(members) // 10, 1)
-    with tarfile.open(archive) as tar:
+        step = max(len(members) // 10, 1)
         for index, member in enumerate(members, start=1):
-            tar.extract(member, target, **extract_options)
+            tar.extract(member, target, filter="data")
             if index % step == 0 or index == len(members):
                 print(
                     f"staging: {index}/{len(members)} archive members extracted to {target} "
