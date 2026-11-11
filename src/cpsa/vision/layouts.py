@@ -1,6 +1,6 @@
 """Keypoint layouts used by the 2D vision pipeline (FR-004).
 
-Two layouts are provided:
+Three layouts are provided:
 
 * :data:`COCO17` -- the standard COCO body keypoints, used as a stand-in until
   the half-body model is available.  It has no hand keypoints, so hand shape is
@@ -8,6 +8,8 @@ Two layouts are provided:
 * :data:`HALFBUST_62` -- the target layout: 11 upper-body points, 9 face
   points and 2 x 21 hand points.  The names match ``ml/src/cpsa_ml/schema.py``
   exactly; the ML package is not imported at runtime.
+* :data:`HAND21` -- one MediaPipe hand: the 21 keypoints of the hand demos'
+  top-down model, with the 20 finger bones as edges.
 
 Face anchors are mapped to a :class:`~cpsa.domain.model.FaceRegion`:
 
@@ -29,7 +31,7 @@ from types import MappingProxyType
 from cpsa.domain.model import FaceRegion
 from cpsa.vision.types import KeypointLayout
 
-__all__ = ["COCO17", "HALFBUST_62", "LAYOUTS", "get_layout"]
+__all__ = ["COCO17", "HALFBUST_62", "HAND21", "LAYOUTS", "get_layout"]
 
 # ---------------------------------------------------------------------------
 # COCO-17
@@ -232,12 +234,57 @@ COCO17 = KeypointLayout(
     edges=_COCO17_EDGES,
 )
 
+# ---------------------------------------------------------------------------
+# HAND-21
+# ---------------------------------------------------------------------------
+
+HAND21_NAMES: tuple[str, ...] = (
+    "wrist",
+    "thumb_cmc",
+    "thumb_mcp",
+    "thumb_ip",
+    "thumb_tip",
+    "index_finger_mcp",
+    "index_finger_pip",
+    "index_finger_dip",
+    "index_finger_tip",
+    "middle_finger_mcp",
+    "middle_finger_pip",
+    "middle_finger_dip",
+    "middle_finger_tip",
+    "ring_finger_mcp",
+    "ring_finger_pip",
+    "ring_finger_dip",
+    "ring_finger_tip",
+    "pinky_mcp",
+    "pinky_pip",
+    "pinky_dip",
+    "pinky_tip",
+)
+
+# The four bones of each finger, wrist to tip; the palm chain is not drawn
+# because a single hand has no second anchor.
+HAND21_EDGES: tuple[tuple[int, int], ...] = _HAND_EDGES[:20]
+
+# The layout is one hand without a side, so ``left_hand``/``right_hand`` stay
+# empty: the whole layout is that hand.
+HAND21 = KeypointLayout(
+    name="hand21",
+    names=HAND21_NAMES,
+    face=(),
+    face_regions=(),
+    left_hand=(),
+    right_hand=(),
+    edges=HAND21_EDGES,
+)
+
 LAYOUTS: Mapping[str, KeypointLayout] = MappingProxyType(
     {
         "coco17": COCO17,
         "coco17_3d": COCO17,
         "halfbust62": HALFBUST_62,
         "halfbust_62": HALFBUST_62,
+        "hand21": HAND21,
     }
 )
 
@@ -246,7 +293,7 @@ def get_layout(name: str) -> KeypointLayout:
     """Resolve a configured layout name (case-insensitive).
 
     Accepts the aliases used by ``ml/src/cpsa_ml/schema.py`` (``coco17``,
-    ``coco17_3d``, ``halfbust62``, ``halfbust_62``).
+    ``coco17_3d``, ``halfbust62``, ``halfbust_62``) and ``hand21``.
     """
 
     if not isinstance(name, str):
