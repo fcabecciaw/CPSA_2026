@@ -11,7 +11,7 @@
 
 export const PROTOCOL_VERSION = 1 as const;
 
-export const MODES = ["idle", "lab", "medical"] as const;
+export const MODES = ["idle", "lab", "medical", "hologram", "rps"] as const;
 export type Mode = (typeof MODES)[number];
 
 export const MODE_STATES = ["stopped", "starting", "running", "stopping", "failed"] as const;
@@ -232,6 +232,69 @@ export interface HandsPayload {
   seq: number | null;
 }
 
+/** MediaPipe hand21 layout: wrist, then four joints for each of the five fingers. */
+export const HAND21_POINTS = 21;
+
+/** A lifted joint in metres, IR camera frame (x right, y down, z forward). */
+export type Point3D = [x: number, y: number, z: number];
+
+export interface HologramHand {
+  score: number;
+  box: [number, number, number, number];
+  /** hand21 joints in IR pixels: `[u, v, confidence]`. */
+  kpts2d: Keypoint[];
+  /** The same joints lifted to metres; `null` where the depth was invalid. */
+  kpts3d: (Point3D | null)[];
+}
+
+export interface HologramTiming {
+  dpu_ms: number;
+  total_ms: number;
+}
+
+/** F-E `hologram.hands`: the hologram view's stream, at most 30 Hz. */
+export interface HologramHandsPayload {
+  seq: number;
+  t: number;
+  width: number;
+  height: number;
+  hands: HologramHand[];
+  timing: HologramTiming;
+}
+
+export const RPS_PHASES = ["waiting", "ready", "countdown", "shoot", "result"] as const;
+export type RpsPhase = (typeof RPS_PHASES)[number];
+
+/** Hand classes of the classifier; `none` means no recognisable gesture. */
+export const RPS_GESTURES = ["rock", "paper", "scissors", "none"] as const;
+export type RpsGesture = (typeof RPS_GESTURES)[number];
+
+/** What the board can play: always one of the three gestures. */
+export const RPS_MOVES = ["rock", "paper", "scissors"] as const;
+export type RpsMove = (typeof RPS_MOVES)[number];
+
+export const RPS_OUTCOMES = ["win", "lose", "draw", "unclear"] as const;
+export type RpsOutcome = (typeof RPS_OUTCOMES)[number];
+
+export interface RpsScore {
+  player: number;
+  board: number;
+  draws: number;
+}
+
+/** F-E `rps.state`: the game state machine, published on each change. */
+export interface RpsStatePayload {
+  phase: RpsPhase;
+  /** 3, 2 or 1 during the countdown; `null` in every other phase. */
+  count: number | null;
+  player: RpsGesture | null;
+  player_p: number | null;
+  board: RpsMove | null;
+  outcome: RpsOutcome | null;
+  score: RpsScore;
+  hand: { kpts2d: Keypoint[] } | null;
+}
+
 interface Envelope<T extends string, P> {
   v: typeof PROTOCOL_VERSION;
   type: T;
@@ -251,7 +314,9 @@ export type ServerMessage =
   | Envelope<"medical.state", MedicalStatePayload>
   | Envelope<"medical.decision", Decision>
   | Envelope<"medical.episode", EpisodePayload>
-  | Envelope<"medical.hands", HandsPayload>;
+  | Envelope<"medical.hands", HandsPayload>
+  | Envelope<"hologram.hands", HologramHandsPayload>
+  | Envelope<"rps.state", RpsStatePayload>;
 
 export type ServerMessageType = ServerMessage["type"];
 
@@ -296,6 +361,8 @@ const KNOWN_TYPES: readonly ServerMessageType[] = [
   "medical.decision",
   "medical.episode",
   "medical.hands",
+  "hologram.hands",
+  "rps.state",
 ];
 
 export function isServerMessageType(type: string): type is ServerMessageType {
@@ -355,6 +422,10 @@ export function parseServerMessage(raw: string): ParseResult {
         return message({ v: PROTOCOL_VERSION, type, seq, t, wall, data: parseEpisode(data) });
       case "medical.hands":
         return message({ v: PROTOCOL_VERSION, type, seq, t, wall, data: parseHands(data) });
+      case "hologram.hands":
+        return message({ v: PROTOCOL_VERSION, type, seq, t, wall, data: parseHologramHands(data) });
+      case "rps.state":
+        return message({ v: PROTOCOL_VERSION, type, seq, t, wall, data: parseRpsState(data) });
     }
   } catch (error) {
     return { kind: "invalid", reason: `${type}: ${reasonOf(error)}` };
@@ -576,6 +647,116 @@ function parseHands(data: JsonObject): HandsPayload {
 
 function optionalSequence(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+/**
+ * F-E `hologram.hands`. The 2D joints are load-bearing (the view needs them to
+ * describe the hand), so a broken `[u, v, c]` rejects the message; a `kpts3d`
+ * entry that is not a triple becomes `null`, the same value the lift uses for
+ * a joint without depth.
+ */
+function parseHologramHands(data: JsonObject): HologramHandsPayload {
+  const timing = asObject(data.timing, "timing");
+  return {
+    seq: reqInteger(data, "seq", 0),
+    t: reqNumber(data, "t"),
+    width: reqInteger(data, "width", 1),
+    height: reqInteger(data, "height", 1),
+    hands: reqArray(data, "hands", parseHologramHand),
+    timing: {
+      dpu_ms: reqNumber(timing, "dpu_ms"),
+      total_ms: reqNumber(timing, "total_ms"),
+    },
+  };
+}
+
+function parseHologramHand(value: unknown): HologramHand {
+  const hand = asObject(value, "hands[]");
+  return {
+    score: reqNumber(hand, "score"),
+    box: parseBox(hand.box, "hands[].box"),
+    kpts2d: parseKeypoints(hand.kpts2d, "hands[].kpts2d"),
+    kpts3d: parsePoints3D(hand.kpts3d, "hands[].kpts3d"),
+  };
+}
+
+function parseRpsState(data: JsonObject): RpsStatePayload {
+  const score = asObject(data.score, "score");
+  return {
+    phase: enumField(data, "phase", RPS_PHASES),
+    count: parseRpsCount(data.count),
+    player: nullableEnumField(data, "player", RPS_GESTURES),
+    player_p: nullableNumberField(data, "player_p"),
+    board: nullableEnumField(data, "board", RPS_MOVES),
+    outcome: nullableEnumField(data, "outcome", RPS_OUTCOMES),
+    score: {
+      player: reqInteger(score, "player", 0),
+      board: reqInteger(score, "board", 0),
+      draws: reqInteger(score, "draws", 0),
+    },
+    hand:
+      data.hand == null
+        ? null
+        : { kpts2d: parseKeypoints(asObject(data.hand, "hand").kpts2d, "hand.kpts2d") },
+  };
+}
+
+/** The countdown sends 3, 2, 1; every other phase sends `null`. */
+function parseRpsCount(value: unknown): number | null {
+  if (value == null) {
+    return null;
+  }
+  if (value === 1 || value === 2 || value === 3) {
+    return value;
+  }
+  throw new PayloadError(`count: atteso 1, 2, 3 o null, ricevuto ${String(value)}`);
+}
+
+function parseKeypoints(value: unknown, what: string): Keypoint[] {
+  if (!Array.isArray(value)) {
+    throw new PayloadError(`${what}: attesa una lista`);
+  }
+  return value.map((item) => {
+    if (!Array.isArray(item) || item.length < 3) {
+      throw new PayloadError(`${what}[]: attesa una terna [u, v, c]`);
+    }
+    return [
+      numberValue(item[0], `${what}[][0]`),
+      numberValue(item[1], `${what}[][1]`),
+      numberValue(item[2], `${what}[][2]`),
+    ];
+  });
+}
+
+function parsePoints3D(value: unknown, what: string): (Point3D | null)[] {
+  if (!Array.isArray(value)) {
+    throw new PayloadError(`${what}: attesa una lista`);
+  }
+  return value.map((item) => {
+    if (item == null) {
+      return null;
+    }
+    if (!Array.isArray(item) || item.length < 3) {
+      throw new PayloadError(`${what}[]: attesa una terna [x, y, z] o null`);
+    }
+    return [
+      numberValue(item[0], `${what}[][0]`),
+      numberValue(item[1], `${what}[][1]`),
+      numberValue(item[2], `${what}[][2]`),
+    ];
+  });
+}
+
+function parseBox(value: unknown, what: string): [number, number, number, number] {
+  if (!Array.isArray(value) || value.length < 4) {
+    throw new PayloadError(`${what}: attesa una quaterna [x1, y1, x2, y2]`);
+  }
+  return [
+    numberValue(value[0], `${what}[0]`),
+    numberValue(value[1], `${what}[1]`),
+    numberValue(value[2], `${what}[2]`),
+    numberValue(value[3], `${what}[3]`),
+  ];
 }
 
 function parseSubjectBox(value: unknown): [number, number, number, number] | null {

@@ -13,20 +13,28 @@
  */
 
 import type { SocketLike } from "./client";
-import type {
-  Decision,
-  EpisodePayload,
-  HandsPayload,
-  ImuState,
-  Keypoint,
-  LogPayload,
-  MedicalStatePayload,
-  Mode,
-  PerceptionTiming,
-  ServerMessage,
-  StatusPayload,
-  Tag,
-  TriggerSource,
+import {
+  MODES,
+  type Decision,
+  type EpisodePayload,
+  type HandsPayload,
+  type HologramHandsPayload,
+  type ImuState,
+  type Keypoint,
+  type LogPayload,
+  type MedicalStatePayload,
+  type Mode,
+  type PerceptionTiming,
+  type Point3D,
+  type RpsGesture,
+  type RpsMove,
+  type RpsOutcome,
+  type RpsPhase,
+  type RpsStatePayload,
+  type ServerMessage,
+  type StatusPayload,
+  type Tag,
+  type TriggerSource,
 } from "./protocol";
 
 /** IF-451 revision: `?mock=1&trigger=vision` selects the camera-only variant. */
@@ -36,6 +44,19 @@ function requestedTrigger(): TriggerSource {
 }
 
 const TRIGGER: TriggerSource = requestedTrigger();
+
+/**
+ * `?mock=1&mode=hologram` (or `rps`) starts directly in a hand-demo mode, so a
+ * screenshot does not have to click through the switch.
+ */
+function requestedMode(): Mode {
+  const requested = new URLSearchParams(window.location.search).get("mode");
+  return (MODES as readonly string[]).includes(requested ?? "")
+    ? (requested as Mode)
+    : "medical";
+}
+
+const INITIAL_MODE: Mode = requestedMode();
 
 export const MOCK_BADGE =
   "Dati di esempio (mock): replay di docs/protocol/v1/examples, nessun server connesso." +
@@ -64,6 +85,15 @@ const HEIGHT = 480;
 const POSE_PERIOD_HZ = 1.4;
 const EPISODE_DURATION_MS = 22_000;
 const EPISODE_PAUSE_MS = 5_000;
+
+/** Sasso-carta-forbice timings, the same shape as the real state machine. */
+const RPS_READY_MS = 600;
+const RPS_STEP_MS = 700;
+const RPS_SHOOT_MS = 400;
+const RPS_RESULT_MS = 3_000;
+
+/** IR camera guess, used only to draw the mock hands' 2D points. */
+const MOCK_FOCAL_PX = 500;
 
 const IMU_LOG_LINES: readonly LogPayload[] = [
   { level: "info", source: "supervisor", message: "Modalità medical avviata" },
@@ -115,7 +145,7 @@ export function createMockSocket(_url: string): SocketLike {
   const intervals = new Set<ReturnType<typeof setInterval>>();
 
   let closed = false;
-  let mode: Mode = "medical";
+  let mode: Mode = INITIAL_MODE;
   let switching = false;
   let episodeNumber = 0;
   let episodeId = "";
@@ -126,6 +156,19 @@ export function createMockSocket(_url: string): SocketLike {
   let decisionIndex = 0;
   let logIndex = 0;
   let startedAt = Date.now();
+  let hologramSeq = 0;
+
+  // Sasso-carta-forbice state (T5): the same shape the real state machine has,
+  // replayed so the view can be built without the board.
+  let rpsPhase: RpsPhase = "waiting";
+  let rpsSince = Date.now();
+  let rpsCount = 3;
+  let rpsRound = 0;
+  let rpsPlayer: RpsGesture | null = null;
+  let rpsPlayerP: number | null = null;
+  let rpsBoard: RpsMove | null = null;
+  let rpsOutcome: RpsOutcome | null = null;
+  const rpsScore = { player: 0, board: 0, draws: 0 };
 
   const socket: SocketLike = {
     onopen: null,
@@ -184,16 +227,21 @@ export function createMockSocket(_url: string): SocketLike {
   function sendStatus(): void {
     const status: StatusPayload = fixture("status").data;
     status.mode = mode;
-    status.mode_state = switching ? "starting" : mode === "medical" ? "running" : "stopped";
-    const fps = mode === "medical" ? 29.6 + Math.sin(Date.now() / 900) * 0.8 : null;
+    // Idle and lab run nothing; the three demo modes run a camera pipeline.
+    const vision = mode === "medical" || mode === "hologram" || mode === "rps";
+    status.mode_state = switching ? "starting" : vision ? "running" : "stopped";
+    const fps = vision ? 29.6 + Math.sin(Date.now() / 900) * 0.8 : null;
     status.perception.fps = fps;
-    status.perception.dpu_ms = mode === "medical" ? 17.8 : null;
+    status.perception.dpu_ms = vision ? 17.8 : null;
     status.perception.camera = "ok";
-    status.perception.model = mode === "medical" ? "pose_halfbust62" : null;
+    status.perception.model = vision
+      ? mode === "medical"
+        ? "pose_halfbust62"
+        : "pose_hand21_int8"
+      : null;
     // F13: plausible rolling-window numbers, so the "Tempi" line and the FPS
     // caption can be built before the server reports them.
-    status.perception.timing =
-      mode === "medical" && fps !== null ? mockTiming(fps) : null;
+    status.perception.timing = vision && fps !== null ? mockTiming(fps) : null;
     status.imu = mode === "medical" && TRIGGER === "imu" ? imuState() : "n/a";
     status.errors = [];
     status.uptime_s = 125.4 + (Date.now() - startedAt) / 1000;
@@ -298,6 +346,120 @@ export function createMockSocket(_url: string): SocketLike {
     emit(message("medical.hands", pose(Date.now() - episodeStart)));
   }
 
+  // --- Hologram (T5): an animated hand at the camera rate -------------------
+
+  function sendHologram(): void {
+    if (mode !== "hologram") {
+      return;
+    }
+    hologramSeq += 1;
+    emit(message("hologram.hands", hologramFrame(hologramSeq)));
+  }
+
+  // --- Sasso-carta-forbice (T5): the round loop ----------------------------
+
+  function startRpsRound(): void {
+    rpsPhase = "ready";
+    rpsSince = Date.now();
+    rpsCount = 3;
+    rpsPlayer = null;
+    rpsPlayerP = null;
+    rpsBoard = null;
+    rpsOutcome = null;
+  }
+
+  function resetRpsGame(): void {
+    rpsRound = 0;
+    rpsScore.player = 0;
+    rpsScore.board = 0;
+    rpsScore.draws = 0;
+    startRpsRound();
+  }
+
+  function tickRps(): void {
+    if (mode !== "rps") {
+      return;
+    }
+    advanceRps(Date.now());
+    emitRps();
+  }
+
+  function advanceRps(now: number): void {
+    const elapsed = now - rpsSince;
+    if (rpsPhase === "ready" && elapsed >= RPS_READY_MS) {
+      rpsPhase = "countdown";
+      rpsCount = 3;
+      rpsSince = now;
+      return;
+    }
+    if (rpsPhase === "countdown" && elapsed >= RPS_STEP_MS) {
+      if (rpsCount > 1) {
+        rpsCount -= 1;
+        rpsSince = now;
+        return;
+      }
+      rpsPhase = "shoot";
+      rpsSince = now;
+      return;
+    }
+    if (rpsPhase === "shoot" && elapsed >= RPS_SHOOT_MS) {
+      settleRound();
+      rpsPhase = "result";
+      rpsSince = now;
+      return;
+    }
+    if (rpsPhase === "result" && elapsed >= RPS_RESULT_MS) {
+      startRpsRound();
+    }
+  }
+
+  function settleRound(): void {
+    rpsRound += 1;
+    const gestures: readonly RpsMove[] = ["rock", "paper", "scissors"];
+    // Every fifth round the classifier recognises nothing, so the "unclear"
+    // branch is visible in the mock too and the score stays put.
+    const gesture: RpsGesture =
+      rpsRound % 5 === 0 ? "none" : (gestures[(rpsRound - 1) % gestures.length] ?? "rock");
+    rpsPlayer = gesture;
+    if (gesture === "none") {
+      rpsPlayerP = 0.38;
+      rpsBoard = null;
+      rpsOutcome = "unclear";
+      return;
+    }
+    rpsPlayerP = 0.92 - (rpsRound % 3) * 0.05;
+    const board = gestures[Math.floor(Math.random() * gestures.length)] ?? "rock";
+    rpsBoard = board;
+    rpsOutcome = rpsResult(gesture, board);
+    if (rpsOutcome === "win") {
+      rpsScore.player += 1;
+    } else if (rpsOutcome === "lose") {
+      rpsScore.board += 1;
+    } else {
+      rpsScore.draws += 1;
+    }
+  }
+
+  function emitRps(): void {
+    const shown: RpsGesture | null =
+      rpsPhase === "ready" || rpsPhase === "countdown" || rpsPhase === "shoot"
+        ? "paper"
+        : rpsPhase === "result" && rpsPlayer !== null && rpsPlayer !== "none"
+          ? rpsPlayer
+          : null;
+    const state: RpsStatePayload = {
+      phase: rpsPhase,
+      count: rpsPhase === "countdown" ? rpsCount : null,
+      player: rpsPhase === "result" ? rpsPlayer : null,
+      player_p: rpsPhase === "result" ? rpsPlayerP : null,
+      board: rpsPhase === "result" ? rpsBoard : null,
+      outcome: rpsPhase === "result" ? rpsOutcome : null,
+      score: { ...rpsScore },
+      hand: shown === null ? null : { kpts2d: rpsKeypoints(shown, Date.now()) },
+    };
+    emit(message("rps.state", state));
+  }
+
   function sendDecision(): void {
     if (mode !== "medical") {
       return;
@@ -339,15 +501,15 @@ export function createMockSocket(_url: string): SocketLike {
     if (command.type === "mode.set") {
       const data = (command.data ?? {}) as { mode?: unknown };
       const requested = data.mode;
-      if (requested !== "idle" && requested !== "medical") {
-        sendError("bad_command", "in questa slice sono disponibili solo idle e medical", refSeq);
+      if (typeof requested !== "string" || !(MODES as readonly string[]).includes(requested)) {
+        sendError("bad_command", `modalità sconosciuta: ${String(requested)}`, refSeq);
         return;
       }
       if (switching) {
         sendError("busy", "a mode switch is already in progress", refSeq);
         return;
       }
-      switchMode(requested);
+      switchMode(requested as Mode);
       return;
     }
     sendError("bad_command", `comando sconosciuto: ${String(command.type)}`, refSeq);
@@ -378,6 +540,9 @@ export function createMockSocket(_url: string): SocketLike {
       } else if (episodeActive) {
         endEpisode();
       }
+      if (next === "rps") {
+        resetRpsGame();
+      }
     });
   }
 
@@ -385,23 +550,30 @@ export function createMockSocket(_url: string): SocketLike {
     emit(fixture("hello"));
     sendStatus();
     const progress = fixture("mode.progress");
-    progress.data = { mode: "medical", step: "ready", error: null };
+    progress.data = { mode, step: "ready", error: null };
     emit(progress);
     // Recent history, as the server replays it after the state snapshot.
     for (const line of LOG_LINES.slice(0, 5)) {
       emit(message("log", line));
     }
     logIndex = 5;
-    startEpisode();
-    // `medical.state` seeds the feed with its last decision; start the cycle
-    // after it so the first visible rows differ.
-    decisionIndex = 1;
+    if (mode === "medical") {
+      startEpisode();
+      // `medical.state` seeds the feed with its last decision; start the cycle
+      // after it so the first visible rows differ.
+      decisionIndex = 1;
+    }
+    if (mode === "rps") {
+      resetRpsGame();
+    }
   }
 
   later(10, () => {
     socket.onopen?.();
     snapshot();
     every(50, sendHands);
+    every(33, sendHologram);
+    every(100, tickRps);
     every(1000, sendMedicalState);
     every(2000, sendStatus);
     every(5000, sendDecision);
@@ -559,4 +731,160 @@ function writeHand(
     const confidence = LOW_CONFIDENCE.has(index) ? 0.3 : baseConfidence;
     points[offset + index] = [centerX + rotatedX, centerY + rotatedY, confidence];
   });
+}
+
+/**
+ * hand21 in "hand units": wrist at the origin, fingers towards -v, thumb on the
+ * left. Shared by the two hand demos, which need a plausible 21-joint shape
+ * without a board.
+ */
+const HAND21_LOCAL: readonly (readonly [number, number])[] = [
+  [0, 0],
+  // thumb: cmc, mcp, ip, tip
+  [-12, -6],
+  [-20, -18],
+  [-26, -30],
+  [-30, -40],
+  // index: mcp, pip, dip, tip
+  [-16, -44],
+  [-18, -60],
+  [-19, -72],
+  [-19, -83],
+  // middle
+  [-5, -48],
+  [-6, -66],
+  [-6, -79],
+  [-6, -91],
+  // ring
+  [6, -46],
+  [7, -64],
+  [7, -76],
+  [7, -87],
+  // pinky
+  [16, -40],
+  [18, -54],
+  [18, -66],
+  [19, -75],
+];
+
+/** Finger chains after the wrist: thumb, index, middle, ring, pinky. */
+const HAND21_FINGERS: readonly (readonly number[])[] = [
+  [1, 2, 3, 4],
+  [5, 6, 7, 8],
+  [9, 10, 11, 12],
+  [13, 14, 15, 16],
+  [17, 18, 19, 20],
+];
+
+/** Per-finger extension: 0 curled into the palm, 1 fully stretched. */
+const GESTURE_EXTENSION: Record<RpsGesture, readonly number[]> = {
+  rock: [0.1, 0.05, 0, 0, 0],
+  paper: [0.9, 1, 1, 1, 1],
+  scissors: [0.2, 1, 1, 0.05, 0],
+  none: [0.4, 0.55, 0.3, 0.45, 0.65],
+};
+
+/** Who beats whom: the board plays the same three gestures. */
+const BEATS: Record<RpsMove, RpsMove> = {
+  rock: "scissors",
+  paper: "rock",
+  scissors: "paper",
+};
+
+function rpsResult(player: RpsMove, board: RpsMove): RpsOutcome {
+  if (player === board) {
+    return "draw";
+  }
+  return BEATS[player] === board ? "win" : "lose";
+}
+
+/** Curled fingers stay near their knuckle and fold towards the palm. */
+function localHand(extension: readonly number[]): Array<readonly [number, number]> {
+  const points: Array<readonly [number, number]> = HAND21_LOCAL.map(([x, y]) => [x, y]);
+  HAND21_FINGERS.forEach((chain, finger) => {
+    const knuckle = chain[0] === undefined ? undefined : points[chain[0]];
+    if (knuckle === undefined) {
+      return;
+    }
+    const amount = extension[finger] ?? 0;
+    chain.forEach((index, step) => {
+      const target = HAND21_LOCAL[index];
+      if (step === 0 || target === undefined) {
+        return;
+      }
+      const reach = 0.15 + 0.85 * amount;
+      const fold = 1 - amount;
+      points[index] = [
+        knuckle[0] + (target[0] - knuckle[0]) * reach,
+        knuckle[1] + (target[1] - knuckle[1]) * reach + (fold * 9 * step) / 3,
+      ];
+    });
+  });
+  return points;
+}
+
+/** IR pixels of the mock hand, as the classifier would see it. */
+function rpsKeypoints(gesture: RpsGesture, nowMs: number): Keypoint[] {
+  const sway = Math.sin(nowMs / 380) * 2.5;
+  return localHand(GESTURE_EXTENSION[gesture]).map(([x, y]) => [
+    WIDTH / 2 + x * 1.9 + sway,
+    HEIGHT * 0.62 + y * 1.9,
+    0.96,
+  ]);
+}
+
+/**
+ * One `hologram.hands` frame: the hand opens and closes over seven seconds, so
+ * the 3D view has something to follow. The pinky tip loses its depth every
+ * fifth frame, which is what the view must survive with the median-depth rule.
+ */
+function hologramFrame(seq: number): HologramHandsPayload {
+  const now = Date.now();
+  // The hand opens and half-closes over seven seconds: a moving 3D hand whose
+  // fingers stay readable, which a full fist would not.
+  const wave = 0.5 + 0.5 * Math.cos(((now % 7_000) / 7_000) * Math.PI * 2);
+  const extension = 0.55 + 0.45 * wave;
+  const curl = 1 - wave;
+  const points = localHand([0.55 + 0.35 * extension, extension, extension, extension, extension]);
+  const sway = Math.sin(now / 1_500) * 0.006;
+
+  const metres = points.map(([x, y]) => ({
+    x: x * 0.0016 + sway,
+    y: y * 0.0016,
+    // The palm plane is turned a little towards the camera, and a half-closed
+    // hand brings the fingertips closer, so the projection has real depth.
+    z: 0.45 - x * 0.0007 - Math.max(0, -y) * 0.00025 - curl * 0.012,
+  }));
+
+  const kpts2d: Keypoint[] = metres.map((point) => [
+    WIDTH / 2 + (point.x / point.z) * MOCK_FOCAL_PX,
+    HEIGHT / 2 + (point.y / point.z) * MOCK_FOCAL_PX,
+    0.96,
+  ]);
+  const kpts3d = metres.map((point, index) =>
+    index === 20 && seq % 5 === 0 ? null : ([point.x, point.y, point.z] as Point3D),
+  );
+
+  const us = kpts2d.map((point) => point[0]);
+  const vs = kpts2d.map((point) => point[1]);
+  const drift = Math.sin(now / 1_300);
+
+  return {
+    seq,
+    t: now / 1000,
+    width: WIDTH,
+    height: HEIGHT,
+    hands: [
+      {
+        score: 0.94,
+        box: [Math.min(...us), Math.min(...vs), Math.max(...us), Math.max(...vs)],
+        kpts2d,
+        kpts3d,
+      },
+    ],
+    timing: {
+      dpu_ms: Math.round((17.8 + drift * 0.4) * 10) / 10,
+      total_ms: Math.round((61.2 + drift * 2.5) * 10) / 10,
+    },
+  };
 }

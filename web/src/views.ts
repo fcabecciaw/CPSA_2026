@@ -60,7 +60,12 @@ export function collectElements(): DashboardElements {
     connDot: byId("conn-dot"),
     connText: byId("conn-text"),
     connDetail: byId("conn-detail"),
-    modeButtons: [byId<HTMLButtonElement>("mode-idle"), byId<HTMLButtonElement>("mode-medical")],
+    modeButtons: [
+      byId<HTMLButtonElement>("mode-idle"),
+      byId<HTMLButtonElement>("mode-medical"),
+      byId<HTMLButtonElement>("mode-hologram"),
+      byId<HTMLButtonElement>("mode-rps"),
+    ],
     modeStatus: byId("mode-status"),
     modeError: byId("mode-error"),
     health: byId("health"),

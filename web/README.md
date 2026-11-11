@@ -33,8 +33,9 @@ are no font files, images or scripts fetched from the network.
    the server sends it (`fps`/`dpu_ms` are the fallback), with the camera rate
    as secondary text next to the analysed one. A compact “Tempi” line lists
    Decodifica, Pre, DPU, Post, Tracking, Latenza and Scartati (“—” when the
-   server reports `null`). The operator toggle sends `mode.set` for `idle` or
-   `medical`; `mode.progress` steps and `error` messages appear in the bar.
+   server reports `null`). The operator toggle sends `mode.set` for `idle`,
+   `medical`, `hologram` or `rps`; `mode.progress` steps and `error` messages
+   appear in the bar.
 2. **Stato live** — IMU state, the current tag (text plus colour), and whether
    an episode is active.
 3. **Decisioni** — the latest 20 `medical.decision` messages, newest first and
@@ -58,6 +59,16 @@ are no font files, images or scripts fetched from the network.
    stream shows “Video non disponibile” and retries after 2 s, doubling up to
    10 s. The mock never opens the stream (`?mock=1` has no backend) and keeps
    the placeholder.
+
+   Two further centre views take its place while their mode runs (both are
+   selected by `status.mode`): **Ologramma** draws `hologram.hands` with a
+   hand-written perspective projection on canvas 2D — a virtual camera tilted
+   30° and orbiting, cyan glow, spheres for joints, lines for bones, a faint
+   grid on the table plane and scanline overlay; a joint without a lifted depth
+   uses the hand's median depth. **Sasso-carta-forbice** shows `rps.state`: the
+   “Sasso… carta… forbice!” countdown, the player's gesture beside the board's
+   move, the result banner, the score and a small IR skeleton preview from
+   `kpts2d`.
 
 Trigger source: when `medical.state.trigger` is `vision` (camera-only mode), the live
 status shows an "Attivazione: telecamera" tile and the IMU tile reads "Non usato (solo
@@ -113,6 +124,14 @@ fixture data and no mock badge.
 
 `?mock=1&trigger=vision` replays the camera-only variant (`trigger: vision`, `imu: n/a`,
 camera and vision lines in the connection log).
+
+`?mock=1&mode=hologram` and `?mock=1&mode=rps` start directly in a hand-demo
+mode, and the mode buttons switch to them at any time: the mock then publishes
+`hologram.hands` at 30 Hz (a hand that opens and half-closes, with one joint
+whose depth is missing so the median-depth rule is exercised) or plays
+`rps.state` rounds (`ready`, countdown 3·2·1, `shoot`, `result`, then a new
+round, with an `unclear` round every fifth one). Leaving those modes stops the
+stream and drops the snapshot, so the view falls back to its empty copy.
 
 ## Layout and accessibility
 

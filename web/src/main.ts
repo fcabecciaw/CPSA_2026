@@ -8,6 +8,9 @@ import {
   type SocketFactory,
 } from "./client";
 import { byId } from "./dom";
+import { HologramView } from "./hologram";
+import { MODES, type Mode } from "./protocol";
+import { RpsView } from "./rps";
 import { SkeletonView } from "./skeleton";
 import { DashboardStore, type StateRegion } from "./state";
 import {
@@ -32,6 +35,42 @@ const skeleton = new SkeletonView(
   byId<HTMLImageElement>("video"),
   byId("video-note"),
 );
+const hologram = new HologramView(
+  byId<HTMLCanvasElement>("hologram"),
+  byId("hologram-empty"),
+  byId("hologram-meta"),
+);
+const rps = new RpsView({
+  count: byId("rps-count"),
+  phase: byId("rps-phase"),
+  playerIcon: byId("rps-player-icon"),
+  playerLabel: byId("rps-player"),
+  boardIcon: byId("rps-board-icon"),
+  boardLabel: byId("rps-board"),
+  score: byId("rps-score"),
+  canvas: byId<HTMLCanvasElement>("rps-canvas"),
+  empty: byId("rps-empty"),
+});
+
+/** The three centre views; exactly one is visible at a time (T5). */
+const views = {
+  medical: byId("view-medical"),
+  hologram: byId("view-hologram"),
+  rps: byId("view-rps"),
+};
+
+/**
+ * T5: `hologram` and `rps` replace the medical skeleton panel while they run;
+ * idle and lab keep showing it, as the dashboard always has.
+ */
+function refreshView(): void {
+  const mode: Mode | null = store.state.status?.mode ?? store.state.modeProgress?.mode ?? null;
+  const hologramVisible = mode === "hologram";
+  views.medical.hidden = hologramVisible || mode === "rps";
+  views.hologram.hidden = !hologramVisible;
+  views.rps.hidden = mode !== "rps";
+  hologram.setActive(hologramVisible);
+}
 
 /** `?mock=1` has no backend, so it never opens the F14 stream. */
 let mockActive = false;
@@ -80,6 +119,7 @@ function renderRegions(regions: StateRegion[]): void {
       case "mode":
         renderMode(elements, store.state, connection);
         refreshNotice();
+        refreshView();
         break;
       case "live":
         renderLive(elements, store.state);
@@ -95,6 +135,12 @@ function renderRegions(regions: StateRegion[]): void {
         break;
       case "logs":
         renderLog(elements, store.state);
+        break;
+      case "hologram":
+        hologram.setFrame(store.state.hologram);
+        break;
+      case "rps":
+        rps.setState(store.state.rps);
         break;
     }
   }
@@ -139,20 +185,29 @@ async function boot(): Promise<void> {
 
   for (const button of elements.modeButtons) {
     button.addEventListener("click", () => {
-      const requested = button.dataset.mode;
-      if (requested === "idle" || requested === "medical") {
-        const seq = client.sendMode(requested);
-        if (seq !== null) {
-          store.markModeSent(seq);
-          renderMode(elements, store.state, connection);
-        }
+      const requested = modeOf(button.dataset.mode);
+      if (requested === null) {
+        return;
+      }
+      const seq = client.sendMode(requested);
+      if (seq !== null) {
+        store.markModeSent(seq);
+        renderMode(elements, store.state, connection);
       }
     });
   }
 
   renderAll(elements, store.state, connection, sourceLabel, transportNotice);
+  refreshView();
   refreshVideo();
   client.start();
+}
+
+/** Button `data-mode` to a protocol mode, or `null` for an unknown value. */
+function modeOf(value: string | undefined): Mode | null {
+  return value !== undefined && (MODES as readonly string[]).includes(value)
+    ? (value as Mode)
+    : null;
 }
 
 boot().catch((error: unknown) => {
