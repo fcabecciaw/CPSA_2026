@@ -191,6 +191,7 @@ hands:
     iou_thr: 0.45                 # NMS IoU threshold
   camera:
     match: RealSense              # card-name fragment of the INZI IR/depth node
+    fps: 30                       # INZI rate and perception cap; try 60 once INZI@60 is confirmed on the board
   intrinsics:                     # nominal F200 IR pinhole until a calibration exists
     fx: 430
     fy: 430

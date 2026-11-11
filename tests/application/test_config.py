@@ -473,6 +473,7 @@ def test_the_hands_defaults_are_loaded() -> None:
     assert (hands.model.input_height, hands.model.input_width) == (256, 320)
     assert (hands.model.conf_thr, hands.model.iou_thr) == (0.25, 0.45)
     assert hands.camera.match == "RealSense"
+    assert hands.camera.fps == 30.0
     assert (hands.intrinsics.fx, hands.intrinsics.fy) == (430.0, 430.0)
     assert (hands.intrinsics.cx, hands.intrinsics.cy) == (320.0, 240.0)
     assert hands.depth.scale_m == pytest.approx(3.125e-5)
@@ -497,7 +498,7 @@ def test_the_hands_values_are_loaded() -> None:
             "conf_thr": 0.3,
             "iou_thr": 0.5,
         },
-        "camera": {"match": "C270"},
+        "camera": {"match": "C270", "fps": 60},
         "intrinsics": {"fx": 400.0, "fy": 401.0, "cx": 310.0, "cy": 230.0},
         "depth": {"scale_m": 1e-3, "offset_m": -0.01},
         "rps": {
@@ -518,6 +519,7 @@ def test_the_hands_values_are_loaded() -> None:
     assert (hands.model.input_height, hands.model.input_width) == (480, 640)
     assert (hands.model.conf_thr, hands.model.iou_thr) == (0.3, 0.5)
     assert hands.camera.match == "C270"
+    assert hands.camera.fps == 60.0
     assert (hands.intrinsics.fx, hands.intrinsics.fy) == (400.0, 401.0)
     assert (hands.intrinsics.cx, hands.intrinsics.cy) == (310.0, 230.0)
     assert hands.depth.scale_m == pytest.approx(1e-3)
@@ -548,6 +550,7 @@ def test_a_document_without_rps_registers_no_classifier() -> None:
         ("hands.model.conf_thr", 1.5),
         ("hands.model.iou_thr", -0.1),
         ("hands.camera.match", ""),
+        ("hands.camera.fps", 0),
         ("hands.intrinsics.fx", 0),
         ("hands.intrinsics.fy", "wide"),
         ("hands.depth.scale_m", 0),

@@ -289,9 +289,13 @@ class HandsModelConfig:
 
 @dataclass(frozen=True)
 class HandsCameraConfig:
-    """The IR/depth node selection; ``auto`` matches the card name."""
+    """The IR/depth node selection; ``auto`` matches the card name.
+
+    ``fps`` is the requested INZI frame rate, which also caps the perception loop.
+    """
 
     match: str = DEFAULT_CAMERA_MATCH
+    fps: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -534,9 +538,11 @@ def _hands_config(hands: _Section) -> HandsConfig:
     rps_section = hands.optional_section("rps")
     if camera is not None:
         camera_match = camera.optional_text("match", DEFAULT_CAMERA_MATCH)
+        camera_fps = camera.optional_positive("fps", 30.0)
         camera.reject_unknown()
     else:
         camera_match = DEFAULT_CAMERA_MATCH
+        camera_fps = 30.0
     ir = HandsIntrinsicsConfig()
     if intrinsics is not None:
         ir = HandsIntrinsicsConfig(
@@ -561,7 +567,7 @@ def _hands_config(hands: _Section) -> HandsConfig:
             conf_thr=model.optional_fraction("conf_thr", 0.25),
             iou_thr=model.optional_fraction("iou_thr", 0.45),
         ),
-        camera=HandsCameraConfig(match=camera_match),
+        camera=HandsCameraConfig(match=camera_match, fps=camera_fps),
         intrinsics=ir,
         depth=raw_depth,
         rps=_hands_rps_config(rps_section) if rps_section is not None else None,

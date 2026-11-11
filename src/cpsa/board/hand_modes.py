@@ -47,8 +47,6 @@ IR_WIDTH = 640
 IR_HEIGHT = 480
 """Height of one INZI IR/depth frame."""
 
-MAX_FPS = 30.0
-"""Upper bound on the analyzed frames per second (the camera rate)."""
 
 COUNTDOWN_PUBLISH_S = 0.1
 """``rps.state`` is republished at 10 Hz during the countdown."""
@@ -72,7 +70,7 @@ def _default_source(hands: HandsConfig) -> IrDepthSource:
         device="auto",
         width=IR_WIDTH,
         height=IR_HEIGHT,
-        fps=MAX_FPS,
+        fps=hands.camera.fps,
         match=hands.camera.match,
     )
 
@@ -271,7 +269,7 @@ class _HandMode:
             ),
             DepthModel(scale_m=hands.depth.scale_m, offset_m=hands.depth.offset_m),
             preprocess=ir_to_input,
-            max_fps=MAX_FPS,
+            max_fps=hands.camera.fps,
         )
 
     def _on_frame(self, frame: HandFrame) -> None:
