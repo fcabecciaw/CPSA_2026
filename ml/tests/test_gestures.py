@@ -14,7 +14,9 @@ from cpsa_ml.gestures import (
     RPS_CLASSES,
     classify_ratios,
     export_npz,
+    features_from_points,
     finger_ratios,
+    foreshorten_points,
     forward_proba,
     label_to_class,
     load_parity,
@@ -22,6 +24,8 @@ from cpsa_ml.gestures import (
     main,
     rps_features,
     rule_baseline,
+    tilt_robustness,
+    viewpoint_augment,
 )
 
 # Finger MCP offsets and directions, relative to the wrist and multiplied by
@@ -150,6 +154,85 @@ def test_rps_features_ignores_confidence_and_rejects_bad_shapes():
 
     with pytest.raises(ValueError, match="21, 3"):
         rps_features(np.zeros((20, 3), dtype=np.float32))
+
+
+def test_features_from_points_matches_rps_features():
+    hands = np.stack(
+        [
+            make_hand((True, True, False, False)),
+            make_hand((False, False, False, False), wrist=(0.3, 0.8)),
+            make_hand((True, False, False, True), wrist=(0.7, 0.4), scale=0.15),
+        ]
+    )
+    batch = features_from_points(hands)
+    single = np.stack([rps_features(hand) for hand in hands])
+    assert batch.shape == (3, FEATURE_DIM)
+    assert np.allclose(batch, single, atol=1e-5)
+
+
+def test_viewpoint_augment_is_seeded_and_preserves_contract():
+    batch = np.stack(
+        [
+            make_hand((True, True, False, False)),
+            make_hand((False, False, False, False), wrist=(0.3, 0.8)),
+            make_hand((True, False, False, True), scale=0.3),
+            make_hand((True, True, True, True), wrist=(0.6, 0.5)),
+        ]
+    )
+    first = viewpoint_augment(batch, np.random.default_rng(7))
+    second = viewpoint_augment(batch, np.random.default_rng(7))
+    different = viewpoint_augment(batch, np.random.default_rng(8))
+
+    assert first.shape == batch.shape
+    assert first.dtype == np.float32
+    assert np.array_equal(first, second)
+    assert not np.allclose(first, different)
+    # The confidence column is copied untouched; the 2D points must move.
+    assert np.array_equal(first[:, :, 2], batch[:, :, 2])
+    assert np.isfinite(first[:, :, :2]).all()
+    assert not np.allclose(first[:, :, :2], batch[:, :, :2])
+
+    single = viewpoint_augment(batch[0], np.random.default_rng(7))
+    assert single.shape == (21, 3)
+    assert np.array_equal(single[:, 2], batch[0, :, 2])
+
+    untouched = viewpoint_augment(batch, np.random.default_rng(7), probability=0.0)
+    assert np.array_equal(untouched, batch)
+
+    with pytest.raises(ValueError, match="21, 3"):
+        viewpoint_augment(np.zeros((20, 3), dtype=np.float32), np.random.default_rng(0))
+
+
+def test_foreshorten_points_compresses_along_the_axis():
+    hand = make_hand((True, True, True, True), wrist=(0.4, 0.7))
+    identity = foreshorten_points(hand[None], 0.0, 37.0)
+    assert np.allclose(identity[0], hand)
+
+    compressed = foreshorten_points(hand[None], 60.0, 90.0)[0]
+    # Axis 90 deg is vertical: the y extent shrinks by about cos(60) = 0.5.
+    assert np.ptp(compressed[:, 1]) < 0.75 * np.ptp(hand[:, 1])
+    assert np.ptp(compressed[:, 0]) == pytest.approx(np.ptp(hand[:, 0]), rel=0.05)
+    assert np.array_equal(compressed[:, 2], hand[:, 2])
+
+
+def test_tilt_robustness_reports_every_angle(tmp_path: Path):
+    root = make_dataset(tmp_path, per_class=8, splits=("test",))
+    test = load_split(root, "test", keep_kpts=True)
+    weights = {
+        "w1": np.zeros((42, 64), dtype=np.float32),
+        "b1": np.zeros(64, dtype=np.float32),
+        "w2": np.zeros((64, 64), dtype=np.float32),
+        "b2": np.zeros(64, dtype=np.float32),
+        "w3": np.zeros((64, 4), dtype=np.float32),
+        "b3": np.zeros(4, dtype=np.float32),
+    }
+    table = tilt_robustness(weights, test, seed=3)
+    assert table["angles_deg"] == [0.0, 20.0, 40.0, 60.0]
+    assert set(table["accuracy"]) == {"0", "20", "40", "60"}
+    for name in ("0", "20", "40", "60"):
+        assert 0.0 <= table["accuracy"][name] <= 1.0
+        assert np.asarray(table["detail"][name]["confusion_matrix"]).shape == (4, 4)
+    assert table == tilt_robustness(weights, test, seed=3)
 
 
 def test_label_mapping_includes_hagrid_rock_as_none():
@@ -313,6 +396,13 @@ def test_cli_trains_exports_and_reports(tmp_path: Path):
     assert report["artifact"]["under_limit"] is True
     assert report["model"]["architecture"] == [42, 64, 64, 4]
 
+    tilt = report["tilt_robustness"]
+    assert tilt["angles_deg"] == [0.0, 20.0, 40.0, 60.0]
+    assert tilt["new"]["angles_deg"] == [0.0, 20.0, 40.0, 60.0]
+    assert set(tilt["new"]["accuracy"]) == {"0", "20", "40", "60"}
+    assert "previous" not in tilt
+    assert tilt["decision"]["kept"] == "new"
+
     # The tiny synthetic set is linearly separable enough to be learned.
     assert metrics["test_accuracy"] >= 0.9
 
@@ -325,3 +415,40 @@ def test_cli_trains_exports_and_reports(tmp_path: Path):
             np.stack([rps_features(sample) for sample in data["test_input"]]), weights
         )
         assert np.allclose(parity, data["test_proba"], atol=1e-5)
+
+
+def test_cli_keeps_the_previous_artifact_when_the_new_model_is_not_better(tmp_path: Path):
+    root = make_dataset(tmp_path, per_class=12)
+    out = tmp_path / "models" / "rps_mlp.npz"
+    args = [
+        "--annotations",
+        str(root),
+        "--out",
+        str(out),
+        "--report",
+        str(tmp_path / "build" / "report.json"),
+        "--epochs",
+        "3",
+        "--batch-size",
+        "16",
+        "--max-per-class",
+        "12",
+        "--seed",
+        "4",
+    ]
+    assert main(args) == 0
+    before = out.read_bytes()
+    report_path = tmp_path / "build" / "report.json"
+
+    # A second identical run trains the same weights, so it cannot improve the
+    # 40/60 degree numbers and the old artifact must survive untouched.
+    assert main(args) == 0
+    after = out.read_bytes()
+    report = json.loads(report_path.read_text())
+    tilt = report["tilt_robustness"]
+    assert tilt["previous"]["model"] == "bfdaa14"
+    assert tilt["decision"]["kept"] == "previous"
+    assert tilt["decision"]["improved_40"] is False
+    assert tilt["decision"]["improved_60"] is False
+    assert report["artifact"]["model"] == "previous (bfdaa14)"
+    assert before == after

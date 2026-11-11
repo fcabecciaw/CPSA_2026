@@ -36,9 +36,20 @@ knuckle.  The features are computed as follows:
 The result is translation, rotation and scale invariant.  A degenerate hand
 (wrist and joint 9 closer than ``1e-6``) yields 42 zeros.
 
+Viewpoint augmentation
+----------------------
+The camera that feeds the runtime is not perfectly top-down, so training also
+jitters the raw 21 points before :func:`rps_features` (the feature function
+itself is unchanged): a random-axis foreshortening by ``cos(theta)`` with
+``theta`` uniform in ``[0, 50]`` degrees, a random shear of ``+-0.15`` and a
+mild perspective homography whose box corners move by about 10% of the hand
+box.  The existing mirror/rotation/scale/noise augmentation in feature space
+stays.  The report carries a tilt-robustness table: test accuracy under
+synthetic foreshortening at 0, 20, 40 and 60 degrees with a fixed random axis,
+for both the previously exported model and the newly trained one.
+
 Runtime contract (parity)
--------------------------
-The exported ``.npz`` holds ``w1 b1 w2 b2 w3 b3 feature_version classes
+-------------------------The exported ``.npz`` holds ``w1 b1 w2 b2 w3 b3 feature_version classes
 test_input test_proba``.  All weights are float32 and use the row-vector
 layout ``h = x @ w + b``: ``w1`` is ``(42, 64)``, ``w2`` is ``(64, 64)``,
 ``w3`` is ``(64, 4)``.  The forward pass is exactly::
@@ -77,23 +88,32 @@ __all__ = [
     "FEATURE_DIM",
     "FEATURE_VERSION",
     "HAGRID_LABELS",
+    "MAX_SHEAR",
+    "MAX_TILT_DEG",
     "NUM_KEYPOINTS",
     "PARITY_SAMPLES",
+    "PERSPECTIVE",
     "RPS_CLASSES",
+    "TILT_ANGLES",
     "SplitData",
     "TrainingResult",
     "build_model",
     "classify_ratios",
     "export_npz",
+    "features_from_points",
     "finger_ratios",
+    "foreshorten_points",
     "forward_proba",
     "label_to_class",
     "load_parity",
     "load_split",
+    "load_weights",
     "main",
     "rps_features",
     "rule_baseline",
+    "tilt_robustness",
     "train_mlp",
+    "viewpoint_augment",
     "write_report",
 ]
 
@@ -105,6 +125,14 @@ FEATURE_VERSION = "v1"
 HIDDEN = 64
 PARITY_SAMPLES = 16
 NONE_RATIO = 2.0
+
+#: Out-of-plane viewpoint augmentation bounds, applied to the raw 2D points.
+MAX_TILT_DEG = 50.0
+MAX_SHEAR = 0.15
+#: Perspective coefficients in half-box units; box corners move by ~10%.
+PERSPECTIVE = 0.10
+#: Tilt angles (degrees) of the report's robustness table.
+TILT_ANGLES: tuple[float, ...] = (0.0, 20.0, 40.0, 60.0)
 
 RPS_CLASSES: tuple[str, ...] = ("rock", "paper", "scissors", "none")
 ROCK, PAPER, SCISSORS, NONE = 0, 1, 2, 3
@@ -168,6 +196,168 @@ def rps_features(kpts2d: NDArray[np.float32]) -> NDArray[np.float32]:
     rotation = np.array([[cos, -sin], [sin, cos]], dtype=np.float32)
     rotated = xy @ rotation.T / np.float32(scale)
     return np.ascontiguousarray(rotated.reshape(FEATURE_DIM), dtype=np.float32)
+
+
+def _box_frame(
+    xy: NDArray[np.float64],
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Return box-normalized points, box centre and box size of a hand batch."""
+
+    low = xy.min(axis=1)
+    high = xy.max(axis=1)
+    center = 0.5 * (low + high)
+    size = np.maximum((high - low).max(axis=1), 1e-6)
+    normalized = (xy - center[:, None, :]) / size[:, None, None]
+    return normalized, center, size
+
+
+def _as_point_batch(
+    kpts2d: NDArray[np.float32],
+) -> tuple[NDArray[np.float32], bool]:
+    """Return ``((N, 21, 3) points, was_single_sample)`` and validate the shape."""
+
+    points = np.asarray(kpts2d, dtype=np.float32)
+    single = points.ndim == 2
+    if single:
+        points = points[None]
+    if points.ndim != 3 or points.shape[1:] != (NUM_KEYPOINTS, 3):
+        raise ValueError(f"expected (..., {NUM_KEYPOINTS}, 3) keypoints, got {points.shape}")
+    return points, single
+
+
+def foreshorten_points(
+    kpts2d: NDArray[np.float32],
+    theta_deg: float | NDArray[np.float64],
+    axis_deg: float | NDArray[np.float64],
+) -> NDArray[np.float32]:
+    """Compress the hand along ``axis_deg`` by ``cos(theta_deg)``.
+
+    This is the evaluation transform behind the report's tilt-robustness
+    table; it uses one axis and one angle per sample (scalars broadcast) and
+    leaves the confidence column untouched.  ``theta_deg=0`` is the identity.
+    """
+
+    points, single = _as_point_batch(kpts2d)
+    batch = points.shape[0]
+    theta = np.broadcast_to(np.asarray(theta_deg, dtype=np.float64), (batch,))
+    axis = np.broadcast_to(np.asarray(axis_deg, dtype=np.float64), (batch,))
+    theta = np.deg2rad(theta)
+    axis = np.deg2rad(axis)
+
+    xy = points[..., :2].astype(np.float64)
+    normalized, center, size = _box_frame(xy)
+    compress = np.cos(theta)
+    one_minus = 1.0 - compress
+    ux, uy = np.cos(axis), np.sin(axis)
+    f11 = 1.0 - one_minus * ux * ux
+    f12 = -one_minus * ux * uy
+    f21 = f12
+    f22 = 1.0 - one_minus * uy * uy
+    u, v = normalized[..., 0], normalized[..., 1]
+    warped = np.stack(
+        (f11[:, None] * u + f12[:, None] * v, f21[:, None] * u + f22[:, None] * v), axis=-1
+    )
+    result = points.copy()
+    result[..., :2] = (center[:, None, :] + size[:, None, None] * warped).astype(np.float32)
+    return result[0] if single else result
+
+
+def viewpoint_augment(
+    kpts2d: NDArray[np.float32],
+    rng: np.random.Generator,
+    *,
+    max_tilt_deg: float = MAX_TILT_DEG,
+    max_shear: float = MAX_SHEAR,
+    perspective: float = PERSPECTIVE,
+    probability: float = 1.0,
+) -> NDArray[np.float32]:
+    """Apply random out-of-plane viewpoint changes to raw hand landmarks.
+
+    Each sample gets, in this order, a foreshortening (compress along a uniform
+    random axis by ``cos(theta)``, ``theta`` uniform in ``[0, max_tilt_deg]``),
+    a shear of up to ``+-max_shear`` along a random image axis, and a mild
+    perspective homography whose box corners move by about 10% of the hand box.
+    The transforms act on the 2D points in normalized image coordinates; the
+    confidence column is copied unchanged.  ``probability`` is the share of
+    samples that keep the transform (the rest stay clean).  All randomness
+    comes from ``rng``, so a fixed seed gives a fixed result.  Accepts
+    ``(21, 3)`` or ``(N, 21, 3)`` and returns the same shape and dtype.
+    """
+
+    points, single = _as_point_batch(kpts2d)
+    batch = points.shape[0]
+    xy = points[..., :2].astype(np.float64)
+    normalized, center, size = _box_frame(xy)
+
+    theta = np.deg2rad(rng.uniform(0.0, max_tilt_deg, size=batch))
+    axis = rng.uniform(0.0, np.pi, size=batch)
+    compress = np.cos(theta)
+    one_minus = 1.0 - compress
+    ux, uy = np.cos(axis), np.sin(axis)
+    f11 = 1.0 - one_minus * ux * ux
+    f12 = -one_minus * ux * uy
+    f22 = 1.0 - one_minus * uy * uy
+
+    shear = rng.uniform(-max_shear, max_shear, size=batch)
+    along_x = rng.random(batch) < 0.5
+    s11 = np.where(along_x, 1.0, shear)
+    s12 = np.where(along_x, shear, 0.0)
+    s21 = np.where(along_x, 0.0, shear)
+    s22 = 1.0
+    a11 = s11 * f11 + s12 * f12
+    a12 = s11 * f12 + s12 * f22
+    a21 = s21 * f11 + s22 * f12
+    a22 = s21 * f12 + s22 * f22
+
+    # Perspective: project in box-normalized coordinates.  The coefficients
+    # are bounded so a box corner moves by roughly `perspective` of the box.
+    p0 = rng.uniform(-perspective, perspective, size=batch)
+    p1 = rng.uniform(-perspective, perspective, size=batch)
+    u, v = normalized[..., 0], normalized[..., 1]
+    denominator = 1.0 + p0[:, None] * u + p1[:, None] * v
+    denominator = np.where(np.abs(denominator) < 1e-3, 1.0, denominator)
+    warped = np.stack(
+        (
+            (a11[:, None] * u + a12[:, None] * v) / denominator,
+            (a21[:, None] * u + a22[:, None] * v) / denominator,
+        ),
+        axis=-1,
+    )
+    result = points.copy()
+    result[..., :2] = (center[:, None, :] + size[:, None, None] * warped).astype(np.float32)
+    if probability < 1.0:
+        applied = rng.random(batch) < probability
+        result[~applied] = points[~applied]
+    return result[0] if single else result
+
+
+def features_from_points(points: NDArray[np.float32]) -> NDArray[np.float32]:
+    """Batched :func:`rps_features` for augmented ``(N, 21, 3)`` landmarks.
+
+    The math is identical to :func:`rps_features` (same rotation convention,
+    same float32 arithmetic); it only exists so a training batch of raw
+    augmented points can be featurized in one vectorised call.  Degenerate or
+    non-finite hands yield zero rows.
+    """
+
+    batch = np.asarray(points, dtype=np.float32)
+    if batch.ndim != 3 or batch.shape[1:] != (NUM_KEYPOINTS, 3):
+        raise ValueError(f"expected (N, {NUM_KEYPOINTS}, 3) keypoints, got {batch.shape}")
+    xy = batch[..., :2]
+    centered = xy - xy[:, :1, :]
+    middle = centered[:, 9, :]
+    scale = np.hypot(middle[:, 0], middle[:, 1]).astype(np.float32)
+    theta = (-0.5 * math.pi - np.arctan2(middle[:, 1], middle[:, 0])).astype(np.float32)
+    cos, sin = np.cos(theta).astype(np.float32), np.sin(theta).astype(np.float32)
+    x, y = centered[..., 0], centered[..., 1]
+    rotated = np.stack(
+        (cos[:, None] * x - sin[:, None] * y, sin[:, None] * x + cos[:, None] * y), axis=-1
+    )
+    flat = (rotated / np.maximum(scale, _EPS)[:, None, None]).reshape(-1, FEATURE_DIM)
+    flat = flat.astype(np.float32)
+    flat[~np.isfinite(flat).all(axis=1)] = 0.0
+    flat[scale < _EPS] = 0.0
+    return flat
 
 
 def finger_ratios(kpts2d: NDArray[np.float32]) -> NDArray[np.float32]:
@@ -478,6 +668,54 @@ def forward_proba(
     return np.ascontiguousarray(exponent / exponent.sum(axis=1, keepdims=True), dtype=np.float32)
 
 
+WEIGHT_KEYS: tuple[str, ...] = ("w1", "b1", "w2", "b2", "w3", "b3")
+
+
+def load_weights(path: Path) -> dict[str, NDArray[np.float32]]:
+    """Load the six weight arrays of an F-D ``.npz`` artifact."""
+
+    with np.load(Path(path)) as data:
+        missing = [name for name in WEIGHT_KEYS if name not in data.files]
+        if missing:
+            raise ValueError(f"{path} is missing weight arrays: {', '.join(missing)}")
+        return {name: np.ascontiguousarray(data[name], dtype=np.float32) for name in WEIGHT_KEYS}
+
+
+def tilt_robustness(
+    weights: Mapping[str, NDArray[np.float32]],
+    test: SplitData,
+    *,
+    angles: Sequence[float] = TILT_ANGLES,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Score ``weights`` on the test split under synthetic foreshortening.
+
+    Each sample gets a random compression axis fixed by ``seed``; the table
+    reports accuracy, per-class accuracy and the confusion matrix per angle.
+    ``theta=0`` is the clean test split.
+    """
+
+    if test.kpts2d is None:
+        raise ValueError("test split was loaded without keypoints; pass keep_kpts=True")
+    axes = np.random.default_rng(seed).uniform(0.0, 180.0, size=len(test))
+    detail: dict[str, Any] = {}
+    for angle in angles:
+        points = foreshorten_points(test.kpts2d, float(angle), axes)
+        predictions = forward_proba(features_from_points(points), weights).argmax(axis=1)
+        predictions = predictions.astype(np.int64)
+        detail[f"{angle:g}"] = {
+            "accuracy": round(float(np.mean(predictions == test.labels)), 5),
+            "per_class_accuracy": per_class_accuracy(test.labels, predictions),
+            "confusion_matrix": confusion_matrix(test.labels, predictions),
+        }
+    return {
+        "angles_deg": [float(angle) for angle in angles],
+        "axis_seed": seed,
+        "detail": detail,
+        "accuracy": {name: value["accuracy"] for name, value in detail.items()},
+    }
+
+
 def build_model() -> Any:
     """Return the torch ``42 -> 64 -> 64 -> 4`` MLP (CPU, ReLU activations)."""
 
@@ -541,8 +779,17 @@ def train_mlp(
     weight_decay: float = 1e-4,
     patience: int = 6,
     augment: bool = True,
+    viewpoint: bool = True,
+    viewpoint_probability: float = 1.0,
 ) -> TrainingResult:
-    """Train the MLP on CPU and return the best (by validation accuracy) weights."""
+    """Train the MLP on CPU and return the best (by validation accuracy) weights.
+
+    When ``train.kpts2d`` is available and ``viewpoint`` is set, every batch is
+    first passed through :func:`viewpoint_augment` and then featurized with
+    :func:`features_from_points`; the feature-space augmentation in
+    :func:`_augment` still follows.  Validation always uses the unaugmented
+    features, so early stopping scores the clean split.
+    """
 
     import copy
 
@@ -551,6 +798,10 @@ def train_mlp(
     torch.manual_seed(seed)
     torch.set_num_threads(min(8, torch.get_num_threads()) or 1)
     generator = torch.Generator().manual_seed(seed)
+    viewpoint_rng = np.random.default_rng(seed + 1009)
+    raw_points = None
+    if viewpoint and train.kpts2d is not None:
+        raw_points = np.ascontiguousarray(train.kpts2d, dtype=np.float32)
 
     device = torch.device("cpu")
     model = build_model().to(device)
@@ -576,7 +827,13 @@ def train_mlp(
         total_loss = 0.0
         for start in range(0, order.numel(), batch_size):
             batch = order[start : start + batch_size]
-            inputs = features[batch]
+            if raw_points is not None:
+                augmented = viewpoint_augment(
+                    raw_points[batch.numpy()], viewpoint_rng, probability=viewpoint_probability
+                )
+                inputs = torch.from_numpy(features_from_points(augmented))
+            else:
+                inputs = features[batch]
             if augment:
                 inputs = _augment(inputs, generator, torch)
             optimizer.zero_grad()
@@ -690,6 +947,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=6)
     parser.add_argument("--none-ratio", type=float, default=NONE_RATIO)
     parser.add_argument(
+        "--viewpoint-probability",
+        type=float,
+        default=1.0,
+        help="share of training samples that receive the out-of-plane viewpoint augmentation",
+    )
+    parser.add_argument(
         "--max-per-class",
         type=int,
         default=None,
@@ -710,6 +973,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     started = time.perf_counter()
     annotations = Path(args.annotations)
+    out_path = Path(args.out)
+    previous = load_weights(out_path) if out_path.is_file() else None
+    if previous is not None:
+        LOGGER.info("loaded previous artifact %s for the tilt comparison", out_path)
 
     train = load_split(
         annotations,
@@ -717,6 +984,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         seed=args.seed,
         none_ratio=args.none_ratio,
         max_per_class=args.max_per_class,
+        keep_kpts=True,
     )
     try:
         val = load_split(
@@ -735,12 +1003,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             features=train.features[order[:cut]],
             labels=train.labels[order[:cut]],
             ratios=train.ratios[order[:cut]],
+            kpts2d=None if train.kpts2d is None else train.kpts2d[order[:cut]],
         )
         keep = order[cut:]
         train = SplitData(
             features=train.features[keep],
             labels=train.labels[keep],
             ratios=train.ratios[keep],
+            kpts2d=None if train.kpts2d is None else train.kpts2d[keep],
             gestures=train.gestures,
         )
     test = load_split(
@@ -761,6 +1031,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         patience=args.patience,
+        viewpoint_probability=args.viewpoint_probability,
     )
     test_proba = forward_proba(test.features, result.weights)
     test_predictions = test_proba.argmax(axis=1).astype(np.int64)
@@ -771,9 +1042,64 @@ def main(argv: Sequence[str] | None = None) -> int:
     train_proba = forward_proba(train.features, result.weights)
     train_accuracy = float(np.mean(train_proba.argmax(axis=1) == train.labels))
 
+    new_tilt = tilt_robustness(result.weights, test, angles=TILT_ANGLES, seed=args.seed)
+    tilt_report: dict[str, Any] = {
+        "metric": (
+            "test accuracy under synthetic foreshortening (random axis per sample, fixed seed); "
+            "0 deg is the clean split"
+        ),
+        "angles_deg": [float(angle) for angle in TILT_ANGLES],
+        "seed": args.seed,
+        "new": new_tilt,
+    }
+    keep_new = True
+    if previous is not None:
+        previous_tilt = tilt_robustness(previous, test, angles=TILT_ANGLES, seed=args.seed)
+        tilt_report["previous"] = {"model": "bfdaa14", "path": str(out_path), **previous_tilt}
+        new_accuracy = new_tilt["accuracy"]
+        old_accuracy = previous_tilt["accuracy"]
+        theta0_ok = bool(new_accuracy["0"] >= 0.95)
+        improved_40 = bool(new_accuracy["40"] > old_accuracy["40"])
+        improved_60 = bool(new_accuracy["60"] > old_accuracy["60"])
+        keep_new = theta0_ok and improved_40 and improved_60
+        tilt_report["delta"] = {
+            name: round(float(new_accuracy[name] - old_accuracy[name]), 5) for name in new_accuracy
+        }
+        tilt_report["decision"] = {
+            "rule": (
+                "keep the new model iff theta=0 accuracy is at least 0.95 and both the "
+                "40 deg and the 60 deg accuracy improve"
+            ),
+            "theta0_ok": theta0_ok,
+            "improved_40": improved_40,
+            "improved_60": improved_60,
+            "kept": "new" if keep_new else "previous",
+        }
+    else:
+        tilt_report["decision"] = {"rule": "no previous artifact at --out", "kept": "new"}
+
     test_input, parity_features = load_parity(test, seed=args.seed)
-    test_proba_parity = forward_proba(parity_features, result.weights)
-    size_bytes = export_npz(Path(args.out), result.weights, test_input, test_proba_parity)
+    if keep_new:
+        test_proba_parity = forward_proba(parity_features, result.weights)
+        size_bytes = export_npz(out_path, result.weights, test_input, test_proba_parity)
+        artifact = {
+            "path": str(out_path),
+            "bytes": size_bytes,
+            "limit_bytes": 100 * 1024,
+            "under_limit": size_bytes < 100 * 1024,
+            "parity_samples": int(test_input.shape[0]),
+            "model": "new",
+        }
+    else:
+        size_bytes = out_path.stat().st_size
+        artifact = {
+            "path": str(out_path),
+            "bytes": size_bytes,
+            "limit_bytes": 100 * 1024,
+            "under_limit": size_bytes < 100 * 1024,
+            "parity_samples": int(test_input.shape[0]),
+            "model": "previous (bfdaa14)",
+        }
 
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -799,6 +1125,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "batch_size": args.batch_size,
             "learning_rate": args.learning_rate,
             "augmentation": "mirror 0.5, rotate +-20 deg, scale +-10%, noise sigma 0.02",
+            "viewpoint_augmentation": (
+                "foreshortening cos(theta), theta uniform 0-50 deg along a uniform random axis; "
+                "shear +-0.15; mild perspective homography with ~10% hand-box corner jitter; "
+                "applied to the raw 2D points before rps_features; "
+                f"probability {args.viewpoint_probability:g}"
+            ),
             "history": result.history,
         },
         "metrics": {
@@ -811,14 +1143,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "confusion_matrix_order": list(RPS_CLASSES),
             "per_class_accuracy": per_class_accuracy(test.labels, test_predictions),
         },
+        "tilt_robustness": tilt_report,
         "baseline": baseline,
-        "artifact": {
-            "path": str(args.out),
-            "bytes": size_bytes,
-            "limit_bytes": 100 * 1024,
-            "under_limit": size_bytes < 100 * 1024,
-            "parity_samples": int(test_input.shape[0]),
-        },
+        "artifact": artifact,
         "elapsed_s": round(time.perf_counter() - started, 1),
     }
     write_report(Path(args.report), report)
@@ -828,7 +1155,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         test_accuracy,
         baseline["test_accuracy"],
         size_bytes / 1024.0,
-        args.out,
+        out_path,
+    )
+    LOGGER.info(
+        "tilt accuracy new %s kept=%s",
+        new_tilt["accuracy"],
+        tilt_report["decision"]["kept"],
     )
     return 0
 
