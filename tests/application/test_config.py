@@ -445,3 +445,159 @@ def test_the_demo_config_is_camera_only() -> None:
     assert config.medical.trigger == "vision"
     assert config.medical.vision_trigger == TriggerConfig(refractory_s=config.dispatch.cooldown_s)
     assert (config.vision.camera.gain, config.vision.camera.power_line_hz) == (160, 50)
+
+
+# -- the optional hands section (T4) ----------------------------------------
+
+
+def hands_document() -> dict[str, Any]:
+    """A valid document with the optional hands section and its defaults."""
+
+    data = valid()
+    data["hands"] = {
+        "model": {"path": "models/hand21_topdown.xmodel"},
+        "rps": {"classifier_path": "models/rps_mlp.npz"},
+    }
+    return data
+
+
+def test_a_missing_hands_section_leaves_the_hand_modes_off() -> None:
+    assert load(SHIPPED).hands is None
+
+
+def test_the_hands_defaults_are_loaded() -> None:
+    hands = parse(hands_document()).hands
+
+    assert hands is not None
+    assert hands.model.path == Path("models/hand21_topdown.xmodel")
+    assert (hands.model.input_height, hands.model.input_width) == (256, 320)
+    assert (hands.model.conf_thr, hands.model.iou_thr) == (0.25, 0.45)
+    assert hands.camera.match == "RealSense"
+    assert (hands.intrinsics.fx, hands.intrinsics.fy) == (430.0, 430.0)
+    assert (hands.intrinsics.cx, hands.intrinsics.cy) == (320.0, 240.0)
+    assert hands.depth.scale_m == pytest.approx(3.125e-5)
+    assert hands.depth.offset_m == 0.0
+    assert hands.rps is not None
+    assert hands.rps.classifier_path == Path("models/rps_mlp.npz")
+    assert hands.rps.ready_s == pytest.approx(0.5)
+    assert hands.rps.countdown_step_s == pytest.approx(0.7)
+    assert hands.rps.shoot_s == pytest.approx(0.4)
+    assert hands.rps.result_s == pytest.approx(3.0)
+    assert hands.rps.score_reset_s == pytest.approx(20.0)
+    assert hands.rps.min_share == pytest.approx(0.6)
+
+
+def test_the_hands_values_are_loaded() -> None:
+    data = hands_document()
+    data["hands"] = {
+        "model": {
+            "path": "~/models/hand.xmodel",
+            "input_height": 480,
+            "input_width": 640,
+            "conf_thr": 0.3,
+            "iou_thr": 0.5,
+        },
+        "camera": {"match": "C270"},
+        "intrinsics": {"fx": 400.0, "fy": 401.0, "cx": 310.0, "cy": 230.0},
+        "depth": {"scale_m": 1e-3, "offset_m": -0.01},
+        "rps": {
+            "classifier_path": "~/models/rps.npz",
+            "ready_s": 1.0,
+            "countdown_step_s": 0.5,
+            "shoot_s": 0.3,
+            "result_s": 2.0,
+            "score_reset_s": 10.0,
+            "min_share": 0.7,
+        },
+    }
+
+    hands = parse(data).hands
+
+    assert hands is not None
+    assert hands.model.path == Path("~/models/hand.xmodel").expanduser()
+    assert (hands.model.input_height, hands.model.input_width) == (480, 640)
+    assert (hands.model.conf_thr, hands.model.iou_thr) == (0.3, 0.5)
+    assert hands.camera.match == "C270"
+    assert (hands.intrinsics.fx, hands.intrinsics.fy) == (400.0, 401.0)
+    assert (hands.intrinsics.cx, hands.intrinsics.cy) == (310.0, 230.0)
+    assert hands.depth.scale_m == pytest.approx(1e-3)
+    assert hands.depth.offset_m == pytest.approx(-0.01)
+    assert hands.rps is not None
+    assert hands.rps.classifier_path == Path("~/models/rps.npz").expanduser()
+    assert hands.rps.min_share == pytest.approx(0.7)
+
+
+def test_a_document_without_rps_registers_no_classifier() -> None:
+    data = hands_document()
+    del data["hands"]["rps"]
+
+    hands = parse(data).hands
+
+    assert hands is not None
+    assert hands.rps is None
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("hands", None),
+        ("hands.model", []),
+        ("hands.model.path", ""),
+        ("hands.model.input_height", 0),
+        ("hands.model.input_width", -1),
+        ("hands.model.conf_thr", 1.5),
+        ("hands.model.iou_thr", -0.1),
+        ("hands.camera.match", ""),
+        ("hands.intrinsics.fx", 0),
+        ("hands.intrinsics.fy", "wide"),
+        ("hands.depth.scale_m", 0),
+        ("hands.depth.offset_m", float("inf")),
+        ("hands.rps.classifier_path", ""),
+        ("hands.rps.ready_s", 0),
+        ("hands.rps.min_share", 1.5),
+        ("hands.unknown", 1),
+    ],
+)
+def test_invalid_hands_value_is_named(key: str, value: object) -> None:
+    data = hands_document()
+    if key == "hands":
+        data["hands"] = value
+    elif key == "hands.model":
+        data["hands"]["model"] = value
+    else:
+        node = data["hands"]
+        *parents, leaf = key.split(".")[1:]
+        for part in parents:
+            node = node.setdefault(part, {})
+        node[leaf] = value
+
+    with pytest.raises(ConfigError) as info:
+        parse(data)
+    assert info.value.key == key
+
+
+def test_a_missing_hands_key_is_named() -> None:
+    data = hands_document()
+    del data["hands"]["model"]["path"]
+
+    with pytest.raises(ConfigError) as info:
+        parse(data)
+
+    assert info.value.key == "hands.model.path"
+
+
+def test_the_hand_modes_are_valid_default_modes() -> None:
+    for mode in ("hologram", "rps"):
+        data = valid()
+        data["supervisor"] = {"default_mode": mode}
+        assert parse(data).supervisor.default_mode == mode
+
+
+def test_the_demo_config_has_the_hands_section() -> None:
+    config = load(REPO_ROOT / "config" / "board.demo.yaml")
+
+    assert config.hands is not None
+    assert config.hands.model.path == Path("models/hand21_topdown.xmodel")
+    assert (config.hands.model.input_height, config.hands.model.input_width) == (256, 320)
+    assert config.hands.rps is not None
+    assert config.hands.rps.classifier_path == Path("models/rps_mlp.npz")

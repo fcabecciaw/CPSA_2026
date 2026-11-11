@@ -63,6 +63,24 @@ def _load_medical_mode(config: Config, fake: bool) -> Mode:
     return MedicalMode(config)
 
 
+def _load_hand_modes(config: Config) -> dict[str, Mode]:
+    """Build the ``hologram`` and ``rps`` modes when the config has ``hands``.
+
+    The modes are constructed but not started: an absent camera or model file
+    only fails the start of the mode the operator selects, never the boot.
+    """
+    if config.hands is None:
+        return {}
+    try:
+        from cpsa.board.hand_modes import HologramMode, RpsMode
+    except ImportError as exc:
+        raise StartupError(
+            "the hand modes are configured but their dependencies are not installed "
+            f"(install the 'vision' and 'camera' extras): {exc}"
+        ) from exc
+    return {"hologram": HologramMode(config), "rps": RpsMode(config)}
+
+
 def _build_server(
     config: Config, on_command: Callable[[str, dict[str, Any], int | None], None]
 ) -> Any:
@@ -108,7 +126,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_logging(config.log.base_path, config.log.level)
     default_mode = config.supervisor.default_mode
     try:
-        modes = {"medical": _load_medical_mode(config, args.fake_medical)}
+        modes: dict[str, Mode] = {"medical": _load_medical_mode(config, args.fake_medical)}
+        modes.update(_load_hand_modes(config))
         if default_mode != "idle" and default_mode not in modes:
             raise StartupError(f"unknown supervisor default_mode {default_mode!r}")
         supervisor_holder: list[Supervisor] = []

@@ -20,11 +20,14 @@ readonly DEFAULT_USER="kria"
 readonly REMOTE_HOME="/home/kria"
 readonly REMOTE_DIR="cpsa"
 readonly REMOTE_MODEL="models/pose_halfbust62.xmodel"
+readonly REMOTE_HAND_MODEL="models/hand21_topdown.xmodel"
+readonly REMOTE_RPS_MODEL="models/rps_mlp.npz"
 readonly SUPERVISOR_PORT="8080"
 
 host="$DEFAULT_HOST"
 user="$DEFAULT_USER"
 model=""
+hand_model=""
 wheels=""
 dry_run=0
 restart=1
@@ -41,6 +44,11 @@ Required:
                      ~/cpsa/models/pose_halfbust62.xmodel on the board.
 
 Options:
+  --hand-model PATH  Compiled HAND21 hand model (.xmodel) to install as
+                     ~/cpsa/models/hand21_topdown.xmodel, for the `hologram`
+                     and `rps` modes. Without it those modes report
+                     model_missing; the medical demo is unaffected.
+                     models/rps_mlp.npz is copied when it exists on this PC.
   --host HOST        Board host or SSH alias (default: 10.42.0.83).
   --user USER        SSH user on the board (default: kria).
   --wheels DIR       Directory of linux-aarch64 / cp310 wheels prepared on this
@@ -122,6 +130,11 @@ while (($# > 0)); do
       model="$2"
       shift 2
       ;;
+    --hand-model)
+      [[ $# -ge 2 && -n "${2:-}" ]] || die "--hand-model needs a value"
+      hand_model="$2"
+      shift 2
+      ;;
     --wheels)
       [[ $# -ge 2 && -n "${2:-}" ]] || die "--wheels needs a value"
       wheels="$2"
@@ -189,6 +202,10 @@ if [[ ! -f "$model" ]]; then
   warn "model file not found: $model"
   preflight_failed=1
 fi
+if [[ -n "$hand_model" && ! -f "$hand_model" ]]; then
+  warn "hand model file not found: $hand_model"
+  preflight_failed=1
+fi
 if ((preflight_failed)); then
   if ((dry_run)); then
     note "dry run: showing the plan despite the missing prerequisites above"
@@ -233,6 +250,17 @@ note "step 2: syncing web/dist and the model"
 remote "mkdir -p \"${REMOTE_HOME}/${REMOTE_DIR}/models\" \"${REMOTE_HOME}/${REMOTE_DIR}/runs/logs\" \"${REMOTE_HOME}/${REMOTE_DIR}/runs/evidence\""
 run rsync -az "${rsync_opts[@]}" --delete "$repo_root/web/dist/" "${ssh_target}:${REMOTE_HOME}/${REMOTE_DIR}/web/dist/"
 run rsync -az "${rsync_opts[@]}" "$model" "${ssh_target}:${REMOTE_HOME}/${REMOTE_DIR}/${REMOTE_MODEL}"
+# The hands demos: the classifier is small and committed, the hand xmodel is
+# only installed when --hand-model is given (the medical demo needs neither).
+rps_model="$repo_root/models/rps_mlp.npz"
+if [[ -f "$rps_model" ]]; then
+  run rsync -az "${rsync_opts[@]}" "$rps_model" "${ssh_target}:${REMOTE_HOME}/${REMOTE_DIR}/${REMOTE_RPS_MODEL}"
+else
+  warn "models/rps_mlp.npz is missing; the rps mode will report model_missing"
+fi
+if [[ -n "$hand_model" ]]; then
+  run rsync -az "${rsync_opts[@]}" "$hand_model" "${ssh_target}:${REMOTE_HOME}/${REMOTE_DIR}/${REMOTE_HAND_MODEL}"
+fi
 
 note "step 3: building the native Kalman kernel on the board"
 # The tracker's Kalman kernel is a C artifact, not a Python package, so `uv sync`
