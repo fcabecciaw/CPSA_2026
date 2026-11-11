@@ -325,6 +325,85 @@ def _import_rtmlib() -> Any:
     return rtmlib
 
 
+#: The ONNX Runtime DLL preload is process-wide, so it runs at most once.
+_CUDA_DLLS_PRELOADED = False
+
+
+def _preload_cuda_dlls(device: str) -> None:
+    """Load the CUDA/cuDNN pip wheels before ONNX Runtime builds its first session.
+
+    ``onnxruntime-gpu`` does not ship the CUDA runtime; ``preload_dlls`` loads
+    the ``nvidia-*`` wheels of the environment into the process.  A subprocess
+    such as the ``python -m cpsa_ml.pseudolabel`` run of notebook 06 needs this
+    itself: preloading in the notebook kernel does not reach it.
+
+    Args:
+        device: The requested device string; ``cpu`` and other backends skip it.
+    """
+
+    global _CUDA_DLLS_PRELOADED
+    if not device.startswith("cuda") or _CUDA_DLLS_PRELOADED:
+        return
+    try:
+        import onnxruntime
+    except ImportError:  # pragma: no cover - rtmlib reports the missing backend
+        return
+    preload = getattr(onnxruntime, "preload_dlls", None)
+    if preload is None:
+        LOGGER.warning(
+            "onnxruntime has no preload_dlls(); --device %s relies on the system CUDA libraries",
+            device,
+        )
+        _CUDA_DLLS_PRELOADED = True
+        return
+    LOGGER.info("preloading the ONNX Runtime CUDA/cuDNN libraries")
+    try:
+        preload()
+    except Exception as exc:  # noqa: BLE001 - name the installation problem
+        raise RuntimeError(
+            "onnxruntime.preload_dlls() could not load the CUDA/cuDNN wheels for "
+            f"--device {device!r}: {exc}. Install the CUDA wheels "
+            '(`pip install "onnxruntime-gpu[cuda,cudnn]"`) or run the D3 fallback on the '
+            "local PC: `python -m cpsa_ml.pseudolabel --device cpu --teacher rtmw-l`."
+        ) from exc
+    _CUDA_DLLS_PRELOADED = True
+
+
+def _require_cuda_session(device: str, component: str, tool: Any) -> None:
+    """Fail fast when ONNX Runtime silently fell back from CUDA to the CPU.
+
+    rtmlib 0.0.16 keeps its ONNX Runtime session on the tool as ``session``.
+    A CUDA build without a usable CUDA runtime still creates a session, but
+    with ``CPUExecutionProvider`` first, which runs the teacher about 20x
+    slower and would take a day over a Kaggle dataset.
+
+    Args:
+        device: The requested device string; ``cpu`` skips the check.
+        component: Human-readable name of the model, used in the error.
+        tool: The rtmlib tool whose ``session`` is inspected.
+
+    Raises:
+        RuntimeError: If ``device`` asks for CUDA and the session's first
+            provider is not ``CUDAExecutionProvider``.
+    """
+
+    if not device.startswith("cuda"):
+        return
+    session = getattr(tool, "session", None)
+    get_providers = getattr(session, "get_providers", None)
+    providers = tuple(get_providers()) if callable(get_providers) else ()
+    if providers and providers[0] == "CUDAExecutionProvider":
+        return
+    raise RuntimeError(
+        f"{component} loaded on {list(providers) or ['an unknown session']} for --device "
+        f"{device!r}: ONNX Runtime fell back off CUDAExecutionProvider and would run the "
+        "teacher on the CPU. Install the CUDA wheels "
+        '(`pip install "onnxruntime-gpu[cuda,cudnn]"`) so the session can use them, or '
+        "run the D3 fallback on the local PC: "
+        "`python -m cpsa_ml.pseudolabel --device cpu --teacher rtmw-l`."
+    )
+
+
 class WholeBodyTeacher:
     """Top-down COCO-WholeBody teacher (one 133-keypoint result per box)."""
 
@@ -336,6 +415,7 @@ class WholeBodyTeacher:
         backend: str = "onnxruntime",
     ) -> None:
         self.model = TEACHER_MODELS[model] if isinstance(model, str) else model
+        _preload_cuda_dlls(device)
         rtmlib = _import_rtmlib()
         self._estimator = rtmlib.RTMPose(
             self.model.url,
@@ -343,6 +423,7 @@ class WholeBodyTeacher:
             backend=backend,
             device=device,
         )
+        _require_cuda_session(device, f"the {self.model.name} teacher", self._estimator)
 
     def __call__(
         self,
@@ -373,6 +454,7 @@ class PersonDetector:
         backend: str = "onnxruntime",
     ) -> None:
         self.score_thr = score_thr
+        _preload_cuda_dlls(device)
         rtmlib = _import_rtmlib()
         self._detector = rtmlib.YOLOX(
             PERSON_DETECTOR.url,
@@ -381,6 +463,7 @@ class PersonDetector:
             backend=backend,
             device=device,
         )
+        _require_cuda_session(device, "the person detector", self._detector)
 
     def __call__(self, image: NDArray[np.uint8]) -> NDArray[np.float32]:
         """Return ``(N, 4)`` person boxes in pixels.
@@ -847,6 +930,22 @@ def _list_frames(root: Path) -> list[Path]:
     return sorted(frames)
 
 
+def _count_frames(config: AutoLabelConfig) -> int | None:
+    """Return the number of source frames, or ``None`` when a video is mixed in."""
+
+    if config.frames is None or config.video is not None:
+        return None
+    return len(_list_frames(config.frames))
+
+
+def _format_duration(seconds: float) -> str:
+    """Format a duration as ``H:MM:SS``."""
+
+    minutes, seconds = divmod(int(round(seconds)), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}:{minutes:02d}:{seconds:02d}"
+
+
 def _iter_video_frames(path: Path, stride: int) -> Iterator[tuple[str, NDArray[np.uint8]]]:
     """Yield every ``stride``-th BGR frame of ``path`` with a stable name."""
 
@@ -992,6 +1091,8 @@ def auto_label(
     Raises:
         ValueError: If a source is missing or the output tree was written with
             different settings.
+        RuntimeError: If ``config.device`` asks for CUDA but ONNX Runtime falls
+            back to the CPU, or if a CUDA session cannot be created.
     """
 
     stats_path = config.out / "stats.json"
@@ -1024,6 +1125,7 @@ def auto_label(
             (hand_config.out / "labels" / split).mkdir(parents=True, exist_ok=True)
 
     started = time.monotonic()
+    total_frames = _count_frames(config)
     pending = 0
     processed = 0
     chunk_start = started
@@ -1067,10 +1169,22 @@ def auto_label(
         stats.frames["processed"] += 1
 
         if pending >= config.chunk_size:
-            stats.elapsed_seconds += time.monotonic() - chunk_start
+            chunk_seconds = time.monotonic() - chunk_start
+            stats.elapsed_seconds += chunk_seconds
             chunk_start = time.monotonic()
             _write_json_atomic(stats_path, stats.to_dict())
-            LOGGER.info("auto-labeled %d frames", stats.frames["processed"])
+            rate = pending / chunk_seconds if chunk_seconds > 0 else 0.0
+            eta = ""
+            if total_frames is not None and rate > 0.0:
+                remaining = max(total_frames - stats.frames["seen"], 0)
+                eta = f", ETA {_format_duration(remaining / rate)}"
+            LOGGER.info(
+                "auto-labeled %d/%s frames at %.2f frames/s%s",
+                stats.frames["processed"],
+                total_frames if total_frames is not None else "?",
+                rate,
+                eta,
+            )
             pending = 0
         if config.max_frames is not None and processed >= config.max_frames:
             break
