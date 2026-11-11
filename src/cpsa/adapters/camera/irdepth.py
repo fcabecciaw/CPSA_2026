@@ -19,6 +19,14 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Protocol
 
+import numpy as np
+from numpy.typing import NDArray
+
+try:
+    import cv2
+except ImportError:  # pragma: no cover - depends on the installed extra
+    cv2 = None  # type: ignore[assignment]
+
 from cpsa.adapters.camera.devices import (
     AUTO,
     DEFAULT_MATCH,
@@ -27,11 +35,19 @@ from cpsa.adapters.camera.devices import (
     resolve_device,
 )
 from cpsa.adapters.camera.f200 import XuSettings, _apply_xu, _open_video
-from cpsa.vision.irdepth import IrDepthFrame, decode_inzi
+from cpsa.vision.irdepth import (
+    CLAHE_CLIP,
+    CLAHE_TILES,
+    IrDepthFrame,
+    decode_inzi,
+    normalize_ir,
+)
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["DEFAULT_XU", "INZI_FOURCC", "IrDepthSource"]
+__all__ = ["DEFAULT_XU", "INZI_FOURCC", "IrDepthSource", "ir_to_input"]
+
+_CHANNELS = 3
 
 INZI_FOURCC = "INZI"
 """Pixel format of the F200 node that carries aligned depth and IR."""
@@ -40,6 +56,31 @@ DEFAULT_XU = XuSettings(laser_power=16, accuracy=2, filter=6, confidence=1)
 """Depth XU values of the demo configuration (``config/board.demo.yaml``)."""
 
 _STOP_TIMEOUT_S = 2.0
+
+
+def ir_to_input(ir: NDArray[np.uint8]) -> NDArray[np.uint8]:
+    """Turn one ``(H, W)`` IR image into the ``(H, W, 3)`` model input.
+
+    The image is min-max normalised to the full 8-bit range (a flat image maps
+    to zeros), contrast-limited adaptive equalisation is applied with
+    :data:`cpsa.vision.irdepth.CLAHE_CLIP` and
+    :data:`cpsa.vision.irdepth.CLAHE_TILES`, and the result is replicated to
+    three channels.
+
+    Raises:
+        ValueError: If ``ir`` is not a 2-D uint8 array.
+        RuntimeError: If OpenCV is not installed.
+    """
+
+    normalised = normalize_ir(ir)
+    if cv2 is None:  # pragma: no cover - depends on the installed extra
+        raise RuntimeError(
+            "OpenCV is required for the hand IR preprocessing; "
+            "install the 'vision' extra (uv sync --extra vision)"
+        )
+    clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP, tileGridSize=CLAHE_TILES)
+    enhanced = np.asarray(clahe.apply(normalised), dtype=np.uint8)
+    return np.repeat(enhanced[:, :, np.newaxis], _CHANNELS, axis=2)
 
 
 class _Captured(Protocol):

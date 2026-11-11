@@ -5,7 +5,7 @@ Both modes run the same perception chain and differ only in what they publish:
 ``hologram.hands``; :class:`RpsMode` feeds the frames to
 :class:`~cpsa.vision.rps_game.RpsGame` with
 :class:`~cpsa.vision.rps_classifier.RpsClassifier` on the largest hand and
-publishes ``rps.state``. One :class:`~cpsa.vision.hand_perception.HandPerception`
+publishes ``rps.state``. One :class:`~cpsa.application.hand_perception.HandPerception`
 per running mode owns the IR/depth source, so :meth:`stop` always releases the
 shared camera before the supervisor starts another mode.
 
@@ -25,14 +25,14 @@ from typing import Any, Protocol
 import numpy as np
 from numpy.typing import NDArray
 
-from cpsa.adapters.camera.irdepth import IrDepthSource
+from cpsa.adapters.camera.irdepth import IrDepthSource, ir_to_input
 from cpsa.application.config import Config, HandsConfig
+from cpsa.application.hand_perception import HandPerception, IrDepthSourceLike
 from cpsa.ports import PoseEstimator
 from cpsa.protocol.hands import hologram_hands, rps_state
 from cpsa.supervisor.contract import ModeContext, ModeStartError
 from cpsa.vision.calibration import DepthModel, Intrinsics
 from cpsa.vision.hand3d import Hand3D, HandFrame
-from cpsa.vision.hand_perception import HandPerception, IrDepthSourceLike
 from cpsa.vision.layouts import HAND21
 from cpsa.vision.rps_classifier import RpsClassifier
 from cpsa.vision.rps_game import RpsGame, RpsGameConfig, RpsRandom, RpsState
@@ -270,6 +270,7 @@ class _HandMode:
                 height=IR_HEIGHT,
             ),
             DepthModel(scale_m=hands.depth.scale_m, offset_m=hands.depth.offset_m),
+            preprocess=ir_to_input,
             max_fps=MAX_FPS,
         )
 

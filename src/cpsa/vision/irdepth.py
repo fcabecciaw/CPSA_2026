@@ -1,13 +1,13 @@
-"""IR/depth preprocessing for the hand demos (F-A).
+"""IR/depth frame decoding for the hand demos (F-A).
 
 One ``INZI`` frame of the F200 is 640x480x3 bytes, interleaved per pixel:
 bytes 0-1 are the little-endian Z16 depth sample and byte 2 is the 8-bit IR
 sample. Depth and IR are pixel-aligned, so one buffer carries both images.
 
-The hand model runs on IR, which has low contrast on skin; :func:`ir_to_input`
-stretches the frame to the full 8-bit range and applies the CLAHE that the
-training pipeline also uses, then replicates it to the three channels the pose
-model expects.
+This layer only decodes the buffer and offers the NumPy-only min-max
+normalisation of an IR image; the OpenCV CLAHE that the hand model input needs
+lives in the camera adapter (:func:`cpsa.adapters.camera.irdepth.ir_to_input`),
+because this package may not import third-party libraries.
 """
 
 from __future__ import annotations
@@ -17,18 +17,13 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-try:
-    import cv2
-except ImportError:  # pragma: no cover - depends on the installed extra
-    cv2 = None  # type: ignore[assignment]
-
 __all__ = [
     "CLAHE_CLIP",
     "CLAHE_TILES",
     "INZI_BYTES_PER_PIXEL",
     "IrDepthFrame",
     "decode_inzi",
-    "ir_to_input",
+    "normalize_ir",
 ]
 
 INZI_BYTES_PER_PIXEL = 3
@@ -42,6 +37,7 @@ CLAHE_TILES = (8, 8)
 
 _DEPTH_BYTES = 2
 _MAX_UINT8 = 255.0
+"""Full 8-bit range of a normalised IR image."""
 
 
 @dataclass(frozen=True)
@@ -89,17 +85,13 @@ def decode_inzi(
     return ir, depth_raw
 
 
-def ir_to_input(ir: NDArray[np.uint8]) -> NDArray[np.uint8]:
-    """Turn one ``(H, W)`` IR image into the ``(H, W, 3)`` model input.
+def normalize_ir(ir: NDArray[np.uint8]) -> NDArray[np.uint8]:
+    """Stretch one ``(H, W)`` IR image to the full 8-bit range.
 
-    The image is min-max normalised to the full 8-bit range (a flat image maps
-    to zeros), contrast-limited adaptive equalisation is applied with
-    :data:`CLAHE_CLIP` and :data:`CLAHE_TILES`, and the result is replicated to
-    three channels.
+    A flat image has no range to stretch and maps to zeros.
 
     Raises:
         ValueError: If ``ir`` is not a 2-D uint8 array.
-        RuntimeError: If OpenCV is not installed.
     """
 
     image = np.asarray(ir)
@@ -107,21 +99,10 @@ def ir_to_input(ir: NDArray[np.uint8]) -> NDArray[np.uint8]:
         raise ValueError(f"ir must be (H, W), got shape {image.shape}")
     if image.dtype != np.uint8:
         raise ValueError(f"ir must be uint8, got {image.dtype}")
-    if cv2 is None:  # pragma: no cover - depends on the installed extra
-        raise RuntimeError(
-            "OpenCV is required for the hand IR preprocessing; "
-            "install the 'vision' extra (uv sync --extra vision)"
-        )
-
-    low = float(np.min(image))
-    high = float(np.max(image))
-    if high > low:
-        scaled = (image.astype(np.float32) - np.float32(low)) * np.float32(
-            _MAX_UINT8 / (high - low)
-        )
-        normalised = np.rint(scaled).clip(0.0, _MAX_UINT8).astype(np.uint8)
-    else:
-        normalised = np.zeros_like(image)
-    clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP, tileGridSize=CLAHE_TILES)
-    enhanced = np.asarray(clahe.apply(normalised), dtype=np.uint8)
-    return np.repeat(enhanced[:, :, np.newaxis], 3, axis=2)
+    low = int(np.min(image))
+    high = int(np.max(image))
+    if high <= low:
+        return np.zeros_like(image)
+    scaled = (image.astype(np.float32) - np.float32(low)) * np.float32(_MAX_UINT8 / (high - low))
+    normalised: NDArray[np.uint8] = np.rint(scaled).clip(0.0, _MAX_UINT8).astype(np.uint8)
+    return normalised

@@ -5,6 +5,11 @@ IR/depth frames from its own thread; the loop keeps only the newest pending
 frame, so a slow DPU never builds a backlog and the hands shown are the ones
 the camera saw last. Callbacks run on the analysis thread, in order of the
 frames actually processed.
+
+The loop lives in the application layer because it composes the vision
+pipeline with the camera source port; the IR model input preprocessing (OpenCV
+CLAHE) arrives as the injected ``preprocess`` callable from the composition
+root.
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ from cpsa.application.slot import LatestSlot
 from cpsa.ports import PoseEstimator
 from cpsa.vision.calibration import DepthModel, Intrinsics
 from cpsa.vision.hand3d import Hand3D, HandFrame, lift_keypoints
-from cpsa.vision.irdepth import IrDepthFrame, ir_to_input
+from cpsa.vision.irdepth import IrDepthFrame
 from cpsa.vision.types import PersonPose
 
 logger = logging.getLogger(__name__)
@@ -72,9 +77,11 @@ class HandPerception:
         source: IR/depth source, for example
             :class:`cpsa.adapters.camera.irdepth.IrDepthSource`.
         estimator: Pose estimator producing 21-keypoint hands from the
-            ``ir_to_input`` image.
+            preprocessed IR image.
         intrinsics: IR intrinsics used by the lift.
         depth: Raw Z16 depth to metres model.
+        preprocess: ``(H, W)`` uint8 IR image to the ``(H, W, 3)`` model input;
+            the composition root passes the adapter that applies the CLAHE.
         max_fps: Upper bound on the frames processed per second.
 
     Raises:
@@ -87,6 +94,8 @@ class HandPerception:
         estimator: PoseEstimator,
         intrinsics: Intrinsics,
         depth: DepthModel,
+        *,
+        preprocess: Callable[[NDArray[np.uint8]], NDArray[np.uint8]],
         max_fps: float = 30.0,
     ) -> None:
         if max_fps <= 0.0:
@@ -95,6 +104,7 @@ class HandPerception:
         self._estimator = estimator
         self._intrinsics = intrinsics
         self._depth = depth
+        self._preprocess = preprocess
         self._period = 1.0 / float(max_fps)
         self._lifecycle = threading.Lock()
         self._lock = threading.Lock()
@@ -221,7 +231,7 @@ class HandPerception:
 
     def _process(self, frame: IrDepthFrame) -> HandFrame:
         started = time.perf_counter()
-        model_input = ir_to_input(frame.ir)
+        model_input = self._preprocess(frame.ir)
         preprocess_ms = _elapsed_ms(started)
 
         started = time.perf_counter()

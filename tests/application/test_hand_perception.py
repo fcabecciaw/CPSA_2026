@@ -9,10 +9,11 @@ from collections.abc import Callable
 import numpy as np
 import pytest
 
+from cpsa.adapters.camera.irdepth import ir_to_input
+from cpsa.application.hand_perception import TIMING_KEYS, HandPerception
 from cpsa.vision.calibration import DepthModel, Intrinsics
 from cpsa.vision.hand3d import HandFrame
-from cpsa.vision.hand_perception import TIMING_KEYS, HandPerception
-from cpsa.vision.irdepth import IrDepthFrame, ir_to_input
+from cpsa.vision.irdepth import IrDepthFrame
 from cpsa.vision.types import PersonPose
 
 WIDTH, HEIGHT = 8, 6
@@ -96,7 +97,7 @@ def test_delivers_hand_frames_built_from_the_ir_model_input() -> None:
     source = FakeSource()
     estimator = FakeEstimator()
     frames: list[HandFrame] = []
-    perception = HandPerception(source, estimator, INTRINSICS, DEPTH)
+    perception = HandPerception(source, estimator, INTRINSICS, DEPTH, preprocess=ir_to_input)
     perception.start(frames.append)
     try:
         source.push(7, t=12.5)
@@ -133,7 +134,9 @@ def test_latest_frame_wins_while_the_estimator_is_busy() -> None:
     estimator = FakeEstimator()
     estimator.gate = threading.Event()
     frames: list[HandFrame] = []
-    perception = HandPerception(source, estimator, INTRINSICS, DEPTH, max_fps=1000.0)
+    perception = HandPerception(
+        source, estimator, INTRINSICS, DEPTH, preprocess=ir_to_input, max_fps=1000.0
+    )
     perception.start(frames.append)
     try:
         source.push(0)
@@ -153,7 +156,7 @@ def test_latest_frame_wins_while_the_estimator_is_busy() -> None:
 def test_stop_returns_true_and_closes_the_source() -> None:
     source = FakeSource()
     frames: list[HandFrame] = []
-    perception = HandPerception(source, FakeEstimator(), INTRINSICS, DEPTH)
+    perception = HandPerception(source, FakeEstimator(), INTRINSICS, DEPTH, preprocess=ir_to_input)
     perception.start(frames.append)
     source.push(0)
     wait_until(lambda: len(frames) == 1)
@@ -170,7 +173,7 @@ def test_stop_reports_a_loop_that_misses_the_timeout() -> None:
     estimator = FakeEstimator()
     estimator.gate = threading.Event()
     frames: list[HandFrame] = []
-    perception = HandPerception(source, estimator, INTRINSICS, DEPTH)
+    perception = HandPerception(source, estimator, INTRINSICS, DEPTH, preprocess=ir_to_input)
     perception.start(frames.append)
     source.push(0)
     wait_until(estimator.started.is_set)
@@ -188,7 +191,7 @@ def test_stop_reports_a_loop_that_misses_the_timeout() -> None:
 def test_health_reports_camera_fps_and_dpu_ms() -> None:
     source = FakeSource()
     frames: list[HandFrame] = []
-    perception = HandPerception(source, FakeEstimator(), INTRINSICS, DEPTH)
+    perception = HandPerception(source, FakeEstimator(), INTRINSICS, DEPTH, preprocess=ir_to_input)
     perception.start(frames.append)
     try:
         source.push(0)
@@ -219,7 +222,7 @@ def test_an_estimator_failure_does_not_stop_the_loop() -> None:
     source = FakeSource()
     estimator = FlakyEstimator()
     frames: list[HandFrame] = []
-    perception = HandPerception(source, estimator, INTRINSICS, DEPTH)
+    perception = HandPerception(source, estimator, INTRINSICS, DEPTH, preprocess=ir_to_input)
     perception.start(frames.append)
     try:
         source.push(0)
@@ -235,4 +238,11 @@ def test_an_estimator_failure_does_not_stop_the_loop() -> None:
 
 def test_max_fps_must_be_positive() -> None:
     with pytest.raises(ValueError, match="max_fps must be positive"):
-        HandPerception(FakeSource(), FakeEstimator(), INTRINSICS, DEPTH, max_fps=0.0)
+        HandPerception(
+            FakeSource(),
+            FakeEstimator(),
+            INTRINSICS,
+            DEPTH,
+            preprocess=ir_to_input,
+            max_fps=0.0,
+        )

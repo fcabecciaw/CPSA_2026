@@ -6,12 +6,13 @@ import cv2
 import numpy as np
 import pytest
 
+from cpsa.adapters.camera.irdepth import ir_to_input
 from cpsa.vision.irdepth import (
     CLAHE_CLIP,
     CLAHE_TILES,
     INZI_BYTES_PER_PIXEL,
     decode_inzi,
-    ir_to_input,
+    normalize_ir,
 )
 
 GOLDEN_DEPTH = np.array([[0x1234, 0x0000], [0xABCD, 0x00FF]], dtype=np.uint16)
@@ -98,3 +99,20 @@ def test_ir_input_rejects_a_non_image() -> None:
         ir_to_input(np.zeros((4, 5, 3), dtype=np.uint8))
     with pytest.raises(ValueError, match="ir must be uint8"):
         ir_to_input(np.zeros((4, 5), dtype=np.float32))
+
+
+def test_normalize_ir_stretches_the_range_and_flattens_a_constant_frame() -> None:
+    normalised = normalize_ir(np.array([[100, 110], [120, 130]], dtype=np.uint8))
+    np.testing.assert_array_equal(normalised, np.array([[0, 85], [170, 255]], dtype=np.uint8))
+
+    flat = normalize_ir(np.full((3, 4), 77, dtype=np.uint8))
+    assert flat.shape == (3, 4)
+    assert flat.dtype == np.uint8
+    np.testing.assert_array_equal(flat, np.zeros((3, 4), dtype=np.uint8))
+
+
+def test_normalize_ir_rejects_a_non_image() -> None:
+    with pytest.raises(ValueError, match="ir must be"):
+        normalize_ir(np.zeros((4, 5, 3), dtype=np.uint8))
+    with pytest.raises(ValueError, match="ir must be uint8"):
+        normalize_ir(np.zeros((4, 5), dtype=np.float32))

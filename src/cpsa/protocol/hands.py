@@ -13,9 +13,6 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
-import numpy as np
-from numpy.typing import ArrayLike
-
 from cpsa.vision.hand3d import Hand3D, HandFrame
 
 __all__ = ["OUTCOMES", "RPS_MOVES", "RPS_PHASES", "hologram_hands", "rps_state"]
@@ -73,7 +70,7 @@ def rps_state(
     board: str | None = None,
     outcome: str | None = None,
     score: Mapping[str, int] | None = None,
-    kpts2d: ArrayLike | None = None,
+    kpts2d: Any | None = None,
 ) -> dict[str, Any]:
     """Build the ``rps.state`` payload (F-E).
 
@@ -117,31 +114,43 @@ def _hand(hand: Hand3D) -> dict[str, Any]:
     }
 
 
-def _kpts2d(values: ArrayLike) -> list[list[float]]:
-    keypoints = np.asarray(values, dtype=np.float64)
-    if keypoints.ndim != 2 or keypoints.shape[0] != _KEYPOINTS:
-        raise ValueError(f"keypoints must be (21, K), got shape {keypoints.shape}")
-    if keypoints.shape[1] < _COORDINATES_2D:
-        raise ValueError(f"keypoints need at least 3 columns, got {keypoints.shape[1]}")
-    return [
-        [_finite(row[0]), _finite(row[1]), _finite(row[2])]
-        for row in keypoints[:, :_COORDINATES_2D]
-    ]
+def _kpts2d(values: Any) -> list[list[float]]:
+    """Return 21 ``[u, v, conf]`` rows; ``values`` is any 21-row sequence.
+
+    The array is duck-typed (a NumPy array or a list of rows both work) so this
+    protocol layer needs no third-party import.
+    """
+
+    rows = _keypoint_rows(values, "keypoints", _COORDINATES_2D)
+    return [[_finite(row[0]), _finite(row[1]), _finite(row[2])] for row in rows]
 
 
-def _kpts3d(values: ArrayLike) -> list[list[float] | None]:
-    keypoints = np.asarray(values, dtype=np.float64)
-    if keypoints.ndim != 2 or keypoints.shape[0] != _KEYPOINTS:
-        raise ValueError(f"3D keypoints must be (21, 4), got shape {keypoints.shape}")
-    if keypoints.shape[1] < _COORDINATES_3D:
-        raise ValueError(f"3D keypoints need at least 4 columns, got {keypoints.shape[1]}")
+def _kpts3d(values: Any) -> list[list[float] | None]:
+    """Return 21 ``[x, y, z]`` rows, ``None`` where the valid flag is unset."""
+
+    rows = _keypoint_rows(values, "3D keypoints", _COORDINATES_3D)
     lifted: list[list[float] | None] = []
-    for row in keypoints:
-        if not row[3] >= _VALID:
+    for row in rows:
+        if not float(row[3]) >= _VALID:
             lifted.append(None)
             continue
         lifted.append([_finite(row[0]), _finite(row[1]), _finite(row[2])])
     return lifted
+
+
+def _keypoint_rows(values: Any, name: str, minimum_columns: int) -> list[Any]:
+    """Check that ``values`` holds exactly 21 rows of at least N columns."""
+
+    try:
+        rows = list(values)
+    except TypeError as exc:
+        raise ValueError(f"{name} must be (21, K), got {values!r}") from exc
+    if len(rows) != _KEYPOINTS:
+        raise ValueError(f"{name} must be (21, K), got {len(rows)} rows")
+    for row in rows:
+        if not hasattr(row, "__len__") or len(row) < minimum_columns:
+            raise ValueError(f"{name} must be (21, K), got a row without {minimum_columns} values")
+    return rows
 
 
 def _score(score: Mapping[str, int] | None) -> dict[str, int]:
