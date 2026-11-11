@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable, Sequence
+from typing import Literal
 
 from cpsa.application.classification import ClassificationStage
 from cpsa.application.config import Config
@@ -25,6 +27,9 @@ from cpsa.ports import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Both wrists must have delivered a sample within this window to be ``connected`` (F3).
+_IMU_STALE_S = 1.0
 
 
 class Runtime:
@@ -51,9 +56,13 @@ class Runtime:
         self._actuators = list(actuators)
         self._gui = gui
         self._vision = vision
+        self._imu_rx_lock = threading.Lock()
+        self._imu_last_rx: dict[Side, float] = {}
 
     def start(self) -> None:
         try:
+            with self._imu_rx_lock:
+                self._imu_last_rx.clear()
             self._gui.start()
             self._dispatcher.start()
             if self._vision is not None:
@@ -68,9 +77,27 @@ class Runtime:
         self, side: Side, kind: SampleKind, values: tuple[float, ...], ts: float
     ) -> None:
         """Tee sensor samples to the IMU synchronizer and the vision episode feed."""
+        with self._imu_rx_lock:
+            self._imu_last_rx[side] = ts
         self._synchronizer.update(side, kind, values, ts)
         if self._vision is not None:
             self._vision.on_imu_sample(side, kind, values, ts)
+
+    def imu_status(self, now: float) -> Literal["connected", "lost"]:
+        """Whether both wrists delivered a sample within the last second (F3).
+
+        Fed by :meth:`_on_sample` with the sample's monotonic timestamp, so the
+        status follows the sensor stream even when no wall-clock time passes
+        between two reads.
+        """
+        with self._imu_rx_lock:
+            left = self._imu_last_rx.get(Side.LEFT)
+            right = self._imu_last_rx.get(Side.RIGHT)
+        if left is None or right is None:
+            return "lost"
+        if now - left > _IMU_STALE_S or now - right > _IMU_STALE_S:
+            return "lost"
+        return "connected"
 
     def stop(self) -> None:
         steps: list[tuple[str, Callable[[], None]]] = [

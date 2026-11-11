@@ -39,6 +39,7 @@ from cpsa.ports import (
     PoseEstimator,
     SensorSource,
     Verifier,
+    VisionObserver,
 )
 from cpsa.vision.types import KeypointLayout
 
@@ -89,7 +90,9 @@ def _build_pose_estimator(settings: VisionConfig, layout: KeypointLayout) -> Pos
     return DpuPoseEstimator(model.path, layout, conf_thr=model.conf_thr, iou_thr=model.iou_thr)
 
 
-def _build_verifier(config: Config, clock: Clock) -> Verifier:
+def _build_verifier(
+    config: Config, clock: Clock, *, observer: VisionObserver | None = None
+) -> Verifier:
     """Return the vision verifier when enabled, else the stub.
 
     Imports stay local so the runner remains importable without the camera,
@@ -126,26 +129,37 @@ def _build_verifier(config: Config, clock: Clock) -> Verifier:
             clock,
             layout,
             log_dir=config.log.base_path,
+            observer=observer,
         )
     except (RuntimeError, FileNotFoundError, ValueError) as exc:
         raise VisionStartupError(str(exc)) from exc
 
 
-def board_adapters(config: Config) -> BoardAdapters:
-    """Construct the real adapters. The single place where the verifier and GUI are chosen."""
+def board_adapters(
+    config: Config,
+    *,
+    gui: Gui | None = None,
+    observer: VisionObserver | None = None,
+    clock: Clock | None = None,
+) -> BoardAdapters:
+    """Construct the real adapters. The single place where the verifier and GUI are chosen.
+
+    ``gui``, ``observer`` and ``clock`` are injection seams for the supervisor's
+    medical mode; the defaults keep ``cpsa-board`` behavior identical.
+    """
     # Imported here so the runner stays importable (and testable) without the
     # board-only BLE libraries.
     from cpsa.adapters.bluecoin.source import BlueCoinSource
 
-    clock = SystemClock()
+    shared_clock = SystemClock() if clock is None else clock
     return BoardAdapters(
         source=BlueCoinSource(config.bluecoins.left, config.bluecoins.right),
         load_classifier=_load_native,
         start_actuators=lambda: start_actuators(config.actuators),
-        verifier=_build_verifier(config, clock),
-        gui=NullGui(),
+        verifier=_build_verifier(config, shared_clock, observer=observer),
+        gui=NullGui() if gui is None else gui,
         sink=JsonlEventSink(config.log.base_path),
-        clock=clock,
+        clock=shared_clock,
     )
 
 

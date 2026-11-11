@@ -33,7 +33,12 @@ vision = [
     "onnxruntime",
     "opencv-python-headless",
 ]
+server = [
+    "aiohttp>=3.9",
+]
 dev = [
+    "aiohttp>=3.9",
+    "jsonschema>=4.20",
     "pytest",
     "ruff",
     "mypy",
@@ -41,6 +46,7 @@ dev = [
 
 [project.scripts]
 cpsa-board = "cpsa.board.__main__:main"
+cpsa-supervisor = "cpsa.board.supervisor_main:main"
 cpsa-record = "cpsa.recorder.__main__:main"
 cpsa-replay-imu = "cpsa.board.replay:main"
 cpsa-replay-vision = "cpsa.board.vision_replay:main"

@@ -1,0 +1,15 @@
+[Unit]
+Description=Load the KV260 DPU application (kv260-benchmark-b4096)
+Documentation=file:///home/kria/cpsa/deploy/README.md
+Before=cpsa-supervisor.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# `xmutil unloadapp` fails when no app is loaded, which is normal on a fresh
+# boot. Keep going so that loadapp always runs.
+ExecStart=/bin/sh -c 'xmutil unloadapp || true; xmutil loadapp kv260-benchmark-b4096'
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

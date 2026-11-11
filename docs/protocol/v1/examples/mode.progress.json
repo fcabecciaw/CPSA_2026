@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "type": "mode.progress",
+  "seq": 3,
+  "t": 1003.0,
+  "wall": "2026-11-12T08:00:00Z",
+  "data": {
+    "mode": "medical",
+    "step": "ready",
+    "error": null
+  }
+}

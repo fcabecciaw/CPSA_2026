@@ -1,0 +1,20 @@
+{
+  "v": 1,
+  "type": "status",
+  "seq": 2,
+  "t": 1002.0,
+  "wall": "2026-11-12T08:00:00Z",
+  "data": {
+    "mode": "medical",
+    "mode_state": "running",
+    "perception": {
+      "fps": null,
+      "dpu_ms": null,
+      "camera": "ok",
+      "model": "pose_halfbust62"
+    },
+    "imu": "connected",
+    "errors": [],
+    "uptime_s": 125.4
+  }
+}

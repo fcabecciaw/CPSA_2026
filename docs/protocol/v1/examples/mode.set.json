@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "type": "mode.set",
+  "seq": 2,
+  "data": {
+    "mode": "medical"
+  }
+}

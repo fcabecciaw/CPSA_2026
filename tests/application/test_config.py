@@ -239,3 +239,88 @@ def test_unknown_vision_key_is_named() -> None:
     with pytest.raises(ConfigError) as info:
         parse(_with(valid(), "vision.analysis_stride", 2))
     assert info.value.key == "vision.analysis_stride"
+
+
+def test_server_and_supervisor_defaults() -> None:
+    config = load(SHIPPED)
+
+    assert config.server.host == "0.0.0.0"
+    assert config.server.port == 8080
+    assert config.server.static_dir == Path("web/dist")
+    assert config.server.idle_timeout_s == 30.0
+    assert config.supervisor.default_mode == "medical"
+
+
+def test_server_and_supervisor_sections_are_loaded() -> None:
+    data = valid()
+    data["server"] = {
+        "host": "127.0.0.1",
+        "port": 9000,
+        "static_dir": "~/web/build",
+        "idle_timeout_s": 2.5,
+    }
+    data["supervisor"] = {"default_mode": "idle"}
+
+    config = parse(data)
+
+    assert config.server.host == "127.0.0.1"
+    assert config.server.port == 9000
+    assert config.server.static_dir == Path("~/web/build").expanduser()
+    assert config.server.idle_timeout_s == 2.5
+    assert config.supervisor.default_mode == "idle"
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("host", ""),
+        ("port", 0),
+        ("port", 65536),
+        ("port", "8080"),
+        ("port", True),
+        ("static_dir", ""),
+        ("idle_timeout_s", 0),
+        ("extra", True),
+    ],
+)
+def test_invalid_server_value_is_named(key: str, value: object) -> None:
+    data = valid()
+    data["server"] = {
+        "host": "0.0.0.0",
+        "port": 8080,
+        "static_dir": "web/dist",
+        "idle_timeout_s": 30,
+        key: value,
+    }
+
+    with pytest.raises(ConfigError) as info:
+        parse(data)
+    assert info.value.key == f"server.{key}"
+
+
+def test_missing_server_key_is_named_when_the_section_is_present() -> None:
+    data = valid()
+    data["server"] = {"host": "0.0.0.0", "static_dir": "web/dist", "idle_timeout_s": 30}
+
+    with pytest.raises(ConfigError) as info:
+        parse(data)
+    assert info.value.key == "server.port"
+
+
+@pytest.mark.parametrize("value", ["lab", "MEDICAL", "", 1])
+def test_invalid_default_mode_is_named(value: object) -> None:
+    data = valid()
+    data["supervisor"] = {"default_mode": value}
+
+    with pytest.raises(ConfigError) as info:
+        parse(data)
+    assert info.value.key == "supervisor.default_mode"
+
+
+def test_unknown_supervisor_key_is_named() -> None:
+    data = valid()
+    data["supervisor"] = {"default_mode": "medical", "fallback": "idle"}
+
+    with pytest.raises(ConfigError) as info:
+        parse(data)
+    assert info.value.key == "supervisor.fallback"

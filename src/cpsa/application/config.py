@@ -1,15 +1,16 @@
 """Typed, validated board configuration.
 
-Every key is required and there are no code defaults: the YAML file is the single
-source of configuration. Validation failures raise :class:`ConfigError` naming the
-dotted key.
+Every key of the hardware sections is required and there are no code defaults:
+the YAML file is the single source of configuration. ``server`` and ``supervisor``
+are optional sections; when a section is absent its dataclass defaults apply.
+Validation failures raise :class:`ConfigError` naming the dotted key.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import TypeVar
@@ -29,6 +30,7 @@ from cpsa.vision.tracker2d import Tracker2DConfig
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 VISION_MODEL_KINDS = ("onnx", "xmodel")
+SUPERVISOR_MODES = ("idle", "medical")
 EnumT = TypeVar("EnumT", bound=Enum)
 
 
@@ -208,6 +210,23 @@ class VisionConfig:
 
 
 @dataclass(frozen=True)
+class ServerConfig:
+    """HTTP and WebSocket endpoint served by ``cpsa-supervisor`` (IF-101)."""
+
+    host: str = "0.0.0.0"
+    port: int = 8080
+    static_dir: Path = Path("web/dist")
+    idle_timeout_s: float = 30.0
+
+
+@dataclass(frozen=True)
+class SupervisorConfig:
+    """Which mode the supervisor starts at boot (FR-205)."""
+
+    default_mode: str = "medical"
+
+
+@dataclass(frozen=True)
 class Config:
     log: LogConfig
     bluecoins: BlueCoinsConfig
@@ -216,6 +235,8 @@ class Config:
     actuators: ActuatorsConfig
     camera: CameraConfig
     vision: VisionConfig
+    server: ServerConfig = field(default_factory=ServerConfig)
+    supervisor: SupervisorConfig = field(default_factory=SupervisorConfig)
 
 
 def load(path: Path) -> Config:
@@ -246,6 +267,14 @@ def parse(data: object) -> Config:
     camera = root.section("camera")
     xu = camera.section("xu")
     vision = _vision_config(root.section("vision"))
+    server_section = root.optional_section("server")
+    supervisor_section = root.optional_section("supervisor")
+    server = _server_config(server_section) if server_section is not None else ServerConfig()
+    supervisor = (
+        _supervisor_config(supervisor_section)
+        if supervisor_section is not None
+        else SupervisorConfig()
+    )
     verification_deadline_s = dispatch.positive("verification_deadline_s")
 
     if vision.fast_budget_s >= verification_deadline_s:
@@ -303,6 +332,8 @@ def parse(data: object) -> Config:
             ),
         ),
         vision=vision,
+        server=server,
+        supervisor=supervisor,
     )
     sections = (
         root,
@@ -320,6 +351,25 @@ def parse(data: object) -> Config:
     )
     for section in sections:
         section.reject_unknown()
+    return config
+
+
+def _server_config(server: _Section) -> ServerConfig:
+    """Build the validated optional ``server`` section (defaults apply when absent)."""
+    config = ServerConfig(
+        host=server.text("host"),
+        port=server.integer("port", 1, 65535),
+        static_dir=Path(server.text("static_dir")).expanduser(),
+        idle_timeout_s=server.positive("idle_timeout_s"),
+    )
+    server.reject_unknown()
+    return config
+
+
+def _supervisor_config(supervisor: _Section) -> SupervisorConfig:
+    """Build the validated optional ``supervisor`` section."""
+    config = SupervisorConfig(default_mode=supervisor.choice("default_mode", SUPERVISOR_MODES))
+    supervisor.reject_unknown()
     return config
 
 
@@ -516,6 +566,12 @@ class _Section:
 
     def section(self, name: str) -> _Section:
         return _Section(self._get(name), self._key(name))
+
+    def optional_section(self, name: str) -> _Section | None:
+        """Return the subsection, or ``None`` when the optional section is absent."""
+        if name not in self._data:
+            return None
+        return self.section(name)
 
     def text(self, name: str) -> str:
         value = self._get(name)

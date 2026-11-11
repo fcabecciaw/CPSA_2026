@@ -223,3 +223,38 @@ def test_vision_verifier_lifecycle_and_imu_tee(tmp_path) -> None:
     assert video.stop_calls == 1
     with pytest.raises(RuntimeError):
         verifier.verify(Detection(Tag.DANGEROUS, clock.now(), 10.2, ()))
+
+
+def test_imu_status_needs_a_fresh_sample_from_both_sides() -> None:
+    parts = Parts()
+    parts.runtime.start()
+    try:
+        emit = parts.source.on_sample
+        assert emit is not None
+        assert parts.runtime.imu_status(parts.clock.t) == "lost"
+
+        emit(Side.LEFT, SampleKind.ACC, (0.0, 0.0, 1000.0), parts.clock.t)
+        assert parts.runtime.imu_status(parts.clock.t) == "lost"
+
+        emit(Side.RIGHT, SampleKind.ACC, (0.0, 0.0, 1000.0), parts.clock.t)
+        assert parts.runtime.imu_status(parts.clock.t) == "connected"
+
+        # Exactly 1.0 s after the last sample is still "within the last second".
+        parts.clock.advance(1.0)
+        assert parts.runtime.imu_status(parts.clock.t) == "connected"
+
+        parts.clock.advance(0.001)
+        assert parts.runtime.imu_status(parts.clock.t) == "lost"
+
+        emit(Side.LEFT, SampleKind.ACC, (0.0, 0.0, 1000.0), parts.clock.t)
+        assert parts.runtime.imu_status(parts.clock.t) == "lost"
+
+        emit(Side.RIGHT, SampleKind.ACC, (0.0, 0.0, 1000.0), parts.clock.t)
+        assert parts.runtime.imu_status(parts.clock.t) == "connected"
+    finally:
+        parts.runtime.stop()
+
+
+def test_imu_status_is_lost_before_the_first_sample() -> None:
+    parts = Parts()
+    assert parts.runtime.imu_status(parts.clock.t) == "lost"

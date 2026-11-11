@@ -166,6 +166,38 @@ process exits with code 0.
 
 With no actuator enabled or found, detection, verification and logging continue.
 
+## Supervisor and web UI
+
+`cpsa-supervisor` serves the demo UI and the protocol WebSocket on one port and
+runs exactly one mode at a time. It is the composition root for the medical demo:
+the browser talks to `cpsa.adapters.web`, which publishes the supervisor `status`
+and the active mode's topics.
+
+```bash
+uv run cpsa-supervisor --config config/board.yaml
+uv run cpsa-supervisor --config config/board.yaml --fake-medical
+```
+
+Open `http://<host>:8080/` for the UI. The WebSocket is at `/ws`, the built
+frontend is under `/assets/`, and `GET /health` returns the current mode,
+mode state and uptime. `--fake-medical` replays the protocol examples from
+`docs/protocol/v1/examples` on a loop (state at 1 Hz, hands at 10 Hz, decisions
+and episodes every 5 s), so the dashboard can be developed on a PC with no
+hardware and no `board` extra.
+
+Both configuration sections are optional; the defaults are:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `server.host` | `0.0.0.0` | interface the UI and `/ws` are served on |
+| `server.port` | `8080` | one port for HTTP and the WebSocket |
+| `server.static_dir` | `web/dist` | built frontend served at `/` and `/assets/` |
+| `server.idle_timeout_s` | `30` | close a WebSocket with no reads for this long |
+| `supervisor.default_mode` | `medical` | mode started at boot: `idle` or `medical` |
+
+Stop with `Ctrl+C` or `kill -TERM <pid>`; the active mode and the web server are
+stopped in that order and the process exits with code 0.
+
 ## Recording sessions
 
 `cpsa-record record` captures synchronized RGB-D frames and, unless `--no-imu` is

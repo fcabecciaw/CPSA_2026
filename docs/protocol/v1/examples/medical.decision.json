@@ -1,0 +1,33 @@
+{
+  "v": 1,
+  "type": "medical.decision",
+  "seq": 7,
+  "t": 1007.0,
+  "wall": "2026-11-12T08:00:00Z",
+  "data": {
+    "tag": "DANGEROUS",
+    "tag_changed": true,
+    "verdict": "CONFIRMED",
+    "reason": "CONFIRMED",
+    "severity": "DANGEROUS",
+    "vision": {
+      "verdict": "CONFIRMED",
+      "severity": "DANGEROUS",
+      "episode_id": "ep-20261112-0001",
+      "features": {
+        "contact_count": 2.0,
+        "repetition_hz": 1.4
+      }
+    },
+    "actuations": [
+      {
+        "actuator_id": "metamotion",
+        "kind": "metamotion"
+      },
+      {
+        "actuator_id": "speaker",
+        "kind": "speaker"
+      }
+    ]
+  }
+}

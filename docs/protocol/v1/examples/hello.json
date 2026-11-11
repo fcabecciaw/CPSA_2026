@@ -1,0 +1,23 @@
+{
+  "v": 1,
+  "type": "hello",
+  "seq": 1,
+  "t": 1001.0,
+  "wall": "2026-11-12T08:00:00Z",
+  "data": {
+    "server_version": "0.1.0",
+    "protocol_version": 1,
+    "capabilities": [
+      "status",
+      "medical.state",
+      "medical.decision",
+      "medical.episode",
+      "medical.hands"
+    ],
+    "modes": [
+      "idle",
+      "medical"
+    ],
+    "models": []
+  }
+}

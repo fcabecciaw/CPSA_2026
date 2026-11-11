@@ -50,7 +50,7 @@ from cpsa.domain.model import (
     Verdict,
     VisionAssessment,
 )
-from cpsa.ports import Clock, EvidenceSink, PoseEstimator, VideoSource
+from cpsa.ports import Clock, EvidenceSink, PoseEstimator, VideoSource, VisionObserver
 from cpsa.vision.assessment import AnalysisConfig, severity_of
 from cpsa.vision.episode import EpisodeAnalyzer
 from cpsa.vision.fusion import IMUSignal, estimate_clock_offset
@@ -317,6 +317,9 @@ class VisionVerifier:
         layout: keypoint layout of the pose model.
         log_dir: log base path; episode reports and (without evidence) traces go
             under ``<log_dir>/<day>/vision/``.
+        observer: live vision results for a display adapter; called from the
+            analysis thread. An exception is logged and swallowed, so it never
+            changes a verdict (F2).
     """
 
     def __init__(
@@ -329,6 +332,7 @@ class VisionVerifier:
         layout: KeypointLayout,
         *,
         log_dir: Path | None = None,
+        observer: VisionObserver | None = None,
     ) -> None:
         self._source = source
         self._estimator = estimator
@@ -337,6 +341,7 @@ class VisionVerifier:
         self._clock = clock
         self._layout = layout
         self._log_dir = log_dir
+        self._observer = observer
         self._analyzer = EpisodeAnalyzer(layout, cfg.tracker, cfg.analysis)
 
         self._cond = threading.Condition()
@@ -409,6 +414,18 @@ class VisionVerifier:
         """Camera timestamp of the last frame pushed into the analyzer (P-05)."""
         with self._cond:
             return self._snapshot_until
+
+    @property
+    def health_error(self) -> BaseException | None:
+        """Error that made the video source unhealthy, or ``None``.
+
+        ``start`` records a camera that cannot be opened and ``_on_source_error``
+        records a stream failure; both leave the verifier fail-open (``verify``
+        returns ``UNDECIDED``) instead of raising. A ``Mode`` uses this read-only
+        signal to report the failure it would otherwise not see (R-05).
+        """
+        with self._cond:
+            return self._health_error
 
     def imu_sample_count(self, side: Side) -> int:
         """Number of buffered acceleration samples for one side (P-07)."""
@@ -704,6 +721,7 @@ class VisionVerifier:
             snapshot = [frame for frame in self._pre_roll if frame.t >= self._episode_t_start]
         self._analyzer.start(episode_id, self._episode_t_start)
         logger.info("Vision episode %s started at %.3f", episode_id, self._episode_t_start)
+        self._notify_episode(episode_id, self._episode_t_start, True)
         for frame in snapshot:
             if self._stop.is_set():
                 break
@@ -748,6 +766,7 @@ class VisionVerifier:
             while self._retained and frame.t - self._retained[0][0].t > retain_s:
                 self._retained.popleft()
             self._update_peak_window(frame, tracked)
+        self._notify_tracked(tracked)
         self._serve_requests()
 
     def _update_peak_window(self, frame: VideoFrame, tracked: TrackedFrame) -> None:
@@ -902,6 +921,8 @@ class VisionVerifier:
         )
         trace_path = self._write_trace(trace)
         self._write_report(report, trace_path)
+        self._notify_episode(episode_id, t_start, False)
+        self._notify_report(report)
         self._write_evidence(report)
         if self._evidence is not None and self._cfg.evidence.enabled:
             try:
@@ -918,6 +939,33 @@ class VisionVerifier:
         logger.info("Vision episode %s ended at %.3f", episode_id, now)
 
     # -- outputs ----------------------------------------------------------
+
+    def _notify_episode(self, episode_id: str, t_start: float, active: bool) -> None:
+        observer = self._observer
+        if observer is None:
+            return
+        try:
+            observer.on_episode(episode_id, t_start, active)
+        except Exception:
+            logger.exception("Vision observer failed in on_episode")
+
+    def _notify_tracked(self, tracked: TrackedFrame) -> None:
+        observer = self._observer
+        if observer is None:
+            return
+        try:
+            observer.on_tracked(tracked)
+        except Exception:
+            logger.exception("Vision observer failed in on_tracked")
+
+    def _notify_report(self, report: EpisodeReport) -> None:
+        observer = self._observer
+        if observer is None:
+            return
+        try:
+            observer.on_report(report)
+        except Exception:
+            logger.exception("Vision observer failed in on_report")
 
     def _trace_path(self, episode_id: str, day: datetime) -> Path | None:
         folder = day.strftime("%Y-%m-%d")

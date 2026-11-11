@@ -34,7 +34,7 @@ from cpsa.domain.model import (
     VisionAssessment,
 )
 from cpsa.vision.contacts2d import detect_contacts
-from cpsa.vision.types import PersonPose, TrackedFrame, VideoFrame
+from cpsa.vision.types import EpisodeReport, PersonPose, TrackedFrame, VideoFrame
 from tests.application.test_config import SHIPPED
 from tests.fakes import FakeClock, MemorySink, RecordingActuator, RecordingGui
 from tests.unit import vision_fixtures as fx
@@ -418,8 +418,10 @@ def test_source_failure_gives_undecided_and_logs(
     verifier, source, _, _ = make_verifier(tmp_path, clock=clock)
     verifier.start()
     try:
+        assert verifier.health_error is None
         emit_range(source, frames, 9.0, 10.4)
         source.fail(RuntimeError("camera unplugged"))
+        assert isinstance(verifier.health_error, RuntimeError)
         result = verifier.verify(detection(Tag.DANGEROUS, 10.2, clock))
     finally:
         verifier.stop()
@@ -430,6 +432,35 @@ def test_source_failure_gives_undecided_and_logs(
     trace = verifier.last_trace
     assert trace is not None
     assert trace.assessments[-1].source_healthy is False
+
+
+def test_a_camera_that_cannot_open_is_reported_through_health_error(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    class UnopenableSource(ManualVideoSource):
+        def start(
+            self,
+            on_frame: Callable[[VideoFrame], None],
+            on_error: Callable[[Exception], None] | None = None,
+        ) -> None:
+            raise FileNotFoundError("/dev/video0")
+
+    source = UnopenableSource()
+    verifier = VisionVerifier(
+        source,
+        PoseBook(episode_frames()),
+        None,
+        _config(tmp_path),
+        FakeClock(9.0),
+        fx.LAYOUT,
+        log_dir=tmp_path / "logs",
+    )
+    verifier.start()
+    try:
+        assert isinstance(verifier.health_error, FileNotFoundError)
+        assert "continuing without frames" in caplog.text
+    finally:
+        verifier.stop()
 
 
 def test_estimator_failure_gives_undecided_and_logs(
@@ -830,3 +861,101 @@ def test_stub_verifier_still_returns_undecided() -> None:
 
     assert isinstance(assessment, VisionAssessment)
     assert assessment.verdict is Verdict.UNDECIDED
+
+
+# ---------------------------------------------------------------------------
+# F2: live vision observer hooks
+# ---------------------------------------------------------------------------
+
+
+class _RecordingObserver:
+    """Record the observer call order on one replayed episode."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+
+    def on_episode(self, episode_id: str, t_start: float, active: bool) -> None:
+        self.calls.append(("episode", episode_id, t_start, active))
+
+    def on_tracked(self, tracked: TrackedFrame) -> None:
+        self.calls.append(("tracked", int(tracked.seq)))
+
+    def on_report(self, report: EpisodeReport) -> None:
+        self.calls.append(("report", report))
+
+
+class _RaisingObserver:
+    """Every callback fails: the verifier must log it and swallow it."""
+
+    def on_episode(self, episode_id: str, t_start: float, active: bool) -> None:
+        raise RuntimeError("dashboard down")
+
+    def on_tracked(self, tracked: TrackedFrame) -> None:
+        raise RuntimeError("dashboard down")
+
+    def on_report(self, report: EpisodeReport) -> None:
+        raise RuntimeError("dashboard down")
+
+
+def replay_observed_episode(tmp_path: Path, observer: object | None = None) -> EpisodeReport | None:
+    """Replay the fixtures until one episode ends, with an optional observer."""
+    frames = episode_frames()
+    source = ManualVideoSource()
+    clock = FakeClock(9.0)
+    config = _config(
+        tmp_path,
+        idle_timeout_s=0.2,
+        analysis=replace(load(SHIPPED).vision.analysis, activity_window_s=0.5),
+    )
+    verifier = VisionVerifier(
+        source,
+        PoseBook(frames),
+        None,
+        config,
+        clock,
+        fx.LAYOUT,
+        log_dir=tmp_path / "logs",
+        observer=observer,  # type: ignore[arg-type]
+    )
+    verifier.start()
+    try:
+        emit_range(source, frames, 9.0, 10.4)
+        verifier.observe(detection(Tag.DANGEROUS, 10.2, clock))
+        wait_until(lambda: (verifier.analyzed_until_t or 0.0) >= 10.4 - 1e-9)
+        clock.t = 30.0
+        wait_until(lambda: verifier.last_report is not None)
+        return verifier.last_report
+    finally:
+        verifier.stop()
+
+
+def test_observer_receives_episode_start_tracked_frames_end_and_report(tmp_path: Path) -> None:
+    observer = _RecordingObserver()
+
+    report = replay_observed_episode(tmp_path, observer)
+
+    assert report is not None
+    kinds = [call[0] for call in observer.calls]
+    assert kinds[0] == "episode"
+    assert observer.calls[0][3] is True
+    assert kinds[-2:] == ["episode", "report"]
+    assert observer.calls[-2][3] is False
+    assert observer.calls[-1] == ("report", report)
+    assert all(kind == "tracked" for kind in kinds[1:-2])
+    assert kinds.count("tracked") > 0
+    episode_ids = {call[1] for call in observer.calls if call[0] == "episode"}
+    assert episode_ids == {report.episode_id}
+
+
+def test_a_raising_observer_is_logged_and_does_not_change_the_report(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    baseline = replay_observed_episode(tmp_path)
+    with caplog.at_level(logging.ERROR):
+        observed = replay_observed_episode(tmp_path, _RaisingObserver())
+
+    assert baseline is not None and observed is not None
+    assert observed.contact_count == baseline.contact_count
+    assert observed.peak_severity is baseline.peak_severity
+    assert observed.labels == baseline.labels
+    assert "Vision observer failed" in caplog.text

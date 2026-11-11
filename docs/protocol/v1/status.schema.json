@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "status.schema.json",
+  "title": "status data (server to client)",
+  "type": "object",
+  "properties": {
+    "mode": {
+      "enum": [
+        "idle",
+        "lab",
+        "medical"
+      ]
+    },
+    "mode_state": {
+      "enum": [
+        "stopped",
+        "starting",
+        "running",
+        "stopping",
+        "failed"
+      ]
+    },
+    "perception": {
+      "type": "object",
+      "properties": {
+        "fps": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "dpu_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "camera": {
+          "enum": [
+            "ok",
+            "missing",
+            "error",
+            null
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "fps",
+        "dpu_ms",
+        "camera",
+        "model"
+      ],
+      "additionalProperties": true
+    },
+    "imu": {
+      "enum": [
+        "n/a",
+        "searching",
+        "connected",
+        "lost"
+      ]
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "camera_missing",
+          "camera_error",
+          "model_missing",
+          "dpu_error",
+          "imu_not_found",
+          "asset_invalid",
+          "busy",
+          "bad_command",
+          "internal"
+        ]
+      }
+    },
+    "uptime_s": {
+      "type": "number"
+    }
+  },
+  "required": [
+    "mode",
+    "mode_state",
+    "perception",
+    "imu",
+    "errors",
+    "uptime_s"
+  ],
+  "additionalProperties": true
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "envelope.schema.json",
+  "title": "Protocol v1 envelope (IF-102)",
+  "type": "object",
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "t": {
+      "type": "number"
+    },
+    "wall": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "data": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "v",
+    "type",
+    "seq",
+    "t",
+    "wall",
+    "data"
+  ],
+  "additionalProperties": true
+}

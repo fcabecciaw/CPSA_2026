@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hello.schema.json",
+  "title": "hello data (server to client)",
+  "type": "object",
+  "properties": {
+    "server_version": {
+      "type": "string"
+    },
+    "protocol_version": {
+      "const": 1
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "modes": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "idle",
+          "lab",
+          "medical"
+        ]
+      }
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "additionalProperties": true
+      }
+    }
+  },
+  "required": [
+    "server_version",
+    "protocol_version",
+    "capabilities",
+    "modes",
+    "models"
+  ],
+  "additionalProperties": true
+}
