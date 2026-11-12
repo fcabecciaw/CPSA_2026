@@ -14,3 +14,4 @@ without any network access:
 
 The license text is in `vendor/mediapipe/LICENSE`. These assets run in the
 laptop browser only, never on the KV260 board.
+

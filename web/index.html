@@ -13,6 +13,27 @@
         <p class="wordmark">CPSA</p>
         <h1 class="title">Cosa vede l'IA</h1>
 
+        <div class="modes" role="group" aria-label="Vista del modello">
+          <button
+            class="mode mode-active"
+            id="mode-objects"
+            type="button"
+            aria-pressed="true"
+            title="Oggetti riconosciuti da YOLOX"
+          >
+            Oggetti
+          </button>
+          <button
+            class="mode"
+            id="mode-skeleton"
+            type="button"
+            aria-pressed="false"
+            title="Scheletro di MoveNet dentro la stanza"
+          >
+            Scheletro
+          </button>
+        </div>
+
         <div class="readout">
           <span class="conn" id="conn">
             <span id="conn-dot" class="dot dot-connecting" aria-hidden="true"></span>
@@ -55,7 +76,7 @@
           <h2 id="showcase-title" class="sr-only">Cosa vede l'IA</h2>
 
           <div class="hologram" id="hologram">
-            <div class="hologram-face" id="face" aria-hidden="true"></div>
+            <div class="hologram-avatar" id="avatar" aria-hidden="true"></div>
             <div class="hologram-info">
               <p class="hologram-id">ARI <span>· CPSA</span></p>
               <p class="voice-badge" id="voice-badge">Attiva la voce</p>
@@ -69,7 +90,7 @@
 
           <p class="bubble bubble-empty" id="bubble" role="status" aria-live="polite"></p>
 
-          <div class="showcase">
+          <div class="showcase" id="showcase-panel">
             <section class="showcase-group" id="showcase-counts-group">
               <h3 class="showcase-heading">Oggetti nell'inquadratura</h3>
               <ul class="showcase-counts" id="showcase-counts"></ul>
@@ -79,6 +100,12 @@
               <ul class="showcase-objects" id="showcase-objects"></ul>
             </section>
           </div>
+
+          <div class="room-view" id="room" hidden></div>
+
+          <p class="view-note view-switching" id="switching-note" hidden>
+            Cambio modello…
+          </p>
 
           <p class="mente" id="mente" hidden>
             <span class="mente-item"

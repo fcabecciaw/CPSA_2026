@@ -9,6 +9,9 @@
  * `import()` behind `import.meta.env.DEV`, so Vite removes it from the
  * production bundle.
  *
+ * F-E1 `model.set` is accepted and pins the published model (`yolox` or
+ * `movenet`); without it the scripted timeline alternates the two.
+ *
  * Query parameters, used for deterministic screenshots:
  *   `at=<s>`     fast-forwards the scripted scenario by that many seconds;
  *   `objects=0`  leaves the showcase pane on its invitation (nothing in view);
@@ -18,6 +21,7 @@
 import type { SocketLike } from "./client";
 import type { FaceCue } from "./cognitive/facecues";
 import {
+  type ModelName,
   type PoseStatePayload,
   type ServerMessage,
   type ShowcaseObject,
@@ -37,6 +41,19 @@ const HEIGHT = 480;
  */
 const AT_SECONDS = Number(PARAMS.get("at") ?? "0");
 const STARTED_AT = Date.now() - (Number.isFinite(AT_SECONDS) ? AT_SECONDS : 0) * 1_000;
+
+/** F-E1 `model.set`: when the dashboard asks, the mock stops alternating. */
+let requestedModel: ModelName | null = PARAMS.get("model") === "movenet"
+  ? "movenet"
+  : PARAMS.get("model") === "yolox"
+    ? "yolox"
+    : null;
+
+/**
+ * The board runs one model at a time: a swap reports `switching`, publishes no
+ * frames while it unloads and loads, and takes about half a second.
+ */
+let switchingModel: ModelName | null = null;
 
 export function scenarioSeconds(now = Date.now()): number {
   return (now - STARTED_AT) / 1_000;
@@ -252,11 +269,15 @@ export function createMockSocket(_url: string): SocketLike {
     intervals.clear();
   }
 
+  function activeMovenet(): boolean {
+    return requestedModel === null ? scriptedMovenet(scenarioSeconds()) : requestedModel === "movenet";
+  }
+
   function status(): StatusPayload {
     const drift = Math.sin(Date.now() / 900);
-    const movenet = scriptedMovenet(scenarioSeconds());
+    const movenet = activeMovenet();
     return {
-      state: "running",
+      state: switchingModel === null ? "running" : "switching",
       camera: "ok",
       model: movenet ? "movenet" : "yolox_nano",
       fps: round((movenet ? 29.8 : 59.6) + drift * 0.5, 1),
@@ -299,12 +320,38 @@ export function createMockSocket(_url: string): SocketLike {
     const envelope = command as {
       type?: unknown;
       seq?: unknown;
-      data?: { id?: unknown };
+      data?: { id?: unknown; model?: unknown };
     };
     const refSeq = typeof envelope.seq === "number" ? envelope.seq : null;
 
     if (envelope.type === "ping") {
       emit(message("pong", { id: envelope.data?.id ?? null }));
+      return;
+    }
+    if (envelope.type === "model.set") {
+      const model = envelope.data?.model;
+      if (model !== "yolox" && model !== "movenet") {
+        emit(
+          message("error", {
+            code: "bad_command",
+            message: `modello sconosciuto: ${String(model)}`,
+            ref_seq: refSeq,
+          }),
+        );
+        return;
+      }
+      // The board swaps its single model: no frames for ~0.5 s, then the new
+      // view starts. Emitting `switching` lets the dashboard say so.
+      switchingModel = model;
+      emit(message("status", status()));
+      later(500, () => {
+        if (closed) {
+          return;
+        }
+        requestedModel = model;
+        switchingModel = null;
+        emit(message("status", status()));
+      });
       return;
     }
     // F-K1: `ping` is the only command the protocol accepts.
@@ -326,9 +373,12 @@ export function createMockSocket(_url: string): SocketLike {
     let lastShowcase = Number.NEGATIVE_INFINITY;
     let lastPose = Number.NEGATIVE_INFINITY;
     every(POSE_TICK_MS, () => {
+      if (switchingModel !== null) {
+        return;
+      }
       const now = Date.now();
       const seconds = scenarioSeconds();
-      if (scriptedMovenet(seconds)) {
+      if (activeMovenet()) {
         if (now - lastPose >= POSE_TICK_MS) {
           lastPose = now;
           emit(message("pose.state", poseState(seconds)));
@@ -440,15 +490,36 @@ export function createMockVideo(image: HTMLImageElement, note: HTMLElement): Vid
   canvas.height = HEIGHT;
   const context = canvas.getContext("2d");
   let timer: number | null = null;
+  let encoding = false;
+  let lastUrl: string | null = null;
 
+  // The picture is handed to the <img> as a blob URL: `toBlob` encodes off the
+  // main thread, while `toDataURL` would stall the dashboard's frame for tens
+  // of milliseconds every time the fake camera produces a frame.
   const draw = (): void => {
-    if (context === null) {
+    if (context === null || encoding) {
       return;
     }
     drawShowcaseFrame(context, scenarioSeconds());
     image.hidden = false;
     note.hidden = true;
-    image.src = canvas.toDataURL("image/jpeg", 0.72);
+    encoding = true;
+    canvas.toBlob(
+      (blob) => {
+        encoding = false;
+        if (blob === null) {
+          return;
+        }
+        const url = URL.createObjectURL(blob);
+        image.src = url;
+        if (lastUrl !== null) {
+          URL.revokeObjectURL(lastUrl);
+        }
+        lastUrl = url;
+      },
+      "image/jpeg",
+      0.7,
+    );
   };
 
   return {
@@ -467,6 +538,10 @@ export function createMockVideo(image: HTMLImageElement, note: HTMLElement): Vid
       image.removeAttribute("src");
       image.hidden = true;
       note.hidden = false;
+      if (lastUrl !== null) {
+        URL.revokeObjectURL(lastUrl);
+        lastUrl = null;
+      }
     },
   };
 }

@@ -9,12 +9,17 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "shots": "node scripts/shots.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
+    "@types/three": "^0.187.0",
     "typescript": "7.0.2",
     "vite": "8.3.8",
     "vitest": "5.1.0"
+  },
+  "dependencies": {
+    "three": "^0.187.0"
   }
 }

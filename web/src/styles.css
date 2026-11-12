@@ -92,6 +92,43 @@ body {
   color: var(--muted);
 }
 
+.modes {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: rgba(6, 16, 26, 0.7);
+}
+
+.mode {
+  padding: 0.28em 0.95em;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dim);
+  font: inherit;
+  font-size: 0.78em;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition:
+    color 180ms ease,
+    background 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.mode:hover {
+  color: var(--text);
+}
+
+.mode-active {
+  border-color: rgba(79, 214, 255, 0.45);
+  background: rgba(79, 214, 255, 0.12);
+  color: var(--text);
+  box-shadow: 0 0 14px rgba(79, 214, 255, 0.16) inset;
+}
+
 .readout {
   margin-left: auto;
   display: inline-flex;
@@ -459,7 +496,7 @@ body {
   align-items: center;
   gap: clamp(8px, 1vw, 18px);
   flex: 0 0 auto;
-  height: clamp(150px, 23vh, 250px);
+  height: clamp(190px, 31vh, 320px);
   padding: clamp(8px, 1vw, 16px) clamp(14px, 1.6vw, 26px) clamp(4px, 0.6vh, 8px);
   border-bottom: 1px solid var(--hairline);
   background:
@@ -483,142 +520,31 @@ body {
   mix-blend-mode: screen;
 }
 
-.hologram-face {
+.hologram-avatar {
   position: relative;
   min-width: 0;
   height: 100%;
-  display: grid;
-  place-items: center;
+  min-height: 0;
+  border-radius: 14px;
+  overflow: hidden;
   transition: opacity 320ms ease;
 }
 
-.face-svg {
+.avatar-canvas {
+  display: block;
   width: 100%;
   height: 100%;
-  max-height: 100%;
-  overflow: visible;
-  color: var(--beam);
-  filter: drop-shadow(0 0 18px rgba(79, 214, 255, 0.28));
-  animation: holo-flicker 7s ease-in-out infinite;
 }
 
-.face-halo {
-  fill: rgba(79, 214, 255, 0.09);
-  opacity: 0.7;
-}
-
-.face-head {
-  fill: rgba(79, 214, 255, 0.055);
-  stroke: rgba(79, 214, 255, 0.65);
-  stroke-width: 1.6;
-}
-
-.face-head-line,
-.face-chin {
-  fill: none;
-  stroke: rgba(79, 214, 255, 0.25);
-  stroke-width: 1;
-}
-
-.face-antenna-stem {
-  stroke: rgba(79, 214, 255, 0.5);
-  stroke-width: 1.4;
-}
-
-.face-antenna-tip {
-  fill: var(--beam);
-}
-
-.face-ear {
-  fill: rgba(79, 214, 255, 0.12);
-  stroke: rgba(79, 214, 255, 0.4);
-}
-
-.face-eye {
-  fill: rgba(79, 214, 255, 0.18);
-  stroke: rgba(79, 214, 255, 0.85);
-  stroke-width: 1.5;
-  transition: ry 140ms ease, cy 140ms ease;
-}
-
-.face-pupil {
-  fill: #d8f7ff;
-}
-
-.face-brow {
-  stroke: rgba(79, 214, 255, 0.6);
-  stroke-width: 2;
-  stroke-linecap: round;
-  transition: transform 180ms ease;
-}
-
-.face-mouth {
-  fill: none;
-  stroke: rgba(79, 214, 255, 0.9);
-  stroke-width: 2.4;
-  stroke-linecap: round;
-  transition: d 180ms ease;
-  transform-origin: 130px 116px;
-}
-
-.face-speaking .face-mouth {
-  animation: face-talk 280ms steps(2, end) infinite;
-}
-
-.face-blinking .face-eye {
-  ry: 1.2;
-}
-
-.face-scanlines line {
-  stroke: rgba(79, 214, 255, 0.09);
-  stroke-width: 2.2;
-}
-
-.face-corners path {
-  fill: none;
-  stroke: rgba(79, 214, 255, 0.35);
-  stroke-width: 1.2;
-}
-
-.face-svg[data-expression="happy"] .face-halo,
-.face-svg[data-expression="happy"] .face-head {
-  stroke: rgba(116, 224, 168, 0.7);
-}
-
-.face-svg[data-expression="worried"] .face-head {
-  stroke: rgba(255, 143, 143, 0.75);
-}
-
-.face-svg[data-expression="sleepy"] {
-  opacity: 0.82;
-}
-
-@keyframes face-talk {
-  50% {
-    transform: scaleY(0.55);
-  }
-}
-
-@keyframes holo-flicker {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  47% {
-    opacity: 0.96;
-  }
-  48% {
-    opacity: 0.82;
-  }
-  49% {
-    opacity: 1;
-  }
-  73% {
-    opacity: 0.92;
-  }
-  74% {
-    opacity: 1;
-  }
+.hologram-avatar[data-status="nogl"]::after {
+  content: "Sfera non disponibile";
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-family: var(--mono);
+  font-size: 0.72em;
+  color: var(--dim);
 }
 
 .hologram-info {
@@ -739,6 +665,67 @@ body {
   padding-bottom: clamp(4px, 0.6vh, 8px);
 }
 
+/* The ~0.5 s swap of the board's single model: a pill over the pane body. */
+.pane-showcase .view-switching {
+  position: absolute;
+  left: 50%;
+  bottom: clamp(56px, 13vh, 108px);
+  z-index: 2;
+  flex: none;
+  display: inline-flex;
+  place-content: center;
+  width: auto;
+  min-height: 0;
+  padding: 0.38em 0.95em;
+  border: 1px solid rgba(79, 214, 255, 0.34);
+  border-radius: 999px;
+  background: rgba(4, 8, 15, 0.86);
+  color: var(--beam);
+  font-family: var(--mono);
+  font-size: 0.72em;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  transform: translateX(-50%);
+  pointer-events: none;
+  animation: switching-pulse 900ms ease-in-out infinite;
+}
+
+@keyframes switching-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pane-showcase .view-switching {
+    animation: none;
+  }
+}
+
+.room-view {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  margin: 0 clamp(14px, 1.6vw, 26px) clamp(6px, 1vh, 12px);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse at 50% 120%, rgba(122, 108, 255, 0.16), transparent 62%),
+    linear-gradient(180deg, rgba(79, 214, 255, 0.05), transparent 70%);
+}
+
+.room-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 .mente {
   display: flex;
   flex-wrap: wrap;
@@ -779,7 +766,11 @@ body {
 @media (max-width: 900px) {
   .hologram {
     grid-template-columns: minmax(0, 1fr);
-    height: clamp(120px, 20vh, 190px);
+    height: clamp(150px, 24vh, 230px);
+  }
+
+  .modes {
+    display: none;
   }
 
   .hologram-info {
@@ -795,8 +786,6 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .face-svg,
-  .face-speaking .face-mouth,
   .showcase-object,
   .showcase-bar-fill {
     animation: none;

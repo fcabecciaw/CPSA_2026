@@ -11,6 +11,7 @@ import {
   PROTOCOL_VERSION,
   parseServerMessage,
   type ClientCommand,
+  type ModelName,
   type ServerMessage,
 } from "./protocol";
 
@@ -80,6 +81,7 @@ export class DashboardClient {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private pendingPings = new Map<number, number>();
   private pingId = 0;
+  private commandSeq = 0;
   private attempt = 0;
   private rttMs: number | null = null;
   private stopped = false;
@@ -137,6 +139,8 @@ export class DashboardClient {
     socket.onopen = () => {
       this.attempt = 0;
       this.rttMs = null;
+      // IF-304: the per-connection command counter starts again at 1.
+      this.commandSeq = 0;
       this.setInfo({ phase: "open", attempt: 0, retryInMs: null, rttMs: null });
       this.startPing();
     };
@@ -183,6 +187,25 @@ export class DashboardClient {
         this.handlers.onNotice(`Messaggio scartato: ${result.reason}`);
         break;
     }
+  }
+
+  /**
+   * F-E1: ask the board for the other model. Returns the command `seq` so the
+   * caller can recognise the `error.ref_seq` of a board that does not know the
+   * command yet, instead of leaving a red banner on screen.
+   */
+  setModel(model: ModelName): number | null {
+    this.commandSeq += 1;
+    if (this.socket === null) {
+      return null;
+    }
+    this.send({
+      v: PROTOCOL_VERSION,
+      type: "model.set",
+      seq: this.commandSeq,
+      data: { model },
+    });
+    return this.commandSeq;
   }
 
   private send(command: ClientCommand): void {

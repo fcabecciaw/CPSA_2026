@@ -52,3 +52,36 @@ describe("F-E1 pose.state", () => {
     }
   });
 });
+
+describe("status.state", () => {
+  function status(state: string): string {
+    return JSON.stringify({
+      v: 1,
+      type: "status",
+      seq: 3,
+      t: 4.5,
+      wall: "2026-11-12T10:00:00Z",
+      data: {
+        state,
+        camera: "ok",
+        model: "yolox_nano",
+        fps: 59.4,
+        dpu_ms: 4.7,
+        errors: [],
+        uptime_s: 12.5,
+      },
+    });
+  }
+
+  it("keeps the ~0.5 s model swap of the single-model board", () => {
+    const result = parseServerMessage(status("switching"));
+    expect(result.kind).toBe("message");
+    if (result.kind === "message" && result.message.type === "status") {
+      expect(result.message.data.state).toBe("switching");
+    }
+  });
+
+  it("still rejects a state the protocol does not define", () => {
+    expect(parseServerMessage(status("rebooting")).kind).toBe("invalid");
+  });
+});

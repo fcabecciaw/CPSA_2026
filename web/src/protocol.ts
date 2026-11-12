@@ -11,8 +11,13 @@
 
 export const PROTOCOL_VERSION = 1 as const;
 
-/** The lifecycle of the one process on the board (F-K1 `status.state`). */
-export const RUN_STATES = ["starting", "running", "error"] as const;
+/**
+ * The lifecycle of the one process on the board (F-K1 `status.state`).
+ * `switching` is the ~0.5 s swap of the single model: no frames are published
+ * while the board unloads one `.xmodel` and loads the other, so the dashboard
+ * shows a short transition instead of an empty pane.
+ */
+export const RUN_STATES = ["starting", "switching", "running", "error"] as const;
 export type RunState = (typeof RUN_STATES)[number];
 
 export const CAMERA_STATES = ["ok", "missing", "error"] as const;
@@ -126,10 +131,20 @@ export interface ClientEnvelope<T extends string, P> {
   data: P;
 }
 
-/** F-K1: `ping` is the only command this dashboard sends. */
-export type ClientCommand = Omit<ClientEnvelope<"ping", { id: number }>, "seq">;
+/** F-E1: the two models of the board, switched by `model.set`. */
+export const MODELS = ["yolox", "movenet"] as const;
+export type ModelName = (typeof MODELS)[number];
 
-export type ClientMessage = ClientEnvelope<"ping", { id: number }>;
+export interface ModelSetPayload {
+  model: ModelName;
+}
+
+/** F-K1 `ping` keeps the transport alive; F-E1 `model.set` picks the model. */
+export type ClientCommand =
+  | ClientEnvelope<"ping", { id: number }>
+  | ClientEnvelope<"model.set", ModelSetPayload>;
+
+export type ClientMessage = ClientCommand;
 
 export type ParseResult =
   | { kind: "message"; message: ServerMessage }
