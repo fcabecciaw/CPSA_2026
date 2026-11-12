@@ -27,9 +27,9 @@ def test_collect_reads_the_rulebook_the_facts_the_scenes_and_the_questions() -> 
     # Pinned to the current dashboard; the test fails loudly when it adds
     # phrases, the signal to re-run `pregenerate`. Scene lines that repeat a
     # rulebook phrase are kept once, under the rulebook.
-    assert counts["rulebook"] == 100
+    assert counts["rulebook"] == 97
     assert counts["fact"] == 40
-    assert counts["scene"] == 57
+    assert counts["scene"] == 60
     assert counts["question"] == 36
     assert "poem" not in counts
     assert counts["total"] == 233
@@ -57,9 +57,9 @@ def test_rulebook_phrases_are_decoded_and_short() -> None:
 
 def test_scene_lines_are_every_slot_free_scene_phrase() -> None:
     texts = [phrase.text for phrase in parse_scene(SRC / "scene.ts")]
-    # 67 slot-free lines of `SCENE_PHRASES` (greetings, intro, prompts,
+    # 66 slot-free lines of `SCENE_PHRASES` (greetings, intro, prompts,
     # invitations, goodbyes, reactions, continuity); none repeats.
-    assert len(texts) == 67
+    assert len(texts) == 66
     assert texts[0] == "Ciao! Che piacere vederti."
     assert "Piacere, sono ARI! Riconosco oggetti, gesti e sorrisi." in texts
     assert "Mouse e tastiera: qui si programma!" in texts
