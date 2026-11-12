@@ -168,17 +168,19 @@ def run(scenario: Callable[[], Any]) -> Any:
 def test_the_index_and_the_assets_are_served(tmp_path: Path) -> None:
     with Running(tmp_path) as running:
 
-        async def scenario() -> tuple[int, str, int, str]:
+        async def scenario() -> tuple[int, str, int, str, str | None]:
             async with ClientSession() as session:
                 async with session.get(running.url("/")) as index:
                     html = await index.text()
+                    cache_control = index.headers.get("Cache-Control")
                 async with session.get(running.url("/assets/app.js")) as asset:
                     script = await asset.text()
-                return index.status, html, asset.status, script
+                return index.status, html, asset.status, script, cache_control
 
-        index_status, html, asset_status, script = run(scenario)
+        index_status, html, asset_status, script, cache_control = run(scenario)
 
     assert index_status == 200 and html == "<html>cpsa</html>"
+    assert cache_control == "no-cache"
     assert asset_status == 200 and script == "console.log('cpsa')"
 
 

@@ -262,7 +262,11 @@ class WebServer:
     # -- HTTP --------------------------------------------------------------
 
     async def _index(self, request: web.Request) -> web.StreamResponse:
-        return await self._file(self._config.static_dir / "index.html")
+        response = await self._file(self._config.static_dir / "index.html")
+        # The page names the hashed bundles of the current build: a cached copy
+        # would keep showing an old dashboard after a deploy.
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
     async def _asset(self, request: web.Request) -> web.StreamResponse:
         return await self._contained(self._config.static_dir / "assets", request.match_info["path"])
