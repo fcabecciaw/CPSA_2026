@@ -285,7 +285,7 @@ def test_the_demo_config_enables_the_video_stream() -> None:
 def test_the_demo_config_boots_into_the_hologram() -> None:
     demo = REPO_ROOT / "config" / "board.demo.yaml"
 
-    assert load(demo).supervisor.default_mode == "hologram"
+    assert load(demo).supervisor.default_mode == "showcase"
 
 
 def test_server_and_supervisor_sections_are_loaded() -> None:

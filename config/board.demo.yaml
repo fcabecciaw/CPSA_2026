@@ -172,7 +172,7 @@ server:
 
 # F6: mode selected by cpsa-supervisor at startup.
 supervisor:
-  default_mode: hologram          # idle | hologram | rps | medical | showcase
+  default_mode: showcase          # idle | hologram | rps | medical | showcase
 
 # Camera-only medical mode (FR-026): the BlueCoins are never scanned or connected,
 # and the vision trigger starts and ends the episodes instead of the IMU.
