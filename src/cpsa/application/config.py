@@ -253,6 +253,12 @@ class ServerConfig:
     idle_timeout_s: float = 30.0
     video: bool = False
     """Serve the analyzed camera frames at ``/video.mjpeg`` (F14); off by default."""
+    video_max_fps: float = 30.0
+    """Encoded frames per second of ``/video.mjpeg``, shared by every client (F14).
+
+    The default keeps the original 30 fps cap; the 60 fps showcase sets it to 60
+    so the browser stream follows the camera instead of the encoder.
+    """
 
 
 @dataclass(frozen=True)
@@ -376,8 +382,11 @@ class ShowcaseConfig:
     """The optional ``showcase`` section: the "Cosa vede l'IA" mode (F-S3).
 
     The mode is registered only when the document has this section. The RGB
-    camera is the one of ``vision.camera``, so the booth setup is shared with the
-    medical mode and never duplicated here.
+    camera is the one of ``vision.camera``; the three optional overrides below
+    apply only to the camera the showcase mode builds, so the medical pipeline
+    keeps its own exposure and frame rate.  The 60 fps demo needs
+    ``camera_fps: 60`` with a shorter exposure than the 33 fps default and more
+    gain to keep the booth lit.
     """
 
     default_model: str
@@ -385,12 +394,26 @@ class ShowcaseConfig:
     labels: str = "it"
     max_fps: float = 30.0
     """Upper bound on the frames processed per second."""
+    camera_fps: float | None = None
+    """Frame rate requested from the RGB camera; ``None`` keeps ``vision.camera.fps``."""
+    exposure: int | None = None
+    """Manual ``exposure_time_absolute`` (100 us units); ``None`` keeps ``vision.camera``."""
+    gain: int | None = None
+    """Manual V4L2 ``gain``; ``None`` keeps ``vision.camera``."""
 
     def __post_init__(self) -> None:
         if self.labels not in SHOWCASE_LABELS:
             raise ValueError(f"showcase labels must be one of {', '.join(SHOWCASE_LABELS)}")
         if not math.isfinite(self.max_fps) or self.max_fps <= 0.0:
             raise ValueError("showcase max_fps must be a finite positive number")
+        if self.camera_fps is not None and (
+            not math.isfinite(self.camera_fps) or self.camera_fps <= 0.0
+        ):
+            raise ValueError("showcase camera_fps must be a finite positive number")
+        if self.exposure is not None and self.exposure <= 0:
+            raise ValueError("showcase exposure must be positive")
+        if self.gain is not None and self.gain <= 0:
+            raise ValueError("showcase gain must be positive")
         if not self.models:
             raise ValueError("showcase needs at least one model")
         names = [model.name for model in self.models]
@@ -559,6 +582,7 @@ def _server_config(server: _Section) -> ServerConfig:
         static_dir=Path(server.text("static_dir")).expanduser(),
         idle_timeout_s=server.positive("idle_timeout_s"),
         video=server.optional_flag("video", False),
+        video_max_fps=server.optional_positive("video_max_fps", 30.0),
     )
     server.reject_unknown()
     return config
@@ -678,6 +702,9 @@ def _showcase_config(showcase: _Section) -> ShowcaseConfig:
     if labels not in SHOWCASE_LABELS:
         raise ConfigError("showcase.labels", f"expected one of {', '.join(SHOWCASE_LABELS)}")
     max_fps = showcase.optional_positive("max_fps", 30.0)
+    camera_fps = showcase.optional_positive_or_none("camera_fps")
+    exposure = showcase.optional_integer("exposure", 1, 10000)
+    gain = showcase.optional_integer("gain", 1, 65535)
     showcase.reject_unknown()
     names = [model.name for model in models]
     if len(set(names)) != len(names):
@@ -689,6 +716,9 @@ def _showcase_config(showcase: _Section) -> ShowcaseConfig:
         models=models,
         labels=labels,
         max_fps=max_fps,
+        camera_fps=camera_fps,
+        exposure=exposure,
+        gain=gain,
     )
 
 
@@ -980,6 +1010,12 @@ class _Section:
         """Return the positive number at ``name``, or ``default`` when absent."""
         if name not in self._data:
             return default
+        return self.positive(name)
+
+    def optional_positive_or_none(self, name: str) -> float | None:
+        """Return the positive number at ``name``, or ``None`` when absent."""
+        if name not in self._data:
+            return None
         return self.positive(name)
 
     def optional_number(self, name: str, default: float) -> float:

@@ -21,6 +21,11 @@ from typing import Any, Protocol
 import numpy as np
 from numpy.typing import NDArray
 
+try:
+    import cv2
+except ImportError:  # pragma: no cover - depends on the installed extra
+    cv2 = None  # type: ignore[assignment]
+
 from cpsa.adapters.camera.devices import (
     DEFAULT_MATCH,
     VideoNode,
@@ -32,7 +37,7 @@ from cpsa.vision.types import VideoFrame
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["UvcVideoSource"]
+__all__ = ["UvcVideoSource", "decode_yuyv", "opencv_yuyv_to_rgb"]
 
 FOURCC = "YUYV"
 POWER_LINE_MENU: dict[int, int] = {0: 0, 50: 1, 60: 2}
@@ -317,14 +322,34 @@ class UvcVideoSource:
 
 
 def decode_yuyv(data: bytes, width: int, height: int) -> NDArray[np.uint8]:
-    """Convert packed YUYV bytes to RGB with OpenCV, or the numpy path."""
-    try:
-        import cv2
-    except ImportError:
+    """Convert packed YUYV bytes to RGB with OpenCV, or the NumPy path.
+
+    ``cv2.cvtColor`` is the conversion the showcase camera uses: about an order of
+    magnitude faster than :func:`cpsa.adapters.camera.f200.yuyv_to_rgb` on the
+    KV260's Cortex-A53, where the colour conversion of one 640x480 frame is a
+    real share of the 16.7 ms of a 60 fps frame.  The NumPy integer BT.601 path
+    stays as the fallback for a host without the ``vision`` extra.
+    """
+
+    if cv2 is None:  # pragma: no cover - depends on the installed extra
         return yuyv_to_rgb(data, width, height)
+    return opencv_yuyv_to_rgb(data, width, height)
+
+
+def opencv_yuyv_to_rgb(data: bytes, width: int, height: int) -> NDArray[np.uint8]:
+    """Convert packed YUYV bytes to RGB with :func:`cv2.cvtColor`.
+
+    Raises:
+        RuntimeError: If OpenCV is not installed.
+        ValueError: If the buffer is not one packed YUYV frame of ``width`` x
+            ``height``.
+    """
+
+    if cv2 is None:  # pragma: no cover - depends on the installed extra
+        raise RuntimeError("OpenCV is required for the YUYV fast path; install the 'vision' extra")
     pairs = np.frombuffer(data, dtype=np.uint8)
     expected = width * height * 2
-    if pairs.size != expected:
+    if width <= 0 or height <= 0 or width % 2 or pairs.size != expected:
         raise ValueError(f"expected {expected} YUYV bytes, got {pairs.size}")
     converted = cv2.cvtColor(pairs.reshape(height, width, 2), cv2.COLOR_YUV2RGB_YUYV)
     return np.asarray(converted, dtype=np.uint8)

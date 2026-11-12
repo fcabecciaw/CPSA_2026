@@ -684,6 +684,9 @@ def test_the_showcase_values_are_loaded() -> None:
         ("showcase.default_model", ""),
         ("showcase.labels", "de"),
         ("showcase.max_fps", 0),
+        ("showcase.camera_fps", 0),
+        ("showcase.exposure", 0),
+        ("showcase.gain", 0),
         ("showcase.models", []),
         ("showcase.models", {"yolox_nano": {}}),
         ("showcase.models.0.kind", "movenet"),
@@ -750,13 +753,59 @@ def test_the_showcase_mode_is_a_valid_default_mode() -> None:
     assert parse(data).supervisor.default_mode == "showcase"
 
 
+def test_the_showcase_camera_overrides_are_optional() -> None:
+    showcase = parse(showcase_document()).showcase
+
+    assert showcase is not None
+    assert showcase.camera_fps is None
+    assert showcase.exposure is None
+    assert showcase.gain is None
+
+
+def test_the_showcase_camera_overrides_are_loaded() -> None:
+    data = showcase_document()
+    data["showcase"].update({"camera_fps": 60, "exposure": 150, "gain": 320})
+
+    showcase = parse(data).showcase
+
+    assert showcase is not None
+    assert showcase.camera_fps == pytest.approx(60.0)
+    assert showcase.exposure == 150
+    assert showcase.gain == 320
+
+
+def test_the_server_mjpeg_rate_defaults_to_thirty_and_is_configurable() -> None:
+    data = valid()
+    assert parse(data).server.video_max_fps == pytest.approx(30.0)
+
+    data["server"] = {
+        "host": "0.0.0.0",
+        "port": 8080,
+        "static_dir": "web/dist",
+        "idle_timeout_s": 30,
+        "video_max_fps": 60,
+    }
+    assert parse(data).server.video_max_fps == pytest.approx(60.0)
+
+    data["server"]["video_max_fps"] = 0
+    with pytest.raises(ConfigError) as info:
+        parse(data)
+    assert info.value.key == "server.video_max_fps"
+
+
 def test_the_demo_config_has_the_showcase_section() -> None:
     config = load(REPO_ROOT / "config" / "board.demo.yaml")
 
     assert config.showcase is not None
     assert config.showcase.default_model == "yolox_nano"
     assert config.showcase.labels == "it"
-    assert config.showcase.max_fps == pytest.approx(30.0)
+    # The demo targets 60 fps: the processing cap, the camera and the MJPEG
+    # encoder all follow, with the shorter exposure those frames need.
+    assert config.showcase.max_fps == pytest.approx(60.0)
+    assert config.showcase.camera_fps == pytest.approx(60.0)
+    assert config.showcase.exposure == 150
+    assert config.showcase.gain == 320
+    assert config.server.video_max_fps == pytest.approx(60.0)
     model = config.showcase.model()
     assert model.kind == "yolox"
     assert model.path == Path("models/yolox_nano.xmodel")

@@ -58,6 +58,8 @@ class _Subgraph:
         self._inputs = inputs
         self._outputs = outputs
         self.payload: list[NDArray[np.int8]] = []
+        #: Optional per-execution payloads, to prove the detector's double buffer.
+        self.payloads_by_execution: list[list[NDArray[np.int8]]] | None = None
 
     def get_name(self) -> str:
         return self._name
@@ -110,13 +112,22 @@ class _Runner:
 
     def execute_async(self, inputs: list[NDArray[np.int8]], outputs: list[NDArray[np.int8]]) -> int:
         self.executions += 1
-        assert len(outputs) == len(self._subgraph.payload)
-        for buffer, payload in zip(outputs, self._subgraph.payload, strict=True):
-            np.copyto(buffer, payload)
+        sequence = self._subgraph.payloads_by_execution
+        if sequence is None:
+            payload = self._subgraph.payload
+        else:
+            # A real DPU writes into the caller's buffers when the job runs, so a
+            # second job overwrites a shared output buffer: that is what the
+            # double buffer has to prevent.
+            payload = sequence[(self.executions - 1) % len(sequence)]
+        assert len(outputs) == len(payload)
+        for buffer, data in zip(outputs, payload, strict=True):
+            np.copyto(buffer, data)
         return self.executions
 
     def wait(self, job_id: int) -> None:
-        assert job_id == self.executions
+        # Jobs complete independently: the detector may wait for N-1 after N ran.
+        assert 0 < job_id <= self.executions
 
 
 def _install_fake_runtime(
@@ -450,3 +461,217 @@ def test_detector_rejects_bad_thresholds(
 ) -> None:
     with pytest.raises(ValueError):
         _detector(monkeypatch, tmp_path, **thresholds)
+
+
+# --------------------------------------------------------------------------- #
+# The OpenCV fast path and the quantize-into-DPU-buffer path (S5, 60 fps)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_opencv_letterbox_matches_the_numpy_fallback_within_one_level() -> None:
+    generator = np.random.default_rng(3)
+    frame = generator.integers(0, 256, size=(480, 640, 3), dtype=np.uint8)
+
+    fast, fast_scale, fast_pad = yolox_dpu.prepare_input(frame)
+    slow, slow_scale, slow_pad = yolox_dpu.prepare_input(frame, resize=None)
+
+    assert fast.shape == slow.shape == (416, 416, 3)
+    assert fast_flag_contiguous(fast)
+    # The geometry is the same, so a source box maps to the same pixels.
+    assert fast_scale == pytest.approx(slow_scale)
+    assert fast_pad == pytest.approx(slow_pad)
+    difference = np.abs(fast.astype(np.int16) - slow.astype(np.int16))
+    assert int(difference.max()) <= 1
+    assert float(difference.mean()) < 0.1
+
+
+def fast_flag_contiguous(image: NDArray[np.uint8]) -> bool:
+    return bool(image.flags["C_CONTIGUOUS"])
+
+
+def test_the_fast_and_numpy_letterboxes_map_boxes_within_one_pixel() -> None:
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    _fast, fast_scale, fast_pad = yolox_dpu.prepare_input(frame)
+    _slow, slow_scale, slow_pad = yolox_dpu.prepare_input(frame, resize=None)
+    boxes = np.asarray([[10.0, 20.0, 300.0, 400.0]], dtype=np.float64)
+
+    fast_boxes = yolox_dpu.boxes_to_source(boxes, fast_scale, fast_pad, (480, 640))
+    slow_boxes = yolox_dpu.boxes_to_source(boxes, slow_scale, slow_pad, (480, 640))
+
+    assert np.abs(fast_boxes - slow_boxes).max() <= 1.0
+
+
+def test_prepare_input_into_writes_the_same_quantized_buffer_as_the_two_step_path() -> None:
+    frame = np.random.default_rng(4).integers(0, 256, size=(480, 640, 3), dtype=np.uint8)
+    lut = input_quantization_lut_scaled(-2, 1.0)
+    direct = np.empty((416, 416, 3), dtype=np.int8)
+
+    scale, pad = yolox_dpu.prepare_input_into(frame, yolox_dpu.YOLOX_INPUT_SIZE, lut, direct)
+
+    bgr, expected_scale, expected_pad = yolox_dpu.prepare_input(frame)
+    expected = np.empty_like(direct)
+    yolox_dpu._quantize_into(bgr, lut, expected)
+    assert np.array_equal(direct, expected)
+    assert (scale, pad) == (expected_scale, expected_pad)
+
+
+def test_prepare_input_into_handles_a_portrait_frame_off_the_contiguous_block() -> None:
+    """A taller-than-wide frame pads left and right, the non-contiguous branch."""
+
+    frame = np.full((480, 360, 3), 200, dtype=np.uint8)
+    lut = input_quantization_lut_scaled(-2, 1.0)
+    direct = np.full((416, 416, 3), 99, dtype=np.int8)
+
+    scale, (left, top) = yolox_dpu.prepare_input_into(
+        frame, yolox_dpu.YOLOX_INPUT_SIZE, lut, direct
+    )
+
+    bgr, expected_scale, expected_pad = yolox_dpu.prepare_input(frame)
+    expected = np.empty_like(direct)
+    yolox_dpu._quantize_into(bgr, lut, expected)
+    assert np.array_equal(direct, expected)
+    assert (scale, (left, top)) == (expected_scale, expected_pad)
+    assert left > 0 and top == 0
+
+
+def test_prepare_input_into_fill_pad_false_keeps_the_existing_border() -> None:
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    lut = input_quantization_lut_scaled(-2, 1.0)
+    out = np.full((416, 416, 3), 7, dtype=np.int8)
+
+    yolox_dpu.prepare_input_into(frame, yolox_dpu.YOLOX_INPUT_SIZE, lut, out)
+    untouched = out.copy()
+    yolox_dpu.prepare_input_into(frame, yolox_dpu.YOLOX_INPUT_SIZE, lut, out, fill_pad=False)
+
+    assert np.array_equal(out, untouched)
+
+
+def test_prepare_input_into_rejects_a_bad_buffer() -> None:
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    lut = input_quantization_lut_scaled(-2, 1.0)
+
+    with pytest.raises(ValueError, match="out must be"):
+        yolox_dpu.prepare_input_into(
+            frame, yolox_dpu.YOLOX_INPUT_SIZE, lut, np.empty((416, 416, 3))
+        )
+    with pytest.raises(ValueError, match="out must be"):
+        yolox_dpu.prepare_input_into(
+            frame,
+            yolox_dpu.YOLOX_INPUT_SIZE,
+            lut,
+            np.empty((416, 416, 3), dtype=np.uint8),  # type: ignore[arg-type]
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Pipelined submit/wait (S5, 60 fps)
+# --------------------------------------------------------------------------- #
+
+
+def _payload(stride: int, class_id: int) -> NDArray[np.int8]:
+    """One detection inside the letterboxed part of a 480x640 frame."""
+
+    return _head(
+        3,
+        [(0, 0, {"tx": 2.5, "ty": 10.0, "objectness": 10.0, "class_id": class_id})],
+        stride,
+    )
+
+
+def _pipelined_detector(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[yolox_dpu.DpuYoloxDetector, _Subgraph]:
+    detector = _detector(monkeypatch, tmp_path)
+    # The detector's runner was created from the only installed subgraph.
+    _Graph.pending[0].payloads_by_execution = [
+        [
+            _payload(8, 2),
+            np.full(OUTPUT_DIMS[16], -128, np.int8),
+            np.full(OUTPUT_DIMS[32], -128, np.int8),
+        ],
+        [
+            _payload(8, 5),
+            np.full(OUTPUT_DIMS[16], -128, np.int8),
+            np.full(OUTPUT_DIMS[32], -128, np.int8),
+        ],
+    ]
+    return detector, _Graph.pending[0]
+
+
+def test_the_detector_keeps_two_frames_in_flight_without_overwriting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    detector, _subgraph = _pipelined_detector(monkeypatch, tmp_path)
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    assert detector.pending_jobs == 0
+    first = detector.submit(frame)
+    assert detector.pending_jobs == 1
+    second = detector.submit(frame)
+    assert detector.pending_jobs == 2
+
+    # Decode frame 1 after frame 2 has run: a single shared buffer would return
+    # frame 2's class here.
+    first_detections = detector.wait(first)
+    assert detector.pending_jobs == 1
+    second_detections = detector.wait(second)
+    assert detector.pending_jobs == 0
+
+    assert [detection.class_id for detection in first_detections] == [2]
+    assert [detection.class_id for detection in second_detections] == [5]
+
+
+def test_a_third_submit_requires_a_wait(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    detector, _subgraph = _pipelined_detector(monkeypatch, tmp_path)
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    detector.submit(frame)
+    detector.submit(frame)
+
+    with pytest.raises(RuntimeError, match="busy"):
+        detector.submit(frame)
+
+
+def test_wait_rejects_an_unknown_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    detector, _subgraph = _pipelined_detector(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="token"):
+        detector.wait(1234)
+
+
+def test_detect_is_submit_plus_wait(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    detector, _subgraph = _pipelined_detector(monkeypatch, tmp_path)
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    detections = detector.detect(frame)
+
+    assert detector.pending_jobs == 0
+    assert [detection.class_id for detection in detections] == [2]
+    assert set(detector.stage_ms) == {"preprocess", "dpu", "decode"}
+    assert all(value >= 0.0 for value in detector.stage_ms.values())
+
+
+def test_the_detector_decodes_the_same_detections_as_the_float_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    outputs = {
+        8: _head(3, [(0, 0, {"tx": 2.5, "ty": 10.0, "log_w": math.log(2.0)})], 8),
+        16: _head(3, [], 16),
+        32: _head(3, [(0, 0, {"tx": 0.0, "objectness": 8.0, "class_id": 41})], 32),
+    }
+    detector = _detector(monkeypatch, tmp_path, payloads=outputs)
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    detections = detector.detect(frame)
+
+    _image, scale, pad = yolox_dpu.prepare_input(frame)
+    expected = yolox_dpu.detections_from_heads(
+        [outputs[stride].astype(np.float64) / 8.0 for stride in (8, 16, 32)],
+        (8, 16, 32),
+        conf_thr=0.35,
+        iou_thr=0.45,
+        scale=scale,
+        pad=pad,
+        source_hw=(480, 640),
+    )
+    assert detections == expected
+    assert detector.last_candidate_count == 2

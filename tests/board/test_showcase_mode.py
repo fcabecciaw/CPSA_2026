@@ -19,7 +19,12 @@ from cpsa.application.config import (
     ShowcaseModelConfig,
     load,
 )
-from cpsa.board.showcase_mode import ShowcaseMode, class_color, draw_overlay
+from cpsa.board.showcase_mode import (
+    ShowcaseMode,
+    class_color,
+    draw_overlay,
+    showcase_camera,
+)
 from cpsa.protocol.showcase import ShowcaseObject
 from cpsa.supervisor.contract import HEALTH_KEYS, Mode, ModeContext, ModeStartError
 from cpsa.vision.types import VideoFrame
@@ -97,6 +102,28 @@ class FakeDetector:
 
     def detect(self, rgb: NDArray[np.uint8]) -> list[FakeDetection]:
         self.inputs.append(tuple(int(value) for value in rgb.shape))
+        return list(self.detections)
+
+
+class FakePipelinedDetector(FakeDetector):
+    """A detector with the DPU ``submit``/``wait`` split of the real adapter."""
+
+    def __init__(self, detections: list[FakeDetection] | None = None) -> None:
+        super().__init__(detections)
+        self.calls: list[tuple[str, int]] = []
+        self._tokens: dict[int, NDArray[np.uint8]] = {}
+        self._next = 0
+
+    def submit(self, rgb: NDArray[np.uint8]) -> int:
+        self.inputs.append(tuple(int(value) for value in rgb.shape))
+        self._next += 1
+        self._tokens[self._next] = rgb
+        self.calls.append(("submit", self._next))
+        return self._next
+
+    def wait(self, token: int) -> list[FakeDetection]:
+        self.calls.append(("wait", token))
+        self._tokens.pop(token, None)
         return list(self.detections)
 
 
@@ -515,3 +542,179 @@ def test_each_class_keeps_its_colour() -> None:
     assert class_color(0) != class_color(1)
     # The first twelve classes are visually distinct and stay put across runs.
     assert len({class_color(index) for index in range(12)}) == 12
+
+
+# -- the 60 fps path: pipelining, camera overrides and stage timings (S5) ----
+
+
+def test_the_pipelined_detector_submits_the_next_frame_before_waiting() -> None:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as directory:
+        config = config_with(Path(directory), max_fps=1e6)
+        source = FakeSource()
+        detector = FakePipelinedDetector()
+        publisher = FakePublisher()
+        mode = mode_with(config, source, detector)  # type: ignore[arg-type]
+
+        mode.start(context(config, publisher))
+        try:
+            push(source, 1)
+            wait_until(lambda: detector.calls[:1] == [("submit", 1)])
+            # The first frame is in flight: nothing has been waited for yet.
+            assert ("wait", 1) not in detector.calls
+            push(source, 2)
+            # Frame 2 is submitted before frame 1 is waited for: the DPU and the
+            # CPU work on different frames.
+            wait_until(lambda: len(detector.calls) >= 3)
+            assert detector.calls[:3] == [
+                ("submit", 1),
+                ("submit", 2),
+                ("wait", 1),
+            ]
+            wait_until(lambda: any(seq == 1 for seq, _image in publisher.frames()))
+        finally:
+            assert mode.stop(1.0) is True
+
+
+def test_a_pipelined_detector_still_offers_every_finished_frame() -> None:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as directory:
+        config = config_with(Path(directory), max_fps=1e6)
+        source = FakeSource()
+        publisher = FakePublisher()
+        mode = mode_with(config, source, FakePipelinedDetector())  # type: ignore[arg-type]
+
+        mode.start(context(config, publisher))
+        try:
+            push_until(source, lambda: len(publisher.frames()) >= 4, timeout=3.0)
+            sequences = [seq for seq, _image in publisher.frames()]
+            # The pacing cap and the latest-frame slot may drop a frame, never
+            # duplicate or reorder one.
+            assert sequences[0] == 1
+            assert sequences == sorted(set(sequences))
+        finally:
+            assert mode.stop(1.0) is True
+
+
+def test_the_showcase_camera_applies_only_the_configured_overrides(tmp_path: Path) -> None:
+    base = config_with(tmp_path).vision.camera
+    overrides = showcase_config(tmp_path, camera_fps=60.0, exposure=150, gain=320)
+
+    camera = showcase_camera(base, overrides)
+
+    assert (camera.fps, camera.exposure, camera.gain) == (60.0, 150, 320)
+    assert (camera.device, camera.width, camera.height) == (
+        base.device,
+        base.width,
+        base.height,
+    )
+
+
+def test_the_showcase_camera_keeps_the_vision_camera_without_overrides(
+    tmp_path: Path,
+) -> None:
+    config = config_with(tmp_path)
+    assert config.showcase is not None
+
+    assert showcase_camera(config.vision.camera, config.showcase) is config.vision.camera
+
+
+def test_the_camera_overrides_reach_only_the_showcase_source(tmp_path: Path) -> None:
+    config = config_with(tmp_path, camera_fps=60.0, exposure=150, gain=320)
+    seen: list[Any] = []
+
+    def factory(camera: Any) -> FakeSource:
+        seen.append(camera)
+        return FakeSource()
+
+    mode = ShowcaseMode(
+        config,
+        source_factory=factory,
+        detector_factory=lambda _model: FakeDetector(),
+        labels_factory=lambda _language: ITALIAN,
+    )
+    mode.start(context(config))
+    try:
+        assert seen
+        assert (seen[0].fps, seen[0].exposure, seen[0].gain) == (60.0, 150, 320)
+        # The medical pipeline keeps the shipped RGB settings.
+        assert config.vision.camera.fps != seen[0].fps or config.vision.camera.exposure != 150
+        assert config.vision.camera is not seen[0]
+    finally:
+        assert mode.stop(1.0) is True
+
+
+def test_the_stage_timings_are_logged_once_per_period(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tempfile
+
+    monkeypatch.setattr("cpsa.board.showcase_mode.TIMING_PERIOD_S", 0.0)
+    caplog.set_level("INFO", logger="cpsa.board.showcase")
+
+    with tempfile.TemporaryDirectory() as directory:
+        config = config_with(Path(directory), max_fps=1e6)
+        source = FakeSource()
+        publisher = FakePublisher()
+        mode = mode_with(config, source, FakePipelinedDetector())  # type: ignore[arg-type]
+
+        mode.start(context(config, publisher))
+        try:
+            push_until(source, lambda: len(publisher.frames()) >= 2)
+        finally:
+            assert mode.stop(1.0) is True
+
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "showcase stages over" in record.getMessage()
+    ]
+    assert lines
+    assert "camera=" in lines[-1]
+    assert "preprocess=" in lines[-1]
+    assert "dpu=" in lines[-1]
+    assert "decode=" in lines[-1]
+    assert "draw=" in lines[-1]
+    assert "total=" in lines[-1]
+
+
+class FailingOnceDetector(FakePipelinedDetector):
+    """A pipeline whose first wait fails: the loop must keep its next token."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waits = 0
+
+    def wait(self, token: int) -> list[FakeDetection]:
+        self.waits += 1
+        if self.waits == 1:
+            super().wait(token)
+            raise RuntimeError("decode blew up")
+        return super().wait(token)
+
+
+def test_a_failed_wait_does_not_wedge_the_pipeline(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import tempfile
+
+    caplog.set_level("ERROR", logger="cpsa.board.showcase")
+    with tempfile.TemporaryDirectory() as directory:
+        config = config_with(Path(directory), max_fps=1e6)
+        source = FakeSource()
+        detector = FailingOnceDetector()
+        publisher = FakePublisher()
+        mode = mode_with(config, source, detector)  # type: ignore[arg-type]
+
+        mode.start(context(config, publisher))
+        try:
+            push_until(source, lambda: len(publisher.frames()) >= 3, timeout=3.0)
+            sequences = [seq for seq, _image in publisher.frames()]
+            # Frame 1 is lost with its failed decode; the frames after it arrive.
+            assert sequences[0] == 2
+            assert sequences == sorted(set(sequences))
+        finally:
+            assert mode.stop(1.0) is True
+    assert detector.waits >= 3

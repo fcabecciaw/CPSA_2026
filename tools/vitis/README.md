@@ -274,6 +274,33 @@ edge are excluded on both sides (predictions into the letterbox padding have
 no usable area). Observed on 27 COCO images (plus the package demo and two
 Ultralytics samples): 177 matched boxes, minimum IoU 0.999987, no failures.
 
+### 60 fps board profile (S5)
+
+The showcase loop no longer dequantizes the three heads and sigmoids every
+cell: `QuantizedYoloxDecoder` thresholds the objectness and the best class in
+the int8 domain first and runs the float decode only on the survivors, which is
+bit-identical to `decode_yolox` on the dequantized heads for every box above
+`conf_thr`. Preprocessing letterboxes with `cv2.resize` + `cv2.copyMakeBorder`
+and quantizes through `cv2.LUT` straight into the DPU input view, and
+`DpuYoloxDetector.submit`/`wait` keeps two frames in flight so frame N runs on
+the DPU while frame N-1 is decoded and drawn.
+
+`scripts/profile_showcase.py` reports the per-stage means (camera conversion,
+preprocess, DPU, decode, draw, JPEG), and the achievable loop rate with that
+overlap. With `--model` it runs the real graph; without it the DPU stage
+assumes the measured 4.7 ms so the CPU stages can be profiled before a deploy:
+
+```sh
+# On the board, with the supervisor stopped so the DPU is free.
+sudo systemctl stop cpsa-supervisor
+cd ~/cpsa && PYTHONPATH=src python3 scripts/profile_showcase.py \
+  --model models/yolox_nano.xmodel --runs 60
+```
+
+The script exits 0 when the measurement ran; `--target-ms 16.7` labels the
+budget line PASS/OVER. Host numbers are not board numbers: on a laptop the loop
+is CPU-bound and the DPU stage is the stand-in.
+
 ## Board
 
 The board (Kria KV260, Vitis AI 3.5 VART built natively, see

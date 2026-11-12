@@ -167,6 +167,8 @@ server:
   idle_timeout_s: 30
   video: true                     # live camera frames on /video.mjpeg (F14, demo only):
                                   # RGB in medical mode, IR in the hand modes
+  video_max_fps: 60               # MJPEG encode rate shared by every client (default 30):
+                                  # 60 follows the showcase camera instead of the encoder
 
 # F6: mode selected by cpsa-supervisor at startup.
 supervisor:
@@ -217,7 +219,13 @@ hands:
 showcase:
   default_model: yolox_nano       # the model the mode starts
   labels: it                      # it | en: language of the overlay and of the panel
-  max_fps: 30                     # processing cap, frames per second
+  max_fps: 60                     # processing cap, frames per second (60 fps demo target)
+  camera_fps: 60                  # frame rate requested from the RGB node, showcase only;
+                                  # vision.camera stays at 30 for the medical pipeline
+  exposure: 150                   # 100 us units = 15 ms, under the 16.7 ms of a 60 fps frame;
+                                  # the medical 300 (30 ms) caps the sensor near 33 fps
+  gain: 320                       # manual V4L2 gain, doubled from the medical 160 to keep
+                                  # the booth as bright at half the exposure
   models:
     - name: yolox_nano            # Vitis-AI model zoo, YOLOX-nano COCO 80 classes
       kind: yolox                 # decoder family; only "yolox" is accepted now

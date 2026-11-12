@@ -11,7 +11,13 @@ import numpy as np
 import pytest
 
 from cpsa.adapters.camera.devices import VideoNode
-from cpsa.adapters.camera.uvc import UvcVideoSource, _Captured, decode_yuyv
+from cpsa.adapters.camera.f200 import yuyv_to_rgb
+from cpsa.adapters.camera.uvc import (
+    UvcVideoSource,
+    _Captured,
+    decode_yuyv,
+    opencv_yuyv_to_rgb,
+)
 from cpsa.vision.types import VideoFrame
 
 
@@ -248,6 +254,49 @@ def test_invalid_gain_or_power_line_is_rejected(
 def test_decode_yuyv_rejects_a_truncated_buffer() -> None:
     with pytest.raises(ValueError):
         decode_yuyv(b"\x80\x80", 8, 4)
+
+
+def random_yuyv(width: int, height: int, seed: int) -> bytes:
+    generator = np.random.default_rng(seed)
+    return generator.integers(0, 256, size=width * height * 2, dtype=np.uint8).tobytes()
+
+
+def test_the_opencv_converter_matches_the_numpy_one_on_legal_luma() -> None:
+    """The showcase fast path and the medical BT.601 path agree within 2 levels.
+
+    Both converters implement 8-bit BT.601; OpenCV rounds a couple of chroma
+    terms differently, so a pixel can differ by one level (two at the edge of
+    the rounding table).  That is far below the quantization step of the model
+    input and does not move a box.
+    """
+
+    width, height = 64, 48
+    raw = random_yuyv(width, height, 5)
+
+    fast = opencv_yuyv_to_rgb(raw, width, height)
+    reference = yuyv_to_rgb(raw, width, height)
+
+    assert fast.shape == reference.shape == (height, width, 3)
+    assert fast.dtype == reference.dtype == np.uint8
+    luma = np.frombuffer(raw, dtype=np.uint8).reshape(height, width // 2, 4)
+    y = np.empty((height, width), dtype=np.uint8)
+    y[:, 0::2] = luma[:, :, 0]
+    y[:, 1::2] = luma[:, :, 2]
+    difference = np.abs(fast.astype(np.int16) - reference.astype(np.int16))
+    legal = np.broadcast_to(((y >= 16) & (y <= 235))[..., None], difference.shape)
+    assert int(difference[legal].max()) <= 2
+    assert float(difference[legal].mean()) < 0.25
+
+
+def test_decode_yuyv_uses_the_opencv_converter() -> None:
+    raw = random_yuyv(8, 4, 9)
+
+    assert np.array_equal(decode_yuyv(raw, 8, 4), opencv_yuyv_to_rgb(raw, 8, 4))
+
+
+def test_the_opencv_converter_rejects_a_truncated_buffer() -> None:
+    with pytest.raises(ValueError):
+        opencv_yuyv_to_rgb(b"\x80\x80", 8, 4)
 
 
 def test_auto_device_opens_the_node_selected_from_the_listing(

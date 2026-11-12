@@ -9,7 +9,8 @@ queue.
 
 The video stream is fed by :meth:`WebServer.offer_video_frame` from the vision
 thread: the newest offered frame is encoded once, off the event loop, and shared by
-every connected client at up to :data:`VIDEO_MAX_FPS` frames per second.
+every connected client at up to ``server.video_max_fps`` frames per second
+(:data:`VIDEO_MAX_FPS` is the default).
 """
 
 from __future__ import annotations
@@ -63,7 +64,7 @@ VIDEO_BOUNDARY = "cpsaframe"
 """Multipart boundary of ``/video.mjpeg`` (F14)."""
 
 VIDEO_MAX_FPS = 30.0
-"""Encoded frames per second shared by every video client (F14)."""
+"""Default encoded frames per second shared by every video client (F14)."""
 
 VIDEO_JPEG_QUALITY = 70
 """JPEG quality of the streamed frames (F14)."""
@@ -111,6 +112,9 @@ class ServerSettings(Protocol):
 
     @property
     def video(self) -> bool: ...
+
+    @property
+    def video_max_fps(self) -> float: ...
 
 
 @dataclass(eq=False)
@@ -165,8 +169,9 @@ class WebServer:
         )
         self._loop_running = False
         # /video.mjpeg (F14): the newest offered frame, the encoded frame shared by
-        # every client, and the encoder task that runs at most VIDEO_MAX_FPS.
+        # every client, and the encoder task that runs at most ``video_max_fps``.
         self._video_enabled = bool(config.video)
+        self._video_max_fps = float(getattr(config, "video_max_fps", VIDEO_MAX_FPS))
         self._video_wake: asyncio.Event | None = None
         self._video_waiters: set[asyncio.Event] = set()
         self._video_encoder: asyncio.Task[None] | None = None
@@ -511,7 +516,7 @@ class WebServer:
             await task
 
     async def _video_encoder_loop(self) -> None:
-        """Encode the newest offered frame at up to ``VIDEO_MAX_FPS`` (F14).
+        """Encode the newest offered frame at up to ``video_max_fps`` (F14).
 
         Runs in the event loop only to start and pace the work: the JPEG encoding
         itself happens in the default executor, so a slow encode never stalls the
@@ -537,7 +542,7 @@ class WebServer:
             except Exception:
                 logger.exception("Encoding a video frame failed")
                 continue
-            self._video_next_encode_at = loop.time() + 1.0 / VIDEO_MAX_FPS
+            self._video_next_encode_at = loop.time() + 1.0 / self._video_max_fps
             self._video_frame = (seq, jpeg)
             for waiter in self._video_waiters:
                 waiter.set()

@@ -58,6 +58,7 @@ def running_server(
     on_command: Callable[[str, dict[str, Any], int | None], None] | None = None,
     idle_timeout_s: float = 30.0,
     video: bool = False,
+    video_max_fps: float = 30.0,
 ) -> Iterator[tuple[WebServer, list[tuple[str, dict[str, Any], int | None]]]]:
     static = tmp_path / "dist"
     (static / "assets").mkdir(parents=True)
@@ -76,6 +77,7 @@ def running_server(
         static_dir=static,
         idle_timeout_s=idle_timeout_s,
         video=video,
+        video_max_fps=video_max_fps,
     )
     server = WebServer(config, handler, "test-version")
     server.start()
@@ -1009,6 +1011,13 @@ def test_video_endpoint_is_404_json_when_disabled(tmp_path: Path) -> None:
 
     assert status == 404
     assert body == {"error": "video_disabled"}
+
+
+def test_the_mjpeg_rate_follows_the_configured_value(tmp_path: Path) -> None:
+    with running_server(tmp_path / "default", video=True) as (server, _):
+        assert server._video_max_fps == pytest.approx(30.0)
+    with running_server(tmp_path / "showcase", video=True, video_max_fps=60.0) as (server, _):
+        assert server._video_max_fps == pytest.approx(60.0)
 
 
 def test_offered_frames_are_ignored_without_a_client(tmp_path: Path) -> None:

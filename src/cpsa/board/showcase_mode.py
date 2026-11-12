@@ -7,12 +7,26 @@ detections are published as ``showcase.state`` at most 10 times per second
 (right pane). The overlay is drawn here, on the board, so the video and the boxes
 can never drift apart however fast the browser is.
 
-The RGB camera settings are the ones of ``vision.camera``, the same node the
-medical mode uses: one booth setup, no duplicated camera section. A missing model
-file fails the start with ``model_missing`` before the camera is touched; a
-missing RGB node fails it with ``camera_missing``; a node that is present but
-cannot be opened or configured fails it with ``camera_error``. :meth:`stop`
-always releases the camera and the DPU runner.
+The 60 fps target needs the DPU and the CPU to work on different frames:
+
+```text
+submit frame N (preprocess + execute_async)
+decode + draw + publish frame N-1   (while the DPU runs on N)
+next iteration: submit N+1, then wait N
+```
+
+The detector exposes that split as ``submit``/``wait``; a detector with only
+``detect`` (a fake in a test, a CPU stand-in) runs the simple synchronous path.
+The latest-frame slot means a late frame is dropped, never queued.
+
+The RGB camera settings come from ``vision.camera``, with the optional
+``showcase.camera_fps``/``exposure``/``gain`` overrides applied only to the
+source this mode builds: the 60 fps demo needs a shorter exposure than the
+33 fps medical default, and the overrides must never leak into that pipeline.
+A missing model file fails the start with ``model_missing`` before the camera is
+touched; a missing RGB node fails it with ``camera_missing``; a node that is
+present but cannot be opened or configured fails it with ``camera_error``.
+:meth:`stop` always releases the camera and the DPU runner.
 
 The detector, the camera and the label table arrive as factories: tests inject a
 fake, and the defaults (the DPU detector of F-S1 and the COCO tables of
@@ -30,7 +44,8 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Protocol
+from dataclasses import dataclass, replace
+from typing import Any, Protocol, cast
 
 import cv2
 import numpy as np
@@ -50,10 +65,13 @@ from cpsa.vision.types import VideoFrame
 
 logger = logging.getLogger("cpsa.board.showcase")
 
-__all__ = ["STATE_PERIOD_S", "ShowcaseMode", "class_color", "draw_overlay"]
+__all__ = ["STATE_PERIOD_S", "TIMING_PERIOD_S", "ShowcaseMode", "class_color", "draw_overlay"]
 
 STATE_PERIOD_S = 0.1
 """``showcase.state`` is published at most 10 Hz; the video is not throttled."""
+
+TIMING_PERIOD_S = 5.0
+"""The per-stage timing line is logged once per this many seconds."""
 
 CAMERA_STALE_S = 1.0
 """``health()["camera"]`` is not ``ok`` when no frame arrived for this long."""
@@ -118,6 +136,29 @@ class ShowcaseDetector(Protocol):
         """Return the detections of one RGB frame in source pixels, best first."""
 
 
+class ShowcasePipelinedDetector(ShowcaseDetector, Protocol):
+    """A detector whose DPU run can overlap the CPU work of the previous frame."""
+
+    def submit(self, rgb: NDArray[np.uint8]) -> int:
+        """Start the DPU on ``rgb`` and return a token for :meth:`wait`."""
+
+    def wait(self, token: int) -> Sequence[ShowcaseDetection]:
+        """Wait for a submitted frame and return its detections."""
+
+
+@dataclass(frozen=True)
+class _PendingFrame:
+    """Frame N-1 submitted to the DPU, waiting to be decoded while frame N runs."""
+
+    seq: int
+    width: int
+    height: int
+    rgb: NDArray[np.uint8]
+    token: int
+    started: float
+    camera_ms: float
+
+
 class ShowcaseSource(Protocol):
     """The part of an RGB video source the mode drives."""
 
@@ -136,7 +177,7 @@ LabelsFactory = Callable[[str], tuple[str, ...]]
 
 
 def _default_source(camera: VisionCameraConfig) -> ShowcaseSource:
-    """Build the RGB source of the booth camera (``vision.camera``)."""
+    """Build the RGB source of the booth camera (``vision.camera`` + overrides)."""
     from cpsa.adapters.camera.uvc import UvcVideoSource
 
     return UvcVideoSource(
@@ -149,6 +190,24 @@ def _default_source(camera: VisionCameraConfig) -> ShowcaseSource:
         power_line_hz=camera.power_line_hz,
         match=camera.match,
     )
+
+
+def showcase_camera(camera: VisionCameraConfig, showcase: ShowcaseConfig) -> VisionCameraConfig:
+    """Apply the ``showcase`` camera overrides to ``vision.camera``.
+
+    Only the source the showcase mode builds sees them, so the 60 fps exposure
+    never reaches the medical pipeline.  An absent override keeps the value of
+    ``vision.camera``.
+    """
+
+    overrides: dict[str, Any] = {}
+    if showcase.camera_fps is not None:
+        overrides["fps"] = showcase.camera_fps
+    if showcase.exposure is not None:
+        overrides["exposure"] = showcase.exposure
+    if showcase.gain is not None:
+        overrides["gain"] = showcase.gain
+    return replace(camera, **overrides) if overrides else camera
 
 
 def _default_detector(model: ShowcaseModelConfig) -> ShowcaseDetector:
@@ -213,6 +272,9 @@ class ShowcaseMode:
         self._last_arrival = 0.0
         self._last_dpu_ms: float | None = None
         self._last_publish = 0.0
+        self._timing_sums: dict[str, float] = {}
+        self._timing_frames = 0
+        self._timing_since = 0.0
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -256,7 +318,7 @@ class ShowcaseMode:
             self._fail("internal")
             raise ModeStartError("internal", str(exc)) from exc
 
-        camera = self._config.vision.camera
+        camera = showcase_camera(self._config.vision.camera, showcase)
         try:
             source = self._source_factory(camera)
         except Exception as exc:
@@ -271,6 +333,9 @@ class ShowcaseMode:
             self._last_arrival = 0.0
             self._last_dpu_ms = None
             self._last_publish = 0.0
+            self._timing_sums = {}
+            self._timing_frames = 0
+            self._timing_since = time.monotonic()
         try:
             source.start(self._ingest, self._camera_failed)
         except FileNotFoundError as exc:
@@ -344,6 +409,9 @@ class ShowcaseMode:
             self._last_arrival = 0.0
             self._last_dpu_ms = None
             self._last_publish = 0.0
+            self._timing_sums = {}
+            self._timing_frames = 0
+            self._timing_since = 0.0
         _release_quietly(source)
         logger.info("Showcase mode stopped")
         return stopped
@@ -398,6 +466,7 @@ class ShowcaseMode:
     def _run(self) -> None:
         period = 1.0 / self._showcase.max_fps
         next_due = 0.0
+        pending: _PendingFrame | None = None
         while not self._stop.is_set():
             frame = self._slot.get(timeout=_SLOT_TIMEOUT_S)
             if frame is None:
@@ -407,31 +476,125 @@ class ShowcaseMode:
                 continue
             next_due = now + period
             try:
-                self._process(frame)
+                pending = self._step(frame, pending)
             except Exception:
                 logger.exception("showcase mode failed on frame %d", frame.seq)
 
-    def _process(self, frame: VideoFrame) -> None:
-        """Detect, draw and publish one frame; runs on the showcase thread."""
+    def _step(self, frame: VideoFrame, pending: _PendingFrame | None) -> _PendingFrame | None:
+        """Start frame N on the DPU, then finish frame N-1 while it runs.
+
+        Returns the frame that is now in flight, or ``None`` for a synchronous
+        detector (one that only has ``detect``), whose result is already offered.
+        """
+
         with self._lock:
             ctx = self._ctx
             detector = self._detector
+            labels = self._labels
         if ctx is None or detector is None:
-            return
+            return None
+
         started = time.perf_counter()
         rgb = frame.decode()
-        objects = _objects(detector.detect(rgb), self._labels)
+        camera_ms = (time.perf_counter() - started) * 1000.0
+
+        submit = getattr(detector, "submit", None)
+        wait = getattr(detector, "wait", None)
+        if not callable(submit) or not callable(wait):
+            objects = _objects(detector.detect(rgb), labels)
+            self._finish(
+                ctx,
+                frame.seq,
+                frame.width,
+                frame.height,
+                rgb,
+                objects,
+                dict(detector.stage_ms),
+                started,
+                camera_ms,
+            )
+            return None
+
+        token = submit(rgb)
+        pending_frame = _PendingFrame(
+            seq=frame.seq,
+            width=frame.width,
+            height=frame.height,
+            rgb=rgb,
+            token=token,
+            started=started,
+            camera_ms=camera_ms,
+        )
+        if pending is not None:
+            # A failure while finishing frame N-1 must not cost frame N its
+            # return value, or the loop would lose the token of a submitted job.
+            try:
+                self._finish_pending(
+                    ctx, labels, cast("ShowcasePipelinedDetector", detector), pending
+                )
+            except Exception:
+                logger.exception("showcase mode failed on frame %d", pending.seq)
+        return pending_frame
+
+    def _finish_pending(
+        self,
+        ctx: ModeContext,
+        labels: Sequence[str],
+        detector: ShowcasePipelinedDetector,
+        pending: _PendingFrame,
+    ) -> None:
+        """Wait for, draw and publish a frame the DPU has been working on."""
+
+        objects = _objects(detector.wait(pending.token), labels)
+        self._finish(
+            ctx,
+            pending.seq,
+            pending.width,
+            pending.height,
+            pending.rgb,
+            objects,
+            dict(detector.stage_ms),
+            pending.started,
+            pending.camera_ms,
+        )
+
+    def _finish(
+        self,
+        ctx: ModeContext,
+        seq: int,
+        width: int,
+        height: int,
+        rgb: NDArray[np.uint8],
+        objects: Sequence[ShowcaseObject],
+        stage: Mapping[str, float],
+        started: float,
+        camera_ms: float,
+    ) -> None:
+        """Draw, offer and publish one decoded frame, and record its timings."""
+
+        draw_started = time.perf_counter()
         overlay = draw_overlay(rgb, objects)
+        draw_ms = (time.perf_counter() - draw_started) * 1000.0
         total_ms = (time.perf_counter() - started) * 1000.0
-        stage = detector.stage_ms
         dpu_ms = stage.get("dpu")
-        self._offer_video(ctx, frame.seq, overlay)
+        self._offer_video(ctx, seq, overlay)
         with self._lock:
             self._processed.append(time.perf_counter())
             self._last_dpu_ms = None if dpu_ms is None else float(dpu_ms)
             stamps = tuple(self._processed)
             last_dpu = self._last_dpu_ms
             last_publish = self._last_publish
+        self._record_timings(
+            {
+                "camera": camera_ms,
+                "preprocess": stage.get("preprocess", 0.0),
+                "dpu": stage.get("dpu", 0.0),
+                "decode": stage.get("decode", 0.0),
+                "draw": draw_ms,
+                "total": total_ms,
+            },
+            stamps,
+        )
         now = time.monotonic()
         if now - last_publish < STATE_PERIOD_S:
             return
@@ -442,12 +605,43 @@ class ShowcaseMode:
             fps = (len(stamps) - 1) / (stamps[-1] - stamps[0])
         self._publish(
             ctx,
-            width=frame.width,
-            height=frame.height,
+            width=width,
+            height=height,
             objects=objects,
             fps=fps,
             dpu_ms=last_dpu,
             total_ms=total_ms,
+        )
+
+    def _record_timings(self, samples: Mapping[str, float], stamps: Sequence[float]) -> None:
+        """Accumulate the per-stage timings and log the means once every ~5 s."""
+
+        with self._lock:
+            for name, milliseconds in samples.items():
+                self._timing_sums[name] = self._timing_sums.get(name, 0.0) + float(milliseconds)
+            self._timing_frames += 1
+            elapsed = time.monotonic() - self._timing_since
+            if elapsed < TIMING_PERIOD_S or self._timing_frames == 0:
+                return
+            means = {name: total / self._timing_frames for name, total in self._timing_sums.items()}
+            counted = self._timing_frames
+            self._timing_sums = {}
+            self._timing_frames = 0
+            self._timing_since = time.monotonic()
+        fps = 0.0
+        if len(stamps) >= 2 and stamps[-1] > stamps[0]:
+            fps = (len(stamps) - 1) / (stamps[-1] - stamps[0])
+        logger.info(
+            "showcase stages over %d frames: camera=%.2f preprocess=%.2f dpu=%.2f "
+            "decode=%.2f draw=%.2f total=%.2f total_fps=%.1f",
+            counted,
+            means.get("camera", 0.0),
+            means.get("preprocess", 0.0),
+            means.get("dpu", 0.0),
+            means.get("decode", 0.0),
+            means.get("draw", 0.0),
+            means.get("total", 0.0),
+            fps,
         )
 
     def _offer_video(
