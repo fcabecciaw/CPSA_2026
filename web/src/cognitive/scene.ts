@@ -52,6 +52,12 @@ export interface SceneWorld {
   sameVisit?: boolean;
   /** A goodbye is allowed (greeted in this visit, 60 s apart). Default true. */
   farewellAllowed?: boolean;
+  /**
+   * Newcomers to greet now (C3, track-based arrivals of `presence.ts`). When
+   * given, greetings come only from arrivals: one per batch of newcomers, also
+   * in Play, never from the people count; when omitted, the count decides.
+   */
+  arrivals?: number;
 }
 
 export interface SceneSnapshot {
@@ -84,6 +90,11 @@ export interface SceneOptions {
 /** A smile reaction queues while ARI speaks (queue slot >= 80, C3). */
 export const SMILE_PRIORITY = 85;
 export const SMILE_COOLDOWN_MS = 6_000;
+/**
+ * Arrival mode: somebody present who is not a newcomer (seeded, or back at
+ * the same place) switches Attract to a silent Play after this.
+ */
+const ARRIVAL_WAIT_MS = 2_000;
 
 const DEFAULTS: Required<SceneOptions> = {
   rng: Math.random,
@@ -130,7 +141,7 @@ const GREETINGS = {
   ],
   group: [
     "Ciao a tutti! Siete in {n}.",
-    "Che bel gruppetto! Ciao a tutti.",
+    "Che bel gruppetto! Siete in {n}, ciao a tutti.",
   ],
   crowd: [
     "Ciao a tutti! Quanta gente!",
@@ -302,6 +313,11 @@ export class SceneMachine {
   private goodbyeSent = false;
   private goodbyeAllowed = true;
   private faces = 0;
+  /** Newcomers of the greeting Engage opens with (arrival mode). */
+  private greetCount = 0;
+  /** Newcomers who arrived while ARI was already engaged or playing. */
+  private pendingGreeting = 0;
+  private presentSince: number | null = null;
   private playSince = 0;
   private lastSpokenAt = Number.NEGATIVE_INFINITY;
   private lastObject: { label: string; count: number; at: number } | null = null;
@@ -372,6 +388,9 @@ export class SceneMachine {
     this.goodbyeSent = false;
     this.goodbyeAllowed = true;
     this.faces = 0;
+    this.greetCount = 0;
+    this.pendingGreeting = 0;
+    this.presentSince = present ? now : null;
     this.playSince = now;
     this.lastSpokenAt = Number.NEGATIVE_INFINITY;
     this.lastObject = null;
@@ -430,7 +449,8 @@ export class SceneMachine {
     this.syncWorld(now, world);
 
     if (this.name === "attract") {
-      return this.attractLine(now, memory);
+      // Somebody there but not (yet) a newcomer: no idle facts over them.
+      return this.present ? null : this.attractLine(now, memory);
     }
     if (this.name === "engage") {
       return this.engageLine(now, memory);
@@ -482,6 +502,15 @@ export class SceneMachine {
     this.faces = world.faces ?? 0;
     this.present =
       world.present ?? (world.people > 0 || (world.mode === "movenet" && world.posePerson));
+    if (!this.present) {
+      this.presentSince = null;
+    } else if (!wasPresent || this.presentSince === null) {
+      this.presentSince = now;
+    }
+    if (world.arrivals !== undefined) {
+      this.syncArrivals(now, world, world.arrivals);
+      return;
+    }
 
     if (this.present) {
       if (this.name === "attract") {
@@ -504,6 +533,39 @@ export class SceneMachine {
       if (this.name === "engage" || this.name === "play") {
         this.enterFarewell(now, world.farewellAllowed ?? true);
       }
+    } else if (this.name === "farewell" && now - this.farewellAt >= this.options.farewellMs) {
+      this.enterAttract(now);
+    }
+  }
+
+  /**
+   * Arrival mode (C3): every batch of newcomers gets a greeting. From Attract
+   * or Farewell it opens Engage (greeting, self-introduction, invitation);
+   * while engaged or playing it is a greeting line of its own. Presence alone
+   * (people seeded at start, or back at the same place) is a silent Play.
+   */
+  private syncArrivals(now: number, world: SceneWorld, arrivals: number): void {
+    if (arrivals > 0) {
+      if (this.name === "attract" || this.name === "farewell") {
+        this.enterEngage(now);
+        this.greetCount = arrivals;
+      } else {
+        this.pendingGreeting += arrivals;
+      }
+      return;
+    }
+    if (this.present) {
+      if (
+        (this.name === "attract" || this.name === "farewell") &&
+        (now < this.quietUntil ||
+          (this.presentSince !== null && now - this.presentSince >= ARRIVAL_WAIT_MS))
+      ) {
+        this.enterPlay(now);
+      }
+      return;
+    }
+    if (this.name === "engage" || this.name === "play") {
+      this.enterFarewell(now, world.farewellAllowed ?? true);
     } else if (this.name === "farewell" && now - this.farewellAt >= this.options.farewellMs) {
       this.enterAttract(now);
     }
@@ -622,6 +684,13 @@ export class SceneMachine {
       return null;
     }
     if (this.engageStep > 0) {
+      if (this.pendingGreeting > 0) {
+        // More newcomers during Engage: greet them, then resume the steps.
+        const count = this.pendingGreeting;
+        this.pendingGreeting = 0;
+        this.engageAt = now;
+        return this.greeting(memory, count);
+      }
       // A smile while ARI greets or introduces itself: react right after the
       // current line (priority 85 waits in the queue slot), then the next
       // Engage step waits a full step again, so the self-introduction and
@@ -641,7 +710,9 @@ export class SceneMachine {
     if (this.engageStep === 0) {
       this.engageStep = 1;
       this.engageAt = now;
-      return this.greeting(memory);
+      const count = this.greetCount > 0 ? this.greetCount : this.people;
+      this.greetCount = 0;
+      return this.greeting(memory, count);
     }
     if (this.engageStep === 1 && memory.fireCount("scene.intro") === 0) {
       this.engageStep = 2;
@@ -677,8 +748,8 @@ export class SceneMachine {
     return prompt;
   }
 
-  private greeting(memory: CognitiveMemory): SceneLine {
-    const people = Math.max(1, this.people);
+  private greeting(memory: CognitiveMemory, count: number = this.people): SceneLine {
+    const people = Math.max(1, count);
     const returning = this.lastReturnAfterS !== null && this.lastReturnAfterS >= 30;
     this.lastReturnAfterS = null;
     if (people >= 5) {
@@ -741,6 +812,12 @@ export class SceneMachine {
   private playLine(now: number, memory: CognitiveMemory): SceneLine | null {
     if (this.question !== null && now - this.question.askedAt > this.options.answerWindowMs) {
       this.question = null;
+    }
+    if (this.pendingGreeting > 0) {
+      // A newcomer joins while ARI is playing with somebody else (C3).
+      const count = this.pendingGreeting;
+      this.pendingGreeting = 0;
+      return this.greeting(memory, count);
     }
 
     let stimulus: Stimulus | undefined;
@@ -1021,7 +1098,9 @@ export class SceneMachine {
     return this.line({
       ruleId: "scene.goodbye",
       kind: "goodbye",
-      priority: 78,
+      // >= 80: waits in the queue slot if the last line just ended (C3), so
+      // the one goodbye of the visit is never lost to the 2 s gap.
+      priority: 81,
       expression: "neutral",
       gaze: "wander",
       phrases: GOODBYES,

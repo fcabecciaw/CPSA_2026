@@ -297,6 +297,16 @@ function pairMatches(event: CognitiveEvent, a: string, b: string): boolean {
   );
 }
 
+/**
+ * The hello rules fire on people counts; the live agent greets from person and
+ * face tracks instead (`presence.ts`, C3) and sets `greeter: "arrivals"`, so
+ * these families stay for the count-only world (tests, the mock) and never say
+ * a second hello.
+ */
+function rulesGreet(memory: CognitiveMemory): boolean {
+  return memory.working.focus.greeter !== "arrivals";
+}
+
 const personRules: Rule[] = [
   {
     id: "person.single",
@@ -310,6 +320,7 @@ const personRules: Rule[] = [
     phrases: ["Ciao! Ti vedo benissimo.", "Ehi, ciao! Che piacere.", "Ciao! Vieni pure avanti."],
     // Exactly one person, direct "tu" family (F-E4 #2).
     when: (event, memory) =>
+      rulesGreet(memory) &&
       event.type === "count" &&
       event.from === 0 &&
       event.to === 1 &&
@@ -326,6 +337,7 @@ const personRules: Rule[] = [
     model: "yolox",
     phrases: ["Ciao a tutti e due!", "Ciao a voi due!", "Ehi, siete in due! Ciao."],
     when: (event, memory) =>
+      rulesGreet(memory) &&
       event.type === "count" &&
       event.to === 2 &&
       event.from < 2 &&
@@ -346,6 +358,7 @@ const personRules: Rule[] = [
       "Ehi, ciao a tutti quanti!",
     ],
     when: (event, memory) =>
+      rulesGreet(memory) &&
       event.type === "count" &&
       event.to >= 3 &&
       event.to <= 4 &&
@@ -368,6 +381,7 @@ const personRules: Rule[] = [
     ],
     // Crowd mode: group-level lines only (F-E4 #2).
     when: (event, memory) =>
+      rulesGreet(memory) &&
       event.type === "count" &&
       event.to >= 5 &&
       event.from < 5 &&
@@ -392,6 +406,7 @@ const personRules: Rule[] = [
     ],
     // Only after ≥ 30 s away: no identity claim, just the count (#4/#5).
     when: (event, memory) =>
+      rulesGreet(memory) &&
       event.type === "count" &&
       event.returnAfterS !== null &&
       event.to > 0 &&
@@ -697,6 +712,7 @@ const idleRules: Rule[] = [
       "Ciao! Che bello, compagnia!",
     ],
     when: (event, memory) =>
+      rulesGreet(memory) &&
       event.type === "count" &&
       event.from === 0 &&
       event.to > 0 &&

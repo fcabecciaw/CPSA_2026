@@ -1,21 +1,32 @@
 /**
- * Presence fusion (C3) at the agent level: a person is there while YOLOX, a
- * laptop face or a MoveNet skeleton sees them; the goodbye needs 5 s with no
- * source at all, a greeting earlier in the visit, and at most one per 60 s; a
- * return within 15 s is the same visit. Plus the smile reaction that waits in
- * the queue slot while ARI is speaking.
+ * Presence and arrivals (C3) at the agent level. ARI says hello to every
+ * newcomer — a person or face track at the stand for 0.6 s that was never
+ * greeted — with one collective greeting for people arriving together and at
+ * least 8 s between greetings (newcomers in between are batched). People in
+ * the background never count. The goodbye needs everybody gone for 3 s, once
+ * per visit; a partial departure says nothing. Plus the smile reaction that
+ * waits in the queue slot while ARI is speaking.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { CognitiveAgent, HEARTBEAT_MS } from "./agent";
+import type { NormBox } from "./facecrop";
 import { CognitiveMemory } from "./memory";
 import { Perception } from "./perception";
-import { PresenceFusion } from "./presence";
+import {
+  DEFAULT_PRESENCE_THRESHOLDS,
+  PRESENCE_THRESHOLDS_KEY,
+  PresenceFusion,
+  loadPresenceThresholds,
+  presenceThresholds,
+  setPresenceThresholds,
+} from "./presence";
 import { RULEBOOK } from "./rulebook";
 import { CognitiveEngine, type SceneLine, type Utterance } from "./rules";
 import { SMILE_PRIORITY, SceneMachine } from "./scene";
-import { keypoints, person, pose, showcase } from "./testkit";
+import { keypoints, memoryStorage, person, pose, showcase } from "./testkit";
+import type { ShowcaseObject } from "../protocol";
 
 interface Said {
   at: number;
@@ -42,127 +53,269 @@ function makeAgent() {
   return { agent, said, setClock };
 }
 
-/** What each source sees at a given time. */
-interface Scene {
-  yolo: boolean;
-  faces: number;
+type Rig = ReturnType<typeof makeAgent>;
+
+/** What the board and the laptop see at a given time. */
+interface View {
+  people?: ShowcaseObject[];
+  faces?: NormBox[];
 }
 
-/** Drive the agent at the real cadence: 10 Hz showcase/faces, 10 Hz heartbeat. */
-function run(
-  rig: ReturnType<typeof makeAgent>,
-  from: number,
-  to: number,
-  scene: (now: number) => Scene,
-): number {
+/** A visitor at the stand (box 75 % of the frame high) at pixel column `x`. */
+const near = (x: number): ShowcaseObject => person(x, 80, 120, 360);
+/** Somebody walking by in the background (box 21 % of the frame high). */
+const far = (x: number): ShowcaseObject => person(x, 200, 40, 100);
+/** A face 10 % of the frame wide (at the stand) at normalised column `x`. */
+const face = (x: number, width = 0.1): NormBox => [x, 0.2, x + width, 0.33];
+
+/** Drive the agent at the real cadence: 10 Hz frames, faces and heartbeat. */
+function run(rig: Rig, from: number, to: number, view: (now: number) => View): number {
   let now = from;
   for (; now < to; now += HEARTBEAT_MS) {
     rig.setClock(now);
-    const seen = scene(now);
-    rig.agent.onShowcase(showcase(seen.yolo ? [person(260)] : []), now);
-    rig.agent.onFaces(seen.faces, now);
+    const seen = view(now);
+    rig.agent.onShowcase(showcase(seen.people ?? []), now);
+    rig.agent.onFaces(seen.faces ?? [], now);
     rig.agent.tick(now);
   }
   return now;
 }
 
+const empty = (): View => ({});
 const goodbyes = (said: readonly Said[]): Said[] =>
   said.filter((entry) => entry.utterance.sceneKind === "goodbye");
+/** Every hello, from the scene or (never, with arrivals) from the rulebook. */
+const HELLO_RULES = new Set([
+  "person.single",
+  "person.two",
+  "person.small_group",
+  "person.crowd",
+  "person.return",
+  "idle.wake",
+]);
 const greetings = (said: readonly Said[]): Said[] =>
   said.filter(
     (entry) =>
-      entry.utterance.sceneKind === "greeting" || entry.utterance.ruleId.startsWith("person."),
+      entry.utterance.sceneKind === "greeting" || HELLO_RULES.has(entry.utterance.ruleId),
   );
 
-/** Empty stand for the warm-up, then a visitor who gets greeted. */
-function arriveAndGreet(rig: ReturnType<typeof makeAgent>): number {
-  let now = run(rig, 0, 5_000, () => ({ yolo: false, faces: 0 }));
-  now = run(rig, now, 12_000, () => ({ yolo: true, faces: 1 }));
-  expect(greetings(rig.said).length).toBeGreaterThan(0);
-  expect(rig.agent.presence.snapshot(now).greeted).toBe(true);
-  return now;
+/** The silent warm-up (people there at start are seeded), then an empty stand. */
+function warm(rig: Rig): number {
+  return run(rig, 0, 4_000, empty);
 }
 
-describe("C3 presence — YOLOX flicker with a face in view", () => {
-  it("never says goodbye while the face is visible", () => {
+afterEach(() => {
+  setPresenceThresholds({ ...DEFAULT_PRESENCE_THRESHOLDS }, null);
+});
+
+describe("C3 arrivals — every newcomer gets a hello", () => {
+  it("greets a newcomer who joins a person already there", () => {
     const rig = makeAgent();
-    let now = arriveAndGreet(rig);
-    const greeted = greetings(rig.said).length;
-    // Very close to the camera: YOLOX sees "persona" 1 s out of 4 at best,
-    // the laptop sees the face throughout.
-    now = run(rig, now, 60_000, (t) => ({ yolo: t % 4_000 < 1_000, faces: 1 }));
+    let now = warm(rig);
+    now = run(rig, now, 14_000, () => ({ people: [near(40)] }));
+    expect(greetings(rig.said)).toHaveLength(1);
+    const joinAt = now;
+    now = run(rig, now, now + 6_000, () => ({ people: [near(40), near(420)] }));
+    const said = greetings(rig.said);
+    expect(said).toHaveLength(2);
+    expect(said[1]!.utterance.ruleId).toMatch(/^scene\.greeting\.(single|return)$/);
+    // Confirmed after 0.6 s, batched for 0.6 s more: well under 2 s.
+    expect(said[1]!.at - joinAt).toBeLessThan(2_000);
     expect(goodbyes(rig.said)).toHaveLength(0);
-    expect(rig.said.some((entry) => /a presto|alla prossima/i.test(entry.utterance.text))).toBe(
-      false,
-    );
-    expect(rig.agent.scene.scene).not.toBe("farewell");
-    // No second greeting either: the YOLOX count never dropped to 0.
-    expect(greetings(rig.said)).toHaveLength(greeted);
-    expect(rig.agent.presence.isPresent).toBe(true);
   });
 
-  it("does not say goodbye when YOLOX loses the person for 4 s and no face is seen", () => {
+  it("greets the newcomer of a swap (one leaves while another arrives)", () => {
     const rig = makeAgent();
-    let now = arriveAndGreet(rig);
-    now = run(rig, now, now + 4_000, () => ({ yolo: false, faces: 0 }));
-    now = run(rig, now, now + 2_000, () => ({ yolo: true, faces: 0 }));
+    let now = warm(rig);
+    now = run(rig, now, 14_000, () => ({ people: [near(40)] }));
+    now = run(rig, now, now + 6_000, () => ({ people: [near(440)] }));
+    expect(greetings(rig.said)).toHaveLength(2);
+    expect(goodbyes(rig.said)).toHaveLength(0);
+  });
+
+  it("greets two people arriving together once, as a pair", () => {
+    const rig = makeAgent();
+    let now = warm(rig);
+    now = run(rig, now, now + 10_000, (t) => ({
+      // The second one shows up 0.3 s later: same window.
+      people: t >= 4_300 ? [near(40), near(420)] : [near(40)],
+    }));
+    const said = greetings(rig.said);
+    expect(said).toHaveLength(1);
+    expect(said[0]!.utterance.ruleId).toBe("scene.greeting.pair");
+  });
+
+  it("greets three people arriving together with their number", () => {
+    const rig = makeAgent();
+    let now = warm(rig);
+    now = run(rig, now, now + 10_000, () => ({ people: [near(20), near(250), near(480)] }));
+    const said = greetings(rig.said);
+    expect(said).toHaveLength(1);
+    expect(said[0]!.utterance.text).toMatch(/tre/);
+  });
+
+  it("batches newcomers who arrive during the 8 s cooldown, if still there", () => {
+    const rig = makeAgent();
+    let now = warm(rig);
+    // A at 4 s; B at 6 s and C at 7 s, both inside the cooldown of A's hello.
+    now = run(rig, now, 30_000, (t) => ({
+      people: [near(20), ...(t >= 6_000 ? [near(250)] : []), ...(t >= 7_000 ? [near(480)] : [])],
+    }));
+    const said = greetings(rig.said);
+    expect(said).toHaveLength(2);
+    expect(said[1]!.at - said[0]!.at).toBeGreaterThanOrEqual(8_000);
+    expect(said[1]!.utterance.ruleId).toBe("scene.greeting.pair");
+  });
+
+  it("does not greet a newcomer who left before the cooldown ended", () => {
+    const rig = makeAgent();
+    let now = warm(rig);
+    now = run(rig, now, 30_000, (t) => ({
+      people: [near(20), ...(t >= 6_000 && t < 8_000 ? [near(420)] : [])],
+    }));
+    expect(greetings(rig.said)).toHaveLength(1);
+  });
+
+  it("greets a person and their face once (the face is inside the person box)", () => {
+    const rig = makeAgent();
+    let now = warm(rig);
+    // Person box x 40–160 px of 640: the face centre at 0.15 is inside it.
+    now = run(rig, now, 20_000, () => ({ people: [near(40)], faces: [face(0.1)] }));
+    expect(greetings(rig.said)).toHaveLength(1);
+  });
+
+  it("does not greet a person YOLOX loses for a moment", () => {
+    const rig = makeAgent();
+    let now = warm(rig);
+    now = run(rig, now, 40_000, (t) => ({
+      // 2 s gaps every 6 s: the track is lost and found at the same place.
+      people: t % 6_000 < 4_000 ? [near(40)] : [],
+    }));
+    expect(greetings(rig.said)).toHaveLength(1);
     expect(goodbyes(rig.said)).toHaveLength(0);
   });
 });
 
-describe("C3 presence — all sources absent", () => {
-  it("says one goodbye after 5 s with nobody, and only one in 60 s", () => {
+describe("C3 arrivals — only people at the stand count", () => {
+  it("ignores small people and faces in the background", () => {
     const rig = makeAgent();
-    let now = arriveAndGreet(rig);
+    let now = warm(rig);
+    now = run(rig, now, 30_000, () => ({
+      people: [far(20), far(300), far(500)],
+      faces: [face(0.5, 0.04)],
+    }));
+    expect(greetings(rig.said)).toHaveLength(0);
+    expect(rig.agent.presence.isPresent).toBe(false);
+    expect(rig.agent.perception.world.people).toBe(0);
+    expect(rig.agent.memory.working.focus.people).toBe(0);
+    const snapshot = rig.agent.presence.snapshot(now);
+    expect(snapshot.tracks.filter((track) => track.kind === "persona")).toHaveLength(3);
+    expect(snapshot.tracks.every((track) => !track.atStand)).toBe(true);
+
+    // One of them walks up to the stand: now a newcomer.
+    now = run(rig, now, now + 5_000, () => ({ people: [far(20), near(300)] }));
+    expect(greetings(rig.said)).toHaveLength(1);
+    expect(rig.agent.memory.working.focus.people).toBe(1);
+  });
+
+  it("counts max(gated people, gated faces)", () => {
+    const fusion = new PresenceFusion();
+    for (let now = 0; now <= 1_000; now += 100) {
+      fusion.observePersons([[0.1, 0.1, 0.3, 0.9]], now);
+      fusion.observeFaces([face(0.1), face(0.6), face(0.8, 0.03)], now);
+    }
+    // One person box, two faces at the stand (the third face is far away).
+    expect(fusion.update(1_000)).toMatchObject({ present: true, people: 2, faces: 2 });
+  });
+
+  it("persists the thresholds and gates with the new values", () => {
+    const storage = memoryStorage();
+    setPresenceThresholds({ minBoxHeight: 0.5, minFaceWidth: 0.12 }, storage);
+    expect(presenceThresholds()).toEqual({ minBoxHeight: 0.5, minFaceWidth: 0.12 });
+    expect(JSON.parse(storage.values.get(PRESENCE_THRESHOLDS_KEY)!)).toEqual({
+      minBoxHeight: 0.5,
+      minFaceWidth: 0.12,
+    });
+    expect(loadPresenceThresholds(storage)).toEqual({ minBoxHeight: 0.5, minFaceWidth: 0.12 });
+    expect(loadPresenceThresholds(null)).toEqual(DEFAULT_PRESENCE_THRESHOLDS);
+
+    // A 0.42 box is now in the background.
+    const fusion = new PresenceFusion();
+    for (let now = 0; now <= 1_000; now += 100) {
+      fusion.observePersons([[0.1, 0.3, 0.3, 0.72]], now);
+    }
+    expect(fusion.update(1_000).present).toBe(false);
+    expect(fusion.snapshot(1_000).thresholds.minBoxHeight).toBe(0.5);
+  });
+});
+
+describe("C3 goodbye — only when everybody has left", () => {
+  it("says one goodbye 3 s after the last person leaves", () => {
+    const rig = makeAgent();
+    let now = warm(rig);
+    now = run(rig, now, 14_000, () => ({ people: [near(40), near(420)], faces: [face(0.1)] }));
     const leftAt = now;
-    now = run(rig, now, now + 30_000, () => ({ yolo: false, faces: 0 }));
+    now = run(rig, now, now + 30_000, empty);
     const said = goodbyes(rig.said);
     expect(said).toHaveLength(1);
-    // The persona track needs 1.5 s to drop, then 5 s with no source at all.
-    expect(said[0]!.at - leftAt).toBeGreaterThanOrEqual(5_000);
-    expect(said[0]!.at - leftAt).toBeLessThan(9_000);
+    expect(said[0]!.at - leftAt).toBeGreaterThanOrEqual(2_800);
+    expect(said[0]!.at - leftAt).toBeLessThan(4_000);
+  });
 
-    // Back after 30 s (a new visit, greeted again), gone again within 60 s of
-    // the first goodbye: no second goodbye.
-    now = run(rig, now, now + 8_000, () => ({ yolo: true, faces: 1 }));
-    now = run(rig, now, now + 15_000, () => ({ yolo: false, faces: 0 }));
+  it("says nothing when only some of them leave (2 → 1)", () => {
+    const rig = makeAgent();
+    let now = warm(rig);
+    now = run(rig, now, 14_000, () => ({ people: [near(40), near(420)] }));
+    const before = rig.said.length;
+    now = run(rig, now, now + 20_000, () => ({ people: [near(40)] }));
+    const after = rig.said.slice(before);
+    expect(goodbyes(after)).toHaveLength(0);
+    expect(greetings(after)).toHaveLength(0);
+  });
+
+  it("never says goodbye while a face is visible, even if YOLOX loses the person", () => {
+    const rig = makeAgent();
+    let now = warm(rig);
+    now = run(rig, now, 14_000, () => ({ people: [near(40)], faces: [face(0.1)] }));
+    // Too close for YOLOX now: only the face.
+    now = run(rig, now, now + 30_000, () => ({ faces: [face(0.1)] }));
+    expect(goodbyes(rig.said)).toHaveLength(0);
+    expect(greetings(rig.said)).toHaveLength(1);
+  });
+
+  it("says one goodbye per visit, at most one per 60 s", () => {
+    const rig = makeAgent();
+    let now = warm(rig);
+    now = run(rig, now, 14_000, () => ({ people: [near(40)] }));
+    now = run(rig, now, now + 10_000, empty);
+    expect(goodbyes(rig.said)).toHaveLength(1);
+    // A new visitor 10 s later: greeted, then leaves within 60 s of the goodbye.
+    now = run(rig, now, now + 10_000, () => ({ people: [near(300)] }));
+    expect(greetings(rig.said)).toHaveLength(2);
+    now = run(rig, now, now + 10_000, empty);
     expect(goodbyes(rig.said)).toHaveLength(1);
   });
 
-  it("leaves quietly when nobody was greeted in this visit", () => {
+  it("leaves quietly when nobody was greeted (seeded at start)", () => {
     const rig = makeAgent();
     // Somebody is already there at start: seeded silently, never greeted.
-    let now = run(rig, 0, 8_000, () => ({ yolo: true, faces: 1 }));
+    let now = run(rig, 0, 8_000, () => ({ people: [near(40)], faces: [face(0.1)] }));
     expect(greetings(rig.said)).toHaveLength(0);
-    now = run(rig, now, now + 20_000, () => ({ yolo: false, faces: 0 }));
+    now = run(rig, now, now + 20_000, empty);
     expect(goodbyes(rig.said)).toHaveLength(0);
     expect(rig.agent.presence.isPresent).toBe(false);
   });
 });
 
-describe("C3 presence — a return within 15 s is the same visit", () => {
-  it("does not greet again after a 10 s absence, and greets after 20 s", () => {
-    const rig = makeAgent();
-    let now = arriveAndGreet(rig);
-    const before = greetings(rig.said).length;
-    now = run(rig, now, now + 10_000, () => ({ yolo: false, faces: 0 }));
-    now = run(rig, now, now + 8_000, () => ({ yolo: true, faces: 1 }));
-    expect(greetings(rig.said)).toHaveLength(before);
-    expect(rig.agent.scene.scene).toBe("play");
-
-    // Away for 25 s: a new visit, a new greeting.
-    now = run(rig, now, now + 25_000, () => ({ yolo: false, faces: 0 }));
-    now = run(rig, now, now + 8_000, () => ({ yolo: true, faces: 1 }));
-    expect(greetings(rig.said).length).toBeGreaterThan(before);
-  });
-});
-
-describe("C3 presence — Scheletro view", () => {
-  it("is present with a MoveNet pose even when its keypoints are weak", () => {
+describe("C3 arrivals — Scheletro view", () => {
+  it("greets a MoveNet pose even when its keypoints are weak", () => {
     const rig = makeAgent();
     // A real pose score, shoulders below the keypoint threshold: the old rule
     // (posePerson) saw nobody.
-    const weak = { ...pose({}, 0.35), keypoints: keypoints({ 5: [280, 200, 0.1], 6: [360, 200, 0.1] }) };
+    const weak = {
+      ...pose({}, 0.35),
+      keypoints: keypoints({ 5: [280, 200, 0.1], 6: [360, 200, 0.1] }),
+    };
     let now = 0;
     for (; now < 15_000; now += HEARTBEAT_MS) {
       rig.setClock(now);
@@ -173,16 +326,7 @@ describe("C3 presence — Scheletro view", () => {
     expect(rig.agent.presence.snapshot(now).sources.pose).toBe(true);
     expect(rig.agent.presence.isPresent).toBe(true);
     expect(rig.agent.scene.scene).not.toBe("attract");
-    expect(greetings(rig.said).length).toBeGreaterThan(0);
-  });
-
-  it("counts the faces for the greeting when YOLOX is not running", () => {
-    const fusion = new PresenceFusion();
-    fusion.observePose(0.8, 0);
-    fusion.observeFaces(2, 0);
-    expect(fusion.update(0)).toMatchObject({ present: true, people: 2 });
-    fusion.observeFaces(0, 100);
-    expect(fusion.update(100)).toMatchObject({ present: true, people: 1 });
+    expect(greetings(rig.said)).toHaveLength(1);
   });
 });
 

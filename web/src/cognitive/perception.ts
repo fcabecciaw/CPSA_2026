@@ -13,6 +13,7 @@
 
 import type { PoseStatePayload, ShowcaseObject, ShowcaseStatePayload } from "../protocol";
 import type { CognitiveEvent, PoseKind, WorldModelName } from "./events";
+import { presenceThresholds } from "./presence";
 
 export type Box = [number, number, number, number];
 
@@ -27,6 +28,11 @@ export interface PerceptionOptions {
   minScore: number;
   /** "persona" only: the board already filters people at 0.40 (C3). */
   personMinScore: number;
+  /**
+   * People in the background never count (C3): minimum person box height as
+   * a fraction of the frame, `presence.min_box_height` by default.
+   */
+  personMinHeight: () => number;
   minAreaRatio: number;
   implausibleScore: number;
   implausibleHoldMs: number;
@@ -53,6 +59,7 @@ export const DEFAULT_PERCEPTION_OPTIONS: PerceptionOptions = {
   sceneryReturnMs: 30_000,
   minScore: 0.5,
   personMinScore: 0.4,
+  personMinHeight: () => presenceThresholds().minBoxHeight,
   minAreaRatio: 0.0015,
   implausibleScore: 0.7,
   implausibleHoldMs: 2_000,
@@ -299,7 +306,7 @@ export class Perception {
       }
     }
 
-    const people = this.countPeople(state.objects, frameArea);
+    const people = this.countPeople(state.objects, frameArea, state.height);
     this.rawPeople = people.count;
     this.largestPerson = people.largest;
     if (warmup) {
@@ -571,7 +578,9 @@ export class Perception {
   private countPeople(
     objects: readonly ShowcaseObject[],
     frameArea: number,
+    frameHeight: number,
   ): { count: number; largest: Box | null } {
+    const minHeight = this.options.personMinHeight() * Math.max(1, frameHeight);
     let count = 0;
     let largest: Box | null = null;
     let largestArea = 0;
@@ -583,7 +592,10 @@ export class Perception {
       if (area < this.options.minAreaRatio * 0.5) {
         continue;
       }
-      count += 1;
+      // The gaze may still follow somebody in the background; the count not.
+      if (object.box[3] - object.box[1] >= minHeight) {
+        count += 1;
+      }
       if (area > largestArea) {
         largestArea = area;
         largest = object.box;

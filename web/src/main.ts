@@ -139,6 +139,8 @@ const presencePose = byId("presence-pose");
 const presenceState = byId("presence-state");
 const presenceSmile = byId("presence-smile");
 const presenceCue = byId("presence-cue");
+const presenceGate = byId("presence-gate");
+const presenceTracks = byId("presence-tracks");
 
 const mind = new CognitiveAgent({
   engine: new CognitiveEngine(RULEBOOK),
@@ -276,7 +278,7 @@ const faceTracker = new FaceCueTracker({
     mind.onFace(cue.kind, cue.score, cue.faces, Date.now());
   },
   // Faces are a presence source too (C3): a close visitor YOLOX misses.
-  onFaces: (sample) => mind.onFaces(sample.count, Date.now()),
+  onFaces: (sample) => mind.onFaces(sample.boxes, Date.now()),
   onStatus: () => {
     mind.setFaceStatus(faceTracker.label);
     renderMind();
@@ -343,7 +345,27 @@ function renderPresence(snapshot: MindSnapshot): void {
       : `presente · ${presence.people} ${presence.people === 1 ? "persona" : "persone"}`
     : "assente";
   const visit = presence.greeted ? " · salutato" : "";
-  setText(presenceState, `${state}${visit}`);
+  const waiting = presence.waiting > 0 ? ` · ${presence.waiting} in attesa di saluto` : "";
+  setText(presenceState, `${state}${visit}${waiting}`);
+  // The distance gate: only people at least this big count (calibratable).
+  setText(
+    presenceGate,
+    `persona h ≥ ${formatNumber(presence.thresholds.minBoxHeight, 2)} · ` +
+      `volto l ≥ ${formatNumber(presence.thresholds.minFaceWidth, 2)}`,
+  );
+  setText(
+    presenceTracks,
+    presence.tracks.length === 0
+      ? "—"
+      : presence.tracks
+          .map(
+            (track) =>
+              `${track.kind === "persona" ? "P" : "V"}${track.id} ` +
+              `${track.kind === "persona" ? "h" : "l"} ${formatNumber(track.size, 2)}` +
+              (track.atStand ? (track.greeted ? " ✓" : " ●") : " ·"),
+          )
+          .join("  "),
+  );
   const smile = faceTracker.smile;
   setText(
     presenceSmile,

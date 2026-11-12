@@ -68,6 +68,11 @@ export interface WorldFocus {
   crowd: boolean;
   /** Labels present in the world model, when the agent knows them. */
   present?: readonly string[];
+  /**
+   * Who says hello: the count rules of the rulebook ("rules", default) or the
+   * track-based arrivals of `presence.ts` ("arrivals", the live agent, C3).
+   */
+  greeter?: "rules" | "arrivals";
 }
 
 export interface UtteranceRecord {

@@ -102,8 +102,16 @@ with their score bars, the “mente” strip of the cognitive agent, the presenc
 readout and the model footer. The presence readout shows why ARI greets, says
 goodbye or reacts to a smile: one dot per presence source (YOLO person track,
 laptop face, MoveNet skeleton with score ≥ 0.3), the fused state (absent only
-after 5 s with no source), the live smile score against its per-face threshold
-and the last face cue. The choice is stored in `localStorage` (`cpsa.dashboard.ui.v1`);
+after 3 s with no source), the live smile score against its per-face threshold,
+the last face cue, the distance gate and every tracked person (`P` person box
+height, `V` face width, as fractions of the frame; `●` at the stand, `✓`
+greeted, `·` in the background). Only people at the stand count: a person box
+at least `presence.min_box_height` (0.35) of the frame high or a face at least
+`presence.min_face_width` (0.08) of the frame wide; `setPresenceThresholds` in
+`src/cognitive/presence.ts` changes them and keeps them in `localStorage`
+(`cpsa.presence.thresholds.v1`). ARI says hello to every newcomer (a track at
+the stand for 0.6 s, people arriving together get one greeting with their
+number, greetings at least 8 s apart) and goodbye only when everybody has left. The choice is stored in `localStorage` (`cpsa.dashboard.ui.v1`);
 `?debug=1` or `?debug=0` force it for one load. The CSS does the hiding:
 `<html data-ui>` hides `.debug-only` or `.presentation-only` elements.
 
