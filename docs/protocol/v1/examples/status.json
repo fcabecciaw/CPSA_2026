@@ -8,6 +8,7 @@
     "state": "running",
     "camera": "ok",
     "model": "yolox_nano",
+    "active_model": "yolox",
     "fps": 59.4,
     "dpu_ms": 4.7,
     "errors": [],

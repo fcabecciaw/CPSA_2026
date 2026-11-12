@@ -32,7 +32,18 @@ RULES: dict[str, tuple[frozenset[str], frozenset[str] | None]] = {
     "overlay": (frozenset({"protocol"}), frozenset({"cv2", "numpy"})),
     "tracker": (frozenset({"config", "yolox"}), frozenset({"numpy"})),
     "pipeline": (
-        frozenset({"protocol", "camera", "channel", "config", "overlay", "tracker", "yolox"}),
+        frozenset(
+            {
+                "protocol",
+                "camera",
+                "channel",
+                "config",
+                "movenet",
+                "overlay",
+                "tracker",
+                "yolox",
+            }
+        ),
         frozenset({"numpy"}),
     ),
     "server": (

@@ -11,9 +11,10 @@ browser that is not watching costs the pipeline nothing. It encodes at
 ``web.video_fps`` in an executor and shares one JPEG with every client.
 
 A client that reconnects gets ``hello`` and then the snapshot of the latest
-``status`` and ``showcase.state``; from then on it receives each update as it is
-drained. ``ping`` is the only command; anything else is ``error bad_command``
-(IF-103, IF-304).
+``status``, ``showcase.state`` and ``pose.state``; from then on it receives each
+update as it is drained. ``ping`` answers ``pong``; ``model.set`` is validated
+here and queued on the command channel for process A, which owns the DPU
+runners (R2-G). Anything else is ``error bad_command`` (IF-103, IF-304).
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ from aiohttp import WSMsgType, web
 from numpy.typing import NDArray
 
 from cpsa import protocol
-from cpsa.channel import MessageChannel
+from cpsa.channel import CommandChannel, MessageChannel
 from cpsa.config import WebConfig
 
 logger = logging.getLogger("cpsa.server")
@@ -92,6 +93,8 @@ class WebServer:
         config: The F-K2 ``web`` section.
         frames: The newest overlaid frame (shared memory on the board).
         messages: The snapshot channel the pipeline publishes into.
+        commands: The control channel ``model.set`` is queued on (R2-G); ``None``
+            rejects the command with ``bad_command``.
         server_version: Value of ``hello.server_version``.
         url: Optional host name the dashboard is served from; unused.
     """
@@ -102,11 +105,13 @@ class WebServer:
         *,
         frames: FrameSource,
         messages: MessageChannel,
+        commands: CommandChannel | None = None,
         server_version: str = "0.1.0",
     ) -> None:
         self._config = config
         self._frames = frames
         self._messages = messages
+        self._commands = commands
         self._server_version = server_version
         self._latest: dict[str, dict[str, Any]] = {}
         self._clients: set[_Client] = set()
@@ -244,10 +249,10 @@ class WebServer:
             client.wake.set()
 
     def _snapshot(self) -> list[tuple[str, Mapping[str, Any]]]:
-        """Latest status, then the latest state, for a client that just connected."""
+        """Latest status, then the latest states, for a client that just connected."""
         return [
             (topic, self._latest[topic])
-            for topic in ("status", "showcase.state")
+            for topic in ("status", "showcase.state", "pose.state")
             if topic in self._latest
         ]
 
@@ -496,7 +501,32 @@ class WebServer:
                 return
             self._queue(client, "pong", protocol.pong(data["id"]))
             return
+        if command == "model.set":
+            self._handle_model_set(client, ref_seq, data)
+            return
         self._bad_command(client, ref_seq, f"unknown command {command!r}")
+
+    def _handle_model_set(
+        self,
+        client: _Client,
+        ref_seq: int | None,
+        data: Mapping[str, Any],
+    ) -> None:
+        """Validate ``model.set`` and hand it to process A (R2-G).
+
+        The view switch belongs to the pipeline, which owns both DPU runners:
+        the server only checks the name and queues the command, so a malformed
+        or unknown model is rejected here and never reaches the board.
+        """
+        model = data.get("model")
+        if not isinstance(model, str) or model not in protocol.ACTIVE_MODELS:
+            self._bad_command(client, ref_seq, f"unknown model {model!r}")
+            return
+        if self._commands is None:
+            self._bad_command(client, ref_seq, "model switching is not available")
+            return
+        self._commands.put("model.set", {"model": model})
+        logger.info("client asked for the %s view (seq=%s peer=%s)", model, ref_seq, client.peer)
 
     def _bad_command(self, client: _Client, ref_seq: int | None, message: str) -> None:
         self._queue(client, "error", protocol.error("bad_command", message, ref_seq))
@@ -588,6 +618,7 @@ def serve(
     *,
     frames: FrameSource,
     messages: MessageChannel,
+    commands: CommandChannel | None = None,
     stop: threading.Event,
     ready: threading.Event | None = None,
     server_version: str = "0.1.0",
@@ -598,6 +629,7 @@ def serve(
         config: The F-K2 ``web`` section.
         frames: The shared frame channel, attached by this process.
         messages: The snapshot channel the pipeline publishes into.
+        commands: The control channel ``model.set`` goes to (process A drains it).
         stop: Set by process A (or a signal) to end the run.
         ready: Set once the server listens, so A can start the pipeline.
         server_version: Value of ``hello.server_version``.
@@ -606,7 +638,13 @@ def serve(
         ``0`` after an orderly stop and ``1`` if the server could not start.
     """
 
-    server = WebServer(config, frames=frames, messages=messages, server_version=server_version)
+    server = WebServer(
+        config,
+        frames=frames,
+        messages=messages,
+        commands=commands,
+        server_version=server_version,
+    )
     try:
         server.start()
         if ready is not None:

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "model.set.schema.json",
+  "title": "model.set data (client to server), switch the dashboard view (R2-G)",
+  "type": "object",
+  "properties": {
+    "model": {
+      "enum": [
+        "yolox",
+        "movenet"
+      ],
+      "description": "View to draw on the video and show in the dashboard: YOLOX boxes or the MoveNet skeleton. Both models keep running; an unknown value is error bad_command."
+    }
+  },
+  "required": [
+    "model"
+  ],
+  "additionalProperties": true
+}

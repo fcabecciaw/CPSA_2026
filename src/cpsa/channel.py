@@ -13,6 +13,8 @@ share exactly two things here:
 * :class:`MessageChannel` — a bounded queue of ``(topic, payload)`` snapshots.
   When it is full the oldest message is discarded, because every message is a
   snapshot of the current state and only the newest one matters.
+* :class:`CommandChannel` — the same bounded queue in the other direction, from
+  the server to the pipeline, carrying the dashboard's ``model.set`` (R2-G).
 
 Both are plain Python on top of ``multiprocessing`` primitives, so a test can
 drive them in one process with a fake queue.
@@ -32,7 +34,7 @@ from uuid import uuid4
 import numpy as np
 from numpy.typing import NDArray
 
-__all__ = ["FRAME_MAGIC", "FrameChannel", "MessageChannel"]
+__all__ = ["FRAME_MAGIC", "CommandChannel", "FrameChannel", "MessageChannel"]
 
 FRAME_MAGIC = b"CPSAFR01"
 """First eight bytes of the shared-memory header; a wrong magic is a stale buffer."""
@@ -335,3 +337,15 @@ class MessageChannel:
             return False
         self._dropped += 1
         return True
+
+
+class CommandChannel(MessageChannel):
+    """The server -> pipeline control queue (R2-G).
+
+    Process B turns a client ``model.set`` into one ``("model.set", {"model":
+    ...})`` item and process A drains it on its next frame. The shape is the
+    same ``(topic, payload)`` of :class:`MessageChannel`, but the producer is the
+    server and the consumer the pipeline; a command is idempotent (the newest
+    ``model.set`` wins), so a full queue drops the oldest one and the pipeline
+    never waits.
+    """

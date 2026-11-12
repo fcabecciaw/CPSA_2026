@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from cpsa import protocol
 
 
@@ -122,6 +124,55 @@ def test_showcase_state_rounds_and_clamps_values() -> None:
     entry = payload["objects"][0]
     assert entry["score"] == 1.0
     assert entry["box"] == [1.2, 0.0, -5.0, 480.0]
+
+
+def test_status_names_the_active_model_and_defaults_to_yolox() -> None:
+    payload = protocol.status(
+        state="running",
+        camera="ok",
+        model="yolox_nano",
+        fps=None,
+        dpu_ms=None,
+        errors=[],
+        uptime_s=0.0,
+    )
+    switched = protocol.status(
+        state="running",
+        camera="ok",
+        model="yolox_nano",
+        fps=None,
+        dpu_ms=None,
+        errors=[],
+        uptime_s=0.0,
+        active_model="movenet",
+    )
+
+    assert payload["active_model"] == "yolox"
+    assert switched["active_model"] == "movenet"
+
+
+def test_pose_state_rounds_clamps_and_keeps_seventeen_keypoints() -> None:
+    keypoints = [[1.234, 2.0, 0.913] for _ in range(17)]
+    keypoints[0] = [math.nan, -5.0, 2.0]
+
+    payload = protocol.pose_state(
+        "movenet", 640, 480, keypoints, score=0.716, fps=59.96, dpu_ms=2.54, total_ms=11.24
+    )
+
+    assert payload["model"] == "movenet"
+    assert payload["width"] == 640 and payload["height"] == 480
+    assert payload["fps"] == 60.0
+    assert payload["dpu_ms"] == 2.5
+    assert payload["total_ms"] == 11.2
+    assert payload["score"] == 0.716
+    assert len(payload["keypoints"]) == protocol.NUM_KEYPOINTS == 17
+    assert payload["keypoints"][0] == [0.0, -5.0, 1.0]
+    assert payload["keypoints"][1] == [1.2, 2.0, 0.913]
+
+
+def test_pose_state_rejects_a_keypoint_list_that_is_not_coco_17() -> None:
+    with pytest.raises(ValueError):
+        protocol.pose_state("movenet", 640, 480, [[1.0, 2.0, 0.9]] * 16, score=0.5)
 
 
 def test_error_omits_an_absent_ref_seq() -> None:

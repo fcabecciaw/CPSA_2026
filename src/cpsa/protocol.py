@@ -6,9 +6,10 @@ stamps the envelope per connection with its own ``seq``, the monotonic ``t`` and
 the wall-clock ``wall``, so nothing here reads a clock or a socket.
 
 The frozen set of server messages is ``hello``, ``status``,
-``showcase.state``, ``error`` and ``pong``; ``ping`` is the only client command.
-A missing or not-applicable value is ``null``, never an absent key, so the
-dashboard never has to guess whether a field is ``0`` or unknown.
+``showcase.state``, ``pose.state``, ``error`` and ``pong``; the client commands
+are ``ping`` and ``model.set``. A missing or not-applicable value is ``null``,
+never an absent key, so the dashboard never has to guess whether a field is
+``0`` or unknown.
 """
 
 from __future__ import annotations
@@ -19,13 +20,17 @@ from collections.abc import Mapping, Sequence
 from typing import Any, NamedTuple
 
 __all__ = [
+    "ACTIVE_MODELS",
+    "KEYPOINTS",
     "MAX_OBJECTS",
+    "NUM_KEYPOINTS",
     "PROTOCOL_VERSION",
     "ShowcaseObject",
     "envelope",
     "error",
     "hello",
     "pong",
+    "pose_state",
     "showcase_state",
     "status",
 ]
@@ -35,6 +40,32 @@ PROTOCOL_VERSION = 1
 
 MAX_OBJECTS = 20
 """``showcase.state.objects`` holds at most this many detections, best first."""
+
+ACTIVE_MODELS = ("yolox", "movenet")
+"""Values of ``status.active_model`` and of the ``model.set`` command (R2-G)."""
+
+KEYPOINTS = (
+    "nose",
+    "left_eye",
+    "right_eye",
+    "left_ear",
+    "right_ear",
+    "left_shoulder",
+    "right_shoulder",
+    "left_elbow",
+    "right_elbow",
+    "left_wrist",
+    "right_wrist",
+    "left_hip",
+    "right_hip",
+    "left_knee",
+    "right_knee",
+    "left_ankle",
+    "right_ankle",
+)
+"""COCO-17 order of ``pose.state.keypoints`` (F-E1)."""
+
+NUM_KEYPOINTS = len(KEYPOINTS)
 
 _SCORE_DIGITS = 3
 """Scores keep three decimals: ``0.913`` is already more than the label shows."""
@@ -91,6 +122,7 @@ def status(
     dpu_ms: float | None,
     errors: Sequence[str],
     uptime_s: float,
+    active_model: str = ACTIVE_MODELS[0],
 ) -> dict[str, Any]:
     """The process snapshot, published at 1 Hz and on change (F-K1).
 
@@ -98,12 +130,14 @@ def status(
     while frames arrive, ``missing`` when the node is not there and ``error``
     when it is but cannot be used. ``errors`` holds the codes of the conditions
     the process reports: ``model_missing``, ``dpu_error``, ``camera_missing``,
-    ``camera_error`` or ``internal``.
+    ``camera_error`` or ``internal``. ``active_model`` is the model whose
+    overlay the dashboard shows (R2-G): both run, the switch only picks the view.
     """
     return {
         "state": str(state),
         "camera": str(camera),
         "model": str(model),
+        "active_model": str(active_model),
         "fps": _number(fps),
         "dpu_ms": _number(dpu_ms),
         "errors": [str(code) for code in errors],
@@ -159,6 +193,57 @@ def showcase_state(
         "counts": [
             {"label": label, "count": count}
             for label, count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+        ],
+    }
+
+
+def pose_state(
+    model: str,
+    width: int,
+    height: int,
+    keypoints: Sequence[Sequence[float]],
+    *,
+    score: float,
+    fps: float | None = None,
+    dpu_ms: float | None = None,
+    total_ms: float | None = None,
+) -> dict[str, Any]:
+    """Build the ``pose.state`` payload of one MoveNet frame (F-E1, R2-G).
+
+    Args:
+        model: Name of the model that produced the pose (``movenet``).
+        width, height: Size of the frame the keypoints refer to, in pixels.
+        keypoints: :data:`NUM_KEYPOINTS` triples ``(x, y, score)`` in COCO-17
+            order, in source-image pixels.
+        score: Mean keypoint score; below ``0.2`` when nobody is in the frame.
+        fps: Processed frames per second, or ``None`` when not measured yet.
+        dpu_ms: Last MoveNet inference on the DPU, or ``None``.
+        total_ms: Last whole-chain time of the frame, or ``None``.
+
+    Returns:
+        The ``data`` object of a ``pose.state`` message.
+
+    Raises:
+        ValueError: If ``keypoints`` does not hold :data:`NUM_KEYPOINTS` triples.
+    """
+
+    if len(keypoints) != NUM_KEYPOINTS:
+        raise ValueError(f"keypoints must hold {NUM_KEYPOINTS} entries, got {len(keypoints)}")
+    return {
+        "model": str(model),
+        "width": int(width),
+        "height": int(height),
+        "fps": _number(fps),
+        "dpu_ms": _number(dpu_ms),
+        "total_ms": _number(total_ms),
+        "score": round(_score(score), _SCORE_DIGITS),
+        "keypoints": [
+            [
+                round(_pixel(float(point[0])), _PIXEL_DIGITS),
+                round(_pixel(float(point[1])), _PIXEL_DIGITS),
+                round(_score(float(point[2])), _SCORE_DIGITS),
+            ]
+            for point in keypoints
         ],
     }
 

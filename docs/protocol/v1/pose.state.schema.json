@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pose.state.schema.json",
+  "title": "pose.state data (server to client), at most movenet.publish_hz (R2-G)",
+  "type": "object",
+  "properties": {
+    "model": {
+      "type": "string",
+      "description": "Name of the pose model that produced the keypoints."
+    },
+    "width": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Width of the frame the keypoints refer to, in pixels."
+    },
+    "height": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "fps": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Processed frames per second, or null."
+    },
+    "dpu_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Last MoveNet inference on the DPU, or null."
+    },
+    "total_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Last whole-chain time of the frame, or null."
+    },
+    "score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Mean keypoint score: below 0.2 when nobody is in the frame and the keypoints may be stale."
+    },
+    "keypoints": {
+      "type": "array",
+      "minItems": 17,
+      "maxItems": 17,
+      "description": "COCO-17 order: nose, left_eye, right_eye, left_ear, right_ear, left_shoulder, right_shoulder, left_elbow, right_elbow, left_wrist, right_wrist, left_hip, right_hip, left_knee, right_knee, left_ankle, right_ankle.",
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          {
+            "type": "number",
+            "description": "x in source-image pixels."
+          },
+          {
+            "type": "number",
+            "description": "y in source-image pixels."
+          },
+          {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Keypoint score."
+          }
+        ],
+        "minItems": 3,
+        "maxItems": 3
+      }
+    }
+  },
+  "required": [
+    "model",
+    "width",
+    "height",
+    "fps",
+    "dpu_ms",
+    "total_ms",
+    "score",
+    "keypoints"
+  ],
+  "additionalProperties": true
+}

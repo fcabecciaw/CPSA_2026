@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from cpsa import __version__
-from cpsa.channel import FrameChannel, MessageChannel
+from cpsa.channel import CommandChannel, FrameChannel, MessageChannel
 from cpsa.config import ConfigError, ShowcaseConfig, load
 from cpsa.pipeline import Pipeline, StartError
 from cpsa.server import serve
@@ -76,7 +76,9 @@ def run(
     stop: threading.Event | None = None,
     channel: FrameChannel | None = None,
     messages: MessageChannel | None = None,
+    commands: CommandChannel | None = None,
     detector_factory: Callable[[Any], Any] | None = None,
+    movenet_factory: Callable[[Any], Any] | None = None,
     camera_factory: Callable[[Any], Any] | None = None,
     start_server: bool = True,
 ) -> int:
@@ -87,7 +89,9 @@ def run(
         stop: External stop request; the signal handlers set the internal one.
         channel: Pre-created frame channel (tests); the caller keeps ownership.
         messages: Pre-created message channel (tests).
+        commands: Pre-created control channel, the server-to-pipeline direction.
         detector_factory: Overrides the DPU detector (tests).
+        movenet_factory: Overrides the MoveNet runner (tests).
         camera_factory: Overrides the UVC camera (tests).
         start_server: ``False`` runs process A alone, with an in-process server
             omitted (tests of the pipeline wiring).
@@ -104,6 +108,8 @@ def run(
     )
     if messages is None:
         messages = MessageChannel(multiprocessing.Queue(maxsize=16))
+    if commands is None:
+        commands = CommandChannel(multiprocessing.Queue(maxsize=8))
     stop_event = stop if stop is not None else threading.Event()
     server_stop = multiprocessing.Event()
     server_ready = multiprocessing.Event()
@@ -117,6 +123,7 @@ def run(
                 frames.width,
                 frames.height,
                 messages.queue,
+                commands.queue,
                 server_stop,
                 server_ready,
                 config.log.level,
@@ -128,7 +135,7 @@ def run(
         if not server_ready.wait(SERVER_START_TIMEOUT_S):
             logger.error("the server process did not start within %.0f s", SERVER_START_TIMEOUT_S)
             _stop_server(server_stop, server)
-            _release(frames, messages, owns_channel)
+            _release(frames, messages, commands, owns_channel)
             return EXIT_ERROR
 
     pipeline = Pipeline(
@@ -136,7 +143,9 @@ def run(
         channel=frames,
         messages=messages,
         detector_factory=detector_factory,
+        movenet_factory=movenet_factory,
         camera_factory=camera_factory,
+        commands=commands,
     )
     remove_signals = _install_signals(stop_event)
     try:
@@ -160,7 +169,7 @@ def run(
         remove_signals()
         pipeline.stop()
         _stop_server(server_stop, server)
-        _release(frames, messages, owns_channel)
+        _release(frames, messages, commands, owns_channel)
 
 
 def _server_process(
@@ -169,6 +178,7 @@ def _server_process(
     width: int,
     height: int,
     queue: Any,
+    command_queue: Any,
     stop: Any,
     ready: Any,
     log_level: str,
@@ -178,11 +188,13 @@ def _server_process(
     _configure_logging(log_level)
     frames = FrameChannel.attach(channel_name, width, height)
     messages = MessageChannel(queue)
+    commands = CommandChannel(command_queue)
     try:
         code = serve(
             web,
             frames=frames,
             messages=messages,
+            commands=commands,
             stop=stop,
             ready=ready,
             server_version=version,
@@ -190,6 +202,7 @@ def _server_process(
     finally:
         frames.close()
         messages.close()
+        commands.close()
     raise SystemExit(code)
 
 
@@ -225,8 +238,14 @@ def _stop_server(stop: Any, server: multiprocessing.Process | None) -> None:
     logger.info("the server process exited with %s", server.exitcode)
 
 
-def _release(frames: FrameChannel, messages: MessageChannel, owns_channel: bool) -> None:
+def _release(
+    frames: FrameChannel,
+    messages: MessageChannel,
+    commands: CommandChannel,
+    owns_channel: bool,
+) -> None:
     """Close the handles; the creator also unlinks the shared memory."""
+    commands.close()
     messages.close()
     frames.close()
     if owns_channel:

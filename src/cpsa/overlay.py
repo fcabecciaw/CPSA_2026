@@ -5,6 +5,11 @@ video and the boxes can never drift apart however fast the browser is. Each box
 is a 2 px rectangle in the class colour plus a ``"<label> <score>%"`` tag; the
 colours come from a fixed palette indexed by class, so a class keeps its colour
 across frames and runs.
+
+In the MoveNet view the overlay is the COCO-17 skeleton instead (R2-G): the bones
+are drawn twice, a wide dim line under a thin bright one, which reads as a glow
+on the video, and every reliable joint gets a dot. Keypoints below
+:data:`SKELETON_MIN_SCORE` are dropped, as F-E4 requires.
 """
 
 from __future__ import annotations
@@ -17,7 +22,13 @@ from numpy.typing import NDArray
 
 from cpsa.protocol import ShowcaseObject
 
-__all__ = ["class_color", "draw_overlay"]
+__all__ = [
+    "COCO_SKELETON",
+    "SKELETON_MIN_SCORE",
+    "class_color",
+    "draw_overlay",
+    "draw_skeleton",
+]
 
 _BOX_THICKNESS = 2
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
@@ -25,6 +36,42 @@ _FONT_SCALE = 0.45
 _FONT_THICKNESS = 1
 _LABEL_PADDING = 3
 _LABEL_GAP = 4
+
+SKELETON_MIN_SCORE = 0.3
+"""A keypoint below this score is not drawn (F-E4 #25)."""
+
+COCO_SKELETON: tuple[tuple[int, int], ...] = (
+    (0, 1),
+    (0, 2),
+    (1, 3),
+    (2, 4),
+    (5, 6),
+    (5, 7),
+    (7, 9),
+    (6, 8),
+    (8, 10),
+    (5, 11),
+    (6, 12),
+    (11, 12),
+    (11, 13),
+    (13, 15),
+    (12, 14),
+    (14, 16),
+)
+"""COCO-17 bone pairs, in :data:`cpsa.protocol.KEYPOINTS` order."""
+
+_GLOW_COLOR = (0, 90, 120)
+"""Dim cyan of the wide line under each bone (RGB)."""
+
+_BONE_COLOR = (40, 255, 245)
+"""Bright cyan of the skeleton (RGB)."""
+
+_JOINT_COLOR = (235, 250, 255)
+"""Near-white dots on the reliable joints (RGB)."""
+
+_GLOW_THICKNESS = 7
+_BONE_THICKNESS = 2
+_JOINT_RADIUS = 3
 
 _PALETTE: tuple[tuple[int, int, int], ...] = (
     (230, 25, 75),
@@ -86,6 +133,60 @@ def draw_overlay(
             cv2.LINE_AA,
         )
     return overlay
+
+
+def draw_skeleton(
+    rgb: NDArray[np.uint8],
+    keypoints: Sequence[Sequence[float]],
+) -> NDArray[np.uint8]:
+    """Return a copy of ``rgb`` with the glowing COCO-17 skeleton drawn on it.
+
+    Args:
+        rgb: ``(H, W, 3)`` RGB uint8 frame.
+        keypoints: 17 ``(x, y, score)`` triples in source pixels,
+            :data:`cpsa.protocol.KEYPOINTS` order.
+
+    Returns:
+        The frame the video shows: bones as a wide dim line under a thin bright
+        one, plus a dot on every joint whose score is at least
+        :data:`SKELETON_MIN_SCORE`.
+    """
+
+    overlay = np.array(rgb, copy=True)
+    height, width = overlay.shape[:2]
+    points = [_to_point(point, width, height) for point in keypoints]
+
+    for first, second in COCO_SKELETON:
+        if first >= len(points) or second >= len(points):
+            continue
+        start, end = points[first], points[second]
+        if start is None or end is None:
+            continue
+        cv2.line(overlay, start, end, _GLOW_COLOR, _GLOW_THICKNESS, cv2.LINE_AA)
+        cv2.line(overlay, start, end, _BONE_COLOR, _BONE_THICKNESS, cv2.LINE_AA)
+
+    for point in points:
+        if point is None:
+            continue
+        cv2.circle(overlay, point, _JOINT_RADIUS, _JOINT_COLOR, -1, cv2.LINE_AA)
+    return overlay
+
+
+def _to_point(
+    point: Sequence[float],
+    width: int,
+    height: int,
+) -> tuple[int, int] | None:
+    """Clip one ``(x, y, score)`` keypoint to the image, or drop it."""
+    if len(point) < 3 or float(point[2]) < SKELETON_MIN_SCORE:
+        return None
+    x, y = float(point[0]), float(point[1])
+    if not (np.isfinite(x) and np.isfinite(y)):
+        return None
+    return (
+        min(max(int(round(x)), 0), max(width - 1, 0)),
+        min(max(int(round(y)), 0), max(height - 1, 0)),
+    )
 
 
 def _clip(

@@ -5,22 +5,26 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
 
 from cpsa.camera import CameraNotFound, VideoFrame
-from cpsa.channel import FrameChannel
+from cpsa.channel import CommandChannel, FrameChannel
 from cpsa.config import (
     CameraConfig,
     LogConfig,
     ModelConfig,
+    MovenetConfig,
     ShowcaseConfig,
     TrackerConfig,
     WebConfig,
 )
+from cpsa.movenet import MovenetPose
 from cpsa.pipeline import Pipeline, StartError, cap_admits
 from cpsa.yolox import Detection
 
@@ -113,7 +117,55 @@ class SyncDetector:
         return list(self.detections)
 
 
+class FakePoseDetector:
+    """The MoveNet runner as the loop sees it: a token and one pose."""
+
+    def __init__(self, pose: MovenetPose | None = None) -> None:
+        self.pose = pose if pose is not None else DEFAULT_POSE
+        self.stage_ms = {"preprocess": 0.4, "dpu": 1.5, "decode": 0.3}
+        self.calls: list[str] = []
+        self._token = 0
+
+    def submit(self, rgb: np.ndarray) -> int:
+        self.calls.append("submit")
+        self._token += 1
+        return self._token
+
+    def wait(self, token: int) -> MovenetPose:
+        self.calls.append("wait")
+        return self.pose
+
+
+class FakeQueue:
+    """The ``multiprocessing`` queue surface the command channel needs."""
+
+    def __init__(self, maxsize: int = 8) -> None:
+        self._items: deque[tuple[str, dict[str, Any]]] = deque()
+        self._maxsize = maxsize
+
+    def put_nowait(self, item: tuple[str, dict[str, Any]]) -> None:
+        if len(self._items) >= self._maxsize:
+            import queue
+
+            raise queue.Full
+        self._items.append(item)
+
+    def get_nowait(self) -> tuple[str, dict[str, Any]]:
+        if not self._items:
+            import queue
+
+            raise queue.Empty
+        return self._items.popleft()
+
+    def close(self) -> None:
+        pass
+
+
 PERSON = Detection(box=(1.0, 1.0, 5.0, 3.0), score=0.75, class_id=0)
+KEYPOINTS = np.array(
+    [[1.0 + index % 6, 1.0 + index // 6, 0.9] for index in range(17)], dtype=np.float32
+)
+DEFAULT_POSE = MovenetPose(keypoints=KEYPOINTS, score=0.75)
 
 DEFAULT_TRACKER = TrackerConfig(
     enabled=True,
@@ -139,9 +191,13 @@ def config(
     width: int = WIDTH,
     height: int = HEIGHT,
     tracker: TrackerConfig | None = None,
+    movenet_enabled: bool = True,
+    publish_hz: float = 30.0,
 ) -> ShowcaseConfig:
     model = tmp_path / "yolox_nano.xmodel"
     model.write_bytes(b"fake xmodel")
+    movenet_model = tmp_path / "movenet.xmodel"
+    movenet_model.write_bytes(b"fake movenet xmodel")
     return ShowcaseConfig(
         camera=CameraConfig(
             device="auto",
@@ -158,6 +214,7 @@ def config(
         ),
         tracker=tracker if tracker is not None else DEFAULT_TRACKER,
         model=ModelConfig(path=model, conf_thr=0.35, iou_thr=0.45),
+        movenet=MovenetConfig(path=movenet_model, enabled=movenet_enabled, publish_hz=publish_hz),
         labels="it",
         web=WebConfig(
             host="127.0.0.1",
@@ -174,18 +231,30 @@ def build(
     tmp_path: Path,
     *,
     detector: object | None = None,
+    pose: FakePoseDetector | None = None,
     camera: FakeCamera | None = None,
     tracker: TrackerConfig | None = None,
+    commands: CommandChannel | None = None,
+    movenet_enabled: bool = True,
+    publish_hz: float = 30.0,
 ) -> tuple[Pipeline, FakeCamera, Sink, FrameChannel]:
     camera = camera if camera is not None else FakeCamera()
+    pose = pose if pose is not None else FakePoseDetector()
     sink = Sink()
     channel = FrameChannel.create(WIDTH, HEIGHT)
     pipeline = Pipeline(
-        config(tmp_path, tracker=tracker),
+        config(
+            tmp_path,
+            tracker=tracker,
+            movenet_enabled=movenet_enabled,
+            publish_hz=publish_hz,
+        ),
         channel=channel,
         messages=sink,  # type: ignore[arg-type]
         detector_factory=lambda model: detector if detector is not None else FakeDetector(),
+        movenet_factory=lambda settings: pose,
         camera_factory=lambda settings: camera,
+        commands=commands,
     )
     return pipeline, camera, sink, channel
 
@@ -266,6 +335,7 @@ def test_a_missing_model_fails_before_the_camera_opens(tmp_path: Path) -> None:
             camera=pipeline._config.camera,
             tracker=pipeline._config.tracker,
             model=ModelConfig(path=tmp_path / "missing.xmodel", conf_thr=0.35, iou_thr=0.45),
+            movenet=pipeline._config.movenet,
             labels="it",
             web=pipeline._config.web,
             log=pipeline._config.log,
@@ -323,6 +393,7 @@ def test_a_camera_that_cannot_open_reports_the_failure(
         channel=channel,
         messages=sink,  # type: ignore[arg-type]
         detector_factory=lambda model: FakeDetector(),
+        movenet_factory=lambda settings: FakePoseDetector(),
         camera_factory=lambda settings: Broken(),
     )
     try:
@@ -586,6 +657,8 @@ def test_the_stage_timings_are_logged_once_per_period(
 
     assert "showcase stages over" in caplog.text
     assert "track=" in caplog.text
+    assert "movenet_dpu=" in caplog.text
+    assert "movenet_decode=" in caplog.text
     assert "total_fps=" in caplog.text
 
 
@@ -606,3 +679,187 @@ def test_status_reports_starting_before_the_loop_and_running_after(tmp_path: Pat
     assert running["camera"] == "ok"
     assert running["model"] == "yolox_nano"
     assert running["fps"] is not None and running["fps"] >= 0.0
+
+
+# --------------------------------------------------------------------------- #
+# MoveNet alongside YOLOX (R2-G)
+# --------------------------------------------------------------------------- #
+
+
+def test_both_models_run_on_every_frame(tmp_path: Path) -> None:
+    detector = FakeDetector([PERSON])
+    pose = FakePoseDetector()
+    pipeline, camera, sink, channel = build(tmp_path, detector=detector, pose=pose)
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            feed(camera, 4)
+            wait_until(lambda: pose.calls.count("wait") >= 2)
+            wait_until(lambda: sink.topics("pose.state"))
+            payload = sink.topics("pose.state")[0]
+    finally:
+        channel.close()
+        channel.unlink()
+
+    # Both runners pipeline the same way: frame N is submitted before N-1 waits.
+    assert detector.calls[:3] == ["submit", "submit", "wait"]
+    assert pose.calls[:3] == ["submit", "submit", "wait"]
+    assert payload["model"] == "movenet"
+    assert payload["width"] == WIDTH and payload["height"] == HEIGHT
+    assert len(payload["keypoints"]) == 17
+    assert payload["score"] == 0.75
+    # The YOLOX state still reaches the dashboard in the YOLOX view.
+    assert sink.topics("showcase.state")
+
+
+def test_pose_state_is_throttled_to_the_configured_rate(tmp_path: Path) -> None:
+    pipeline, camera, sink, channel = build(tmp_path, publish_hz=5.0)
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            feed(camera, 8, delay=0.07)
+            wait_until(lambda: sink.topics("pose.state"))
+            time.sleep(0.05)
+    finally:
+        channel.close()
+        channel.unlink()
+
+    poses = sink.topics("pose.state")
+    assert 1 <= len(poses) <= 4
+    assert len(sink.topics("showcase.state")) >= len(poses)
+
+
+def test_the_view_switch_selects_the_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cpsa import pipeline as pipeline_module
+
+    drawn: list[str] = []
+
+    def boxes(rgb: np.ndarray, objects: object) -> np.ndarray:
+        drawn.append("boxes")
+        return rgb
+
+    def skeleton(rgb: np.ndarray, keypoints: object) -> np.ndarray:
+        drawn.append("skeleton")
+        return rgb
+
+    monkeypatch.setattr(pipeline_module, "draw_overlay", boxes)
+    monkeypatch.setattr(pipeline_module, "draw_skeleton", skeleton)
+    pipeline, camera, sink, channel = build(tmp_path, detector=FakeDetector([PERSON]))
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            feed(camera, 3)
+            wait_until(lambda: "boxes" in drawn)
+            objects_before = len(sink.topics("showcase.state"))
+            assert pipeline.set_model("movenet") is True
+            wait_until(lambda: pipeline.status()["active_model"] == "movenet")
+            feed(camera, 4, delay=0.08)
+            wait_until(lambda: "skeleton" in drawn)
+            time.sleep(0.15)
+            objects_after = len(sink.topics("showcase.state"))
+            poses = len(sink.topics("pose.state"))
+    finally:
+        channel.close()
+        channel.unlink()
+
+    assert drawn[0] == "boxes"
+    # F-E1: showcase.state belongs to the YOLOX view; pose.state flows anyway.
+    assert objects_after == objects_before
+    assert poses >= 1
+
+
+def test_a_model_set_command_reaches_the_pipeline(tmp_path: Path) -> None:
+    commands = CommandChannel(FakeQueue())
+    pipeline, camera, sink, channel = build(tmp_path, commands=commands)
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            commands.put("model.set", {"model": "movenet"})
+            wait_until(lambda: pipeline.status()["active_model"] == "movenet")
+            feed(camera)
+            wait_until(lambda: sink.topics("status")[-1]["active_model"] == "movenet")
+    finally:
+        channel.close()
+        channel.unlink()
+
+    assert sink.topics("status")[-1]["active_model"] == "movenet"
+
+
+def test_an_unknown_model_is_rejected_without_switching(tmp_path: Path) -> None:
+    pipeline, camera, _sink, channel = build(tmp_path)
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            assert pipeline.set_model("medical") is False
+            assert pipeline.status()["active_model"] == "yolox"
+            assert pipeline.set_model("movenet") is True
+            assert pipeline.status()["active_model"] == "movenet"
+    finally:
+        channel.close()
+        channel.unlink()
+
+
+def test_movenet_disabled_runs_yolox_only(tmp_path: Path) -> None:
+    calls: list[str] = []
+
+    def factory(settings: object) -> FakePoseDetector:
+        calls.append("built")
+        return FakePoseDetector()
+
+    sink = Sink()
+    channel = FrameChannel.create(WIDTH, HEIGHT)
+    camera = FakeCamera()
+    pipeline = Pipeline(
+        config(tmp_path, movenet_enabled=False),
+        channel=channel,
+        messages=sink,  # type: ignore[arg-type]
+        detector_factory=lambda model: FakeDetector([PERSON]),
+        movenet_factory=factory,
+        camera_factory=lambda settings: camera,
+    )
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            feed(camera, 4)
+            wait_until(lambda: sink.topics("showcase.state"))
+            time.sleep(0.1)
+            assert pipeline.set_model("movenet") is False
+    finally:
+        channel.close()
+        channel.unlink()
+
+    assert calls == []
+    assert sink.topics("pose.state") == []
+    assert pipeline.status()["active_model"] == "yolox"
+
+
+def test_a_movenet_failure_does_not_stop_the_yolox_loop(tmp_path: Path) -> None:
+    class FlakyPose(FakePoseDetector):
+        def submit(self, rgb: np.ndarray) -> int:
+            if not self.calls:
+                self.calls.append("submit")
+                raise RuntimeError("MoveNet DPU job failed")
+            return super().submit(rgb)
+
+    detector = FakeDetector([PERSON])
+    pose = FlakyPose()
+    pipeline, camera, sink, channel = build(tmp_path, detector=detector, pose=pose)
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            camera.push()
+            wait_until(
+                lambda: sink.topics("status") and "dpu_error" in sink.topics("status")[-1]["errors"]
+            )
+            feed(camera, 4)
+            wait_until(lambda: sink.topics("showcase.state"))
+    finally:
+        channel.close()
+        channel.unlink()
+
+    # The YOLOX path keeps going and the next frame submits MoveNet again.
+    assert detector.calls.count("wait") >= 2
+    assert pose.calls.count("submit") >= 2
+    assert sink.topics("showcase.state")

@@ -47,6 +47,7 @@ def test_builder_output_validates() -> None:
     object_ = protocol.ShowcaseObject(
         label="persona", class_id=0, score=0.913, box=(120.5, 48.0, 380.2, 470.0)
     )
+    keypoints = [[float(index * 10), float(index * 20), 0.5] for index in range(17)]
     messages = [
         _server("hello", protocol.hello("0.1.0")),
         _server(
@@ -67,12 +68,38 @@ def test_builder_output_validates() -> None:
                 "yolox_nano", 640, 480, [object_], fps=59.4, dpu_ms=4.7, total_ms=11.2
             ),
         ),
+        _server(
+            "pose.state",
+            protocol.pose_state(
+                "movenet",
+                640,
+                480,
+                keypoints,
+                score=0.71,
+                fps=59.4,
+                dpu_ms=2.5,
+                total_ms=11.2,
+            ),
+        ),
         _server("error", protocol.error("bad_command", "unknown command")),
         _server("pong", protocol.pong(7)),
     ]
 
     for message in messages:
         validate_server_message(message)
+
+
+def test_the_model_set_command_validates() -> None:
+    validate_client_message({"v": 1, "type": "model.set", "seq": 2, "data": {"model": "movenet"}})
+
+
+def test_an_unknown_active_model_is_rejected() -> None:
+    data = protocol.status(
+        state="running", camera="ok", model="m", fps=None, dpu_ms=None, errors=[], uptime_s=0.0
+    )
+    data["active_model"] = "medical"
+    with pytest.raises(ValidationError):
+        validate_server_message(_server("status", data))
 
 
 def test_envelope_rejects_zero_seq() -> None:

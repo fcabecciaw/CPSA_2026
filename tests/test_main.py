@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import queue
 import socket
@@ -16,6 +17,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from aiohttp import ClientSession
 
 from cpsa import __main__ as entry
 from cpsa.camera import VideoFrame
@@ -24,10 +26,12 @@ from cpsa.config import (
     CameraConfig,
     LogConfig,
     ModelConfig,
+    MovenetConfig,
     ShowcaseConfig,
     TrackerConfig,
     WebConfig,
 )
+from cpsa.movenet import MovenetPose
 from cpsa.yolox import Detection
 
 WIDTH, HEIGHT = 16, 8
@@ -91,6 +95,20 @@ class FakeDetector:
         return [PERSON]
 
 
+class FakePoseDetector:
+    """The MoveNet runner of process A, without the VART bindings."""
+
+    def __init__(self) -> None:
+        self.stage_ms = {"preprocess": 0.4, "dpu": 1.5, "decode": 0.3}
+        self.keypoints = np.tile(np.array([4.0, 2.0, 0.9], dtype=np.float32), (17, 1))
+
+    def submit(self, rgb: np.ndarray) -> int:
+        return 1
+
+    def wait(self, token: int) -> MovenetPose:
+        return MovenetPose(keypoints=self.keypoints, score=0.9)
+
+
 def free_port() -> int:
     with socket.socket() as socket_:
         socket_.bind(("127.0.0.1", 0))
@@ -103,6 +121,9 @@ def showcase_config(
     model = tmp_path / "yolox_nano.xmodel"
     if not model.exists():
         model.write_bytes(b"fake xmodel")
+    movenet = tmp_path / "movenet.xmodel"
+    if not movenet.exists():
+        movenet.write_bytes(b"fake movenet xmodel")
     static = static_dir if static_dir is not None else tmp_path / "dist"
     static.mkdir(parents=True, exist_ok=True)
     (static / "index.html").write_text("<html>cpsa</html>", encoding="utf-8")
@@ -130,6 +151,7 @@ def showcase_config(
             max_misses=6,
         ),
         model=ModelConfig(path=model, conf_thr=0.35, iou_thr=0.45),
+        movenet=MovenetConfig(path=movenet, enabled=True, publish_hz=30.0),
         labels="it",
         web=WebConfig(
             host="127.0.0.1",
@@ -202,6 +224,7 @@ def test_an_orderly_stop_returns_zero(tmp_path: Path) -> None:
             stop=stop,
             messages=messages,
             detector_factory=lambda model: FakeDetector(),
+            movenet_factory=lambda settings: FakePoseDetector(),
             camera_factory=lambda settings: camera,
             start_server=False,
         )
@@ -233,6 +256,29 @@ def test_a_missing_model_exits_with_two_and_publishes_the_error(tmp_path: Path) 
         config,
         messages=messages,
         detector_factory=lambda model: FakeDetector(),
+        movenet_factory=lambda settings: FakePoseDetector(),
+        camera_factory=lambda settings: camera,
+        start_server=False,
+    )
+
+    published = topics(messages, "status")
+    assert code == entry.EXIT_START
+    assert camera.starts == 0
+    assert published[-1]["state"] == "error"
+    assert published[-1]["errors"] == ["model_missing"]
+
+
+def test_a_missing_movenet_model_exits_with_two(tmp_path: Path) -> None:
+    config = showcase_config(tmp_path)
+    config.movenet.path.unlink()
+    messages = MessageChannel(FakeQueue())
+    camera = FakeCamera()
+
+    code = entry.run(
+        config,
+        messages=messages,
+        detector_factory=lambda model: FakeDetector(),
+        movenet_factory=lambda settings: FakePoseDetector(),
         camera_factory=lambda settings: camera,
         start_server=False,
     )
@@ -255,6 +301,7 @@ def test_a_detector_that_cannot_load_exits_with_two(tmp_path: Path) -> None:
         config,
         messages=messages,
         detector_factory=factory,
+        movenet_factory=lambda settings: FakePoseDetector(),
         camera_factory=lambda settings: FakeCamera(),
         start_server=False,
     )
@@ -266,6 +313,60 @@ def test_a_detector_that_cannot_load_exits_with_two(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # The two processes
 # --------------------------------------------------------------------------- #
+
+
+def test_a_model_set_command_switches_the_view_of_process_a(tmp_path: Path) -> None:
+    """The whole chain: client -> server B -> command channel -> pipeline A."""
+    config = showcase_config(tmp_path)
+    camera = FakeCamera()
+    stop = threading.Event()
+    result: dict[str, int] = {}
+
+    def target() -> None:
+        result["code"] = entry.run(
+            config,
+            stop=stop,
+            detector_factory=lambda model: FakeDetector(),
+            movenet_factory=lambda settings: FakePoseDetector(),
+            camera_factory=lambda settings: camera,
+            start_server=True,
+        )
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{config.web.port}/ws"
+    try:
+        wait_until(lambda: camera.on_frame is not None)
+
+        def switch_view() -> str:
+            async def scenario() -> str:
+                async with ClientSession() as session:
+                    ws = await session.ws_connect(url)
+                    try:
+                        await ws.send_json(
+                            {"v": 1, "type": "model.set", "data": {"model": "movenet"}}
+                        )
+                        for _ in range(200):
+                            message = await ws.receive_json(timeout=1.0)
+                            if (
+                                message["type"] == "status"
+                                and message["data"]["active_model"] == "movenet"
+                            ):
+                                return str(message["data"]["active_model"])
+                        raise AssertionError("the view never switched")
+                    finally:
+                        await ws.close()
+
+            return asyncio.run(scenario())
+
+        active = switch_view()
+    finally:
+        stop.set()
+        thread.join(15.0)
+
+    assert not thread.is_alive()
+    assert result["code"] == entry.EXIT_OK
+    assert active == "movenet"
 
 
 def test_the_two_processes_serve_the_dashboard_together(tmp_path: Path) -> None:
@@ -280,6 +381,7 @@ def test_the_two_processes_serve_the_dashboard_together(tmp_path: Path) -> None:
             config,
             stop=stop,
             detector_factory=lambda model: FakeDetector(),
+            movenet_factory=lambda settings: FakePoseDetector(),
             camera_factory=lambda settings: camera,
             start_server=True,
         )
@@ -327,6 +429,7 @@ def test_the_shared_memory_of_a_run_is_unlinked(tmp_path: Path) -> None:
             config,
             stop=stop,
             detector_factory=lambda model: FakeDetector(),
+            movenet_factory=lambda settings: FakePoseDetector(),
             camera_factory=lambda settings: camera,
             start_server=False,
         )

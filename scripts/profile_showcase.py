@@ -9,16 +9,20 @@ frame, which is what the coordinator re-runs after a deploy::
     cd ~/cpsa && PYTHONPATH=src python3 scripts/profile_showcase.py
 
 With ``--model models/yolox_nano.xmodel`` the real graph runs on the DPU through
-:class:`~cpsa.yolox.YoloxDetector`: preprocess, DPU and
-decode are timed by ``submit``/``wait``, exactly as the showcase loop drives
-them.  Without it the DPU stage reports ``--dpu-ms`` (a wired-in stand-in, 4.7 ms
-by default) and the CPU stages are measured for real.
+:class:`~cpsa.yolox.YoloxDetector`, and with ``--movenet-model
+models/movenet.xmodel`` the real MoveNet graph runs through
+:class:`~cpsa.movenet.DpuMovenet`: preprocess, DPU and decode are timed by
+``submit``/``wait``, exactly as the showcase loop drives them. Without them the
+DPU stages report the wired-in stand-ins (``--dpu-ms`` 4.7 ms for YOLOX,
+``--movenet-dpu-ms`` 2.5 ms for MoveNet, the board measurements) and the CPU
+stages are measured for real.
 
 The report is one line per stage (mean, median, p95) plus the honest loop
-estimate: with the DPU overlapping the CPU work of the previous frame, a frame
-costs ``max(preprocess + dpu, decode + draw + encode)``; the JPEG encode runs on
-the web server's own thread.  The 60 fps budget is 16.7 ms, the old 25 fps
-target 40 ms.
+estimate for both models (R2-G): the single DPU runs the YOLOX and the MoveNet
+job of frame N while the CPU decodes, draws and encodes frame N-1, so a frame
+costs ``max(both preprocesses + both dpu stages, camera + both decodes + draw)``;
+the JPEG encode runs on the web server's own thread. The 60 fps budget is
+16.7 ms, the old 25 fps target 40 ms.
 
 Exit status is 0 when the measurement ran; ``--target-ms`` only labels the
 PASS/FAIL column.
@@ -41,6 +45,9 @@ FRAME_SIZE = (480, 640)
 DEFAULT_RUNS = 40
 DEFAULT_DPU_MS = 4.7
 """Board measurement of the YOLOX DPU run (2026-11-12), used without ``--model``."""
+
+DEFAULT_MOVENET_DPU_MS = 2.5
+"""Expected MoveNet DPU run, used without ``--movenet-model`` (R2-G budget)."""
 
 JPEG_QUALITY = 70
 
@@ -119,6 +126,54 @@ def synthetic_heads() -> list[NDArray[np.int8]]:
     return heads
 
 
+def synthetic_movenet_heads() -> tuple[NDArray[np.float64], ...]:
+    """A plausible MoveNet decode input: one person's peak on every heatmap.
+
+    Shapes are the compiled graph's (17/1/34/34 channels at 48x48); the values
+    are logits around the threshold with a small peak, which is the cheap path of
+    :func:`cpsa.movenet.decode` (the loop always decodes all 17 keypoints).
+    """
+
+    generator = np.random.default_rng(20261112)
+    heatmaps = generator.normal(-4.0, 0.5, size=(17, 48, 48))
+    centers = generator.normal(-4.0, 0.5, size=(1, 48, 48))
+    regs = generator.normal(0.0, 2.0, size=(34, 48, 48))
+    offsets = generator.uniform(-0.5, 0.5, size=(34, 48, 48))
+    heatmaps[:, 24, 24] = 3.0
+    centers[0, 24, 24] = 3.0
+    return (heatmaps, centers, regs, offsets)
+
+
+def synthetic_keypoints(width: int, height: int) -> NDArray[np.float32]:
+    """A standing person's COCO-17 keypoints in source pixels."""
+
+    points = np.array(
+        [
+            (0.50, 0.18),
+            (0.47, 0.16),
+            (0.53, 0.16),
+            (0.45, 0.17),
+            (0.55, 0.17),
+            (0.40, 0.30),
+            (0.60, 0.30),
+            (0.35, 0.45),
+            (0.65, 0.45),
+            (0.33, 0.60),
+            (0.67, 0.60),
+            (0.43, 0.62),
+            (0.57, 0.62),
+            (0.42, 0.80),
+            (0.58, 0.80),
+            (0.41, 0.97),
+            (0.59, 0.97),
+        ],
+        dtype=np.float32,
+    )
+    points[:, 0] *= float(width)
+    points[:, 1] *= float(height)
+    return np.column_stack([points, np.full(17, 0.8, dtype=np.float32)]).astype(np.float32)
+
+
 def timed(runs: int, function: Callable[[], object]) -> list[float]:
     """Run ``function`` ``runs`` times and return the milliseconds of each run."""
 
@@ -163,6 +218,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="compiled .xmodel to run on the DPU; without it --dpu-ms is assumed",
     )
     parser.add_argument("--dpu-ms", type=float, default=DEFAULT_DPU_MS)
+    parser.add_argument(
+        "--movenet-model",
+        default=None,
+        help="compiled MoveNet .xmodel to run on the DPU; without it --movenet-dpu-ms is assumed",
+    )
+    parser.add_argument("--movenet-dpu-ms", type=float, default=DEFAULT_MOVENET_DPU_MS)
     parser.add_argument("--width", type=int, default=FRAME_SIZE[1])
     parser.add_argument("--height", type=int, default=FRAME_SIZE[0])
     parser.add_argument("--target-ms", type=float, default=1000.0 / 60.0)
@@ -182,7 +243,19 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     from cpsa.camera import yuyv_to_rgb
     from cpsa.dpu import input_quantization_lut_scaled
-    from cpsa.overlay import draw_overlay
+    from cpsa.movenet import (
+        MOVENET_INPUT_SCALE,
+        MOVENET_INPUT_SIZE,
+        DpuMovenet,
+        MovenetHeads,
+    )
+    from cpsa.movenet import (
+        decode as decode_movenet,
+    )
+    from cpsa.movenet import (
+        preprocess_into as preprocess_movenet_into,
+    )
+    from cpsa.overlay import draw_overlay, draw_skeleton
     from cpsa.protocol import ShowcaseObject
     from cpsa.yolox import (
         YOLOX_INPUT_SIZE,
@@ -231,7 +304,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     def draw() -> None:
         draw_overlay(frame, objects)
 
-    draw_ms = report("draw", timed(args.runs, draw), args.target_ms)
+    report("draw", timed(args.runs, draw), args.target_ms)
 
     overlay = draw_overlay(frame, objects)
 
@@ -298,13 +371,90 @@ def main(argv: Sequence[str] | None = None) -> int:
             note="assumed, pass --model to measure",
         )
 
-    # Pipelined loop: the DPU runs frame N while the CPU decodes and draws N-1.
-    cpu_ms = camera_cv2 + preprocess_ms + decode_ms + draw_ms
-    loop_ms = max(preprocess_ms + dpu_ms, cpu_ms)
+    # -- MoveNet: the second DPU runner, on the same frames (R2-G) -------------
+    movenet_lut = input_quantization_lut_scaled(6, MOVENET_INPUT_SCALE)
+    movenet_view = np.empty((*MOVENET_INPUT_SIZE, 3), dtype=np.int8)
+
+    def movenet_preprocess() -> None:
+        preprocess_movenet_into(frame, movenet_lut, movenet_view)
+
+    movenet_preprocess_ms = report(
+        "movenet pre", timed(args.runs, movenet_preprocess), args.target_ms
+    )
+
+    keypoints = synthetic_keypoints(args.width, args.height)
+
+    def skeleton() -> None:
+        draw_skeleton(frame, keypoints)
+
+    skeleton_ms = report("skeleton draw", timed(args.runs, skeleton), args.target_ms)
+
+    movenet_dpu_ms = args.movenet_dpu_ms
+    movenet_decode_ms = 0.0
+    if args.movenet_model:
+        pose_detector = DpuMovenet(args.movenet_model)
+        pose_tokens: list[int] = []
+
+        def movenet_cycle() -> None:
+            pose_tokens.append(pose_detector.submit(frame))
+            pose_detector.wait(pose_tokens.pop())
+
+        for _ in range(2):
+            movenet_cycle()
+        pose_dpu_times: list[float] = []
+        pose_decode_times: list[float] = []
+        pose_preprocess_times: list[float] = []
+        for _ in range(args.runs):
+            movenet_cycle()
+            pose_stage = pose_detector.stage_ms
+            pose_preprocess_times.append(pose_stage["preprocess"])
+            pose_dpu_times.append(pose_stage["dpu"])
+            pose_decode_times.append(pose_stage["decode"])
+        movenet_preprocess_ms = report("movenet pre", pose_preprocess_times, args.target_ms)
+        movenet_dpu_ms = report("movenet dpu", pose_dpu_times, args.target_ms, note="graph")
+        movenet_decode_ms = report(
+            "movenet decode", pose_decode_times, args.target_ms, note="17 keypoints"
+        )
+    else:
+        heatmaps, centers, regs, offsets = synthetic_movenet_heads()
+        movenet_heads = MovenetHeads(heatmaps=heatmaps, centers=centers, regs=regs, offsets=offsets)
+        movenet_decode_ms = report(
+            "movenet decode",
+            timed(
+                args.runs,
+                lambda: decode_movenet(movenet_heads, size=(args.height, args.width)),
+            ),
+            args.target_ms,
+            note="17 keypoints",
+        )
+        movenet_dpu_ms = report(
+            "movenet dpu",
+            [args.movenet_dpu_ms] * args.runs,
+            args.target_ms,
+            note="assumed, pass --movenet-model to measure",
+        )
+
+    # Pipelined loop: the DPU runs both jobs of frame N while the CPU decodes
+    # and draws N-1. The two graphs are serialized on the one DPU.
+    dpu_frame_ms = preprocess_ms + movenet_preprocess_ms + dpu_ms + movenet_dpu_ms
+    cpu_ms = (
+        camera_cv2
+        + preprocess_ms
+        + decode_ms
+        + movenet_preprocess_ms
+        + movenet_decode_ms
+        + skeleton_ms
+    )
+    loop_ms = max(dpu_frame_ms, cpu_ms)
     print(
-        f"\npipelined loop: max(preprocess+dpu={preprocess_ms + dpu_ms:.2f}, "
-        f"camera+preprocess+decode+draw={cpu_ms:.2f}) = {loop_ms:.2f} ms "
+        f"\npipelined loop (YOLOX + MoveNet): max(preprocess+dpu={dpu_frame_ms:.2f}, "
+        f"camera+preprocess+decode+skeleton={cpu_ms:.2f}) = {loop_ms:.2f} ms "
         f"-> {1000.0 / loop_ms:.1f} fps"
+    )
+    print(
+        f"board estimate: {dpu_ms:.2f} ms YOLOX DPU + {movenet_dpu_ms:.2f} ms MoveNet DPU "
+        f"= {dpu_ms + movenet_dpu_ms:.2f} ms of DPU per frame; the CPU stages overlap, so "
+        f"{loop_ms:.2f} ms/frame -> {1000.0 / loop_ms:.1f} fps"
     )
     print(
         f"web encoder thread: jpeg={jpeg_ms:.2f} ms "

@@ -9,7 +9,7 @@
     },
     "type": {
       "type": "string",
-      "description": "The only command is 'ping'."
+      "description": "A client command: 'ping' or 'model.set'."
     },
     "data": {
       "type": "object"

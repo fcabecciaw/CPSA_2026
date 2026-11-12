@@ -14,6 +14,7 @@ camera:  { device: auto, match: RealSense, width: 640, height: 480, fps: 60,
 tracker: { enabled: true, iou_match: 0.3, alpha: 0.35, fast_alpha: 0.8,
            deadband_iou: 0.9, min_hits: 2, max_misses: 6 }
 model:   { path: models/yolox_nano.xmodel, conf_thr: 0.35, iou_thr: 0.45 }
+movenet: { path: models/movenet.xmodel, enabled: true, publish_hz: 30 }
 labels: it
 web:     { host: 0.0.0.0, port: 8080, video_fps: 60, jpeg_quality: 70,
            static_dir: web/dist }
@@ -38,6 +39,7 @@ __all__ = [
     "ConfigError",
     "LogConfig",
     "ModelConfig",
+    "MovenetConfig",
     "ShowcaseConfig",
     "TrackerConfig",
     "WebConfig",
@@ -158,6 +160,25 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class MovenetConfig:
+    """The single-pose skeleton model that runs alongside YOLOX (R2-G).
+
+    ``path`` is the compiled ``.xmodel`` the second DPU runner loads;
+    ``enabled: false`` leaves it out of the process (YOLOX only) and
+    ``publish_hz`` caps ``pose.state``, independently of the frame rate.
+    """
+
+    path: Path
+    enabled: bool
+    publish_hz: float
+
+    @property
+    def name(self) -> str:
+        """The model name on the wire: the file's stem (``movenet``)."""
+        return self.path.stem
+
+
+@dataclass(frozen=True)
 class WebConfig:
     """HTTP and WebSocket endpoint (F-K2)."""
 
@@ -182,6 +203,7 @@ class ShowcaseConfig:
     camera: CameraConfig
     tracker: TrackerConfig
     model: ModelConfig
+    movenet: MovenetConfig
     labels: str
     web: WebConfig
     log: LogConfig
@@ -208,12 +230,19 @@ def parse(data: object) -> ShowcaseConfig:
     camera = _camera_config(root.section("camera"))
     tracker = _tracker_config(root.section("tracker"))
     model = _model_config(root.section("model"))
+    movenet = _movenet_config(root.section("movenet"))
     labels = root.choice("labels", LABEL_LANGUAGES)
     web = _web_config(root.section("web"))
     log = LogConfig(level=root.section("log").choice("level", LOG_LEVELS))
-    root.reject_unknown(("camera", "tracker", "model", "labels", "web", "log"))
+    root.reject_unknown(("camera", "tracker", "model", "movenet", "labels", "web", "log"))
     return ShowcaseConfig(
-        camera=camera, tracker=tracker, model=model, labels=labels, web=web, log=log
+        camera=camera,
+        tracker=tracker,
+        model=model,
+        movenet=movenet,
+        labels=labels,
+        web=web,
+        log=log,
     )
 
 
@@ -258,6 +287,16 @@ def _model_config(model: _Section) -> ModelConfig:
         iou_thr=model.fraction("iou_thr"),
     )
     model.reject_unknown()
+    return config
+
+
+def _movenet_config(movenet: _Section) -> MovenetConfig:
+    config = MovenetConfig(
+        path=Path(movenet.text("path")).expanduser(),
+        enabled=movenet.boolean("enabled"),
+        publish_hz=movenet.positive("publish_hz"),
+    )
+    movenet.reject_unknown()
     return config
 
 

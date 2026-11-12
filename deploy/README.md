@@ -1,15 +1,17 @@
 # Deploying the showcase
 
 `deploy/deploy.sh` installs the showcase on the KV260 and enables it at boot.
-It copies the repository, the built dashboard and the compiled model, syncs the
-Python environment, installs two systemd units and verifies the result through
-`/health`.
+It copies the repository, the built dashboard and the two compiled models (YOLOX
+and MoveNet), syncs the Python environment, installs two systemd units and
+verifies the result through `/health`.
 
 ```sh
 npm --prefix web ci && npm --prefix web run build
 deploy/deploy.sh --model build/vitis/yolox_nano/compiled/yolox_nano.xmodel
 ```
 
+`--movenet-model PATH` defaults to
+`build/vitis/movenet/compiled/movenet.xmodel` (from `tools/vitis/zoo_movenet.sh`).
 Options (`deploy/deploy.sh --help`): `--host` (default `10.42.0.83`), `--user`
 (default `kria`), `--wheels DIR` for an offline install, `--no-restart`,
 `--dry-run` (prints every command and touches nothing).
@@ -19,15 +21,16 @@ Options (`deploy/deploy.sh --help`): `--host` (default `10.42.0.83`), `--user`
 | Step | Effect |
 |---|---|
 | 1 | `rsync --delete` of the repository to `/home/kria/cpsa`, keeping `.venv/`, `models/`, `wheels/`, `runs/` and `web/dist/`. |
-| 2 | `web/dist/` (with `--delete`) and the model as `/home/kria/cpsa/models/<basename>`. |
+| 2 | `web/dist/` (with `--delete`) and both models as `/home/kria/cpsa/models/<basename>`. |
 | 3 | Optional offline wheels. |
 | 4 | `.venv` with `--system-site-packages` (the VART `xir`/`vart` bindings are system packages) and `uv sync --frozen`; fails if `import xir, vart` does not work. |
 | 5 | Installs and enables `cpsa-dpu.service` and `cpsa-showcase.service`, removes the superseded `cpsa-supervisor.service`, starts the DPU loader and (re)starts the showcase. |
 | 6 | Requires `systemctl is-active` on both units and `/health` with `state=running` and `fps > 0` (up to 120 s). |
 
-The model basename must be the one `config/showcase.yaml` names
-(`models/yolox_nano.xmodel`), because the configuration is the only place the
-path appears.
+The model basenames must be the ones `config/showcase.yaml` names
+(`models/yolox_nano.xmodel`, `models/movenet.xmodel`), because the configuration
+is the only place the paths appear. `movenet.enabled: false` in that file runs
+the YOLOX-only showcase without a compiled MoveNet model.
 
 ## Prerequisites
 
@@ -86,8 +89,8 @@ journalctl -u cpsa-showcase -b --no-pager | tail -40
 The journal carries the startup lines
 (`cpsa-showcase 0.1.0: config config/showcase.yaml`, `serving on
 http://0.0.0.0:8080`), the per-stage timing line every five seconds
-(`showcase stages over <n> frames: camera=… preprocess=… dpu=… decode=… draw=…
-total=… total_fps=…`) and one line per camera stop and reopen.
+(`showcase stages over <n> frames: camera=… preprocess=… dpu=… decode=…
+movenet_dpu=… movenet_decode=… draw=… total=… total_fps=…`) and one line per camera stop and reopen.
 
 The dashboard is at `http://<board>:8080/`. The video pane is
 `/video.mjpeg`; nothing is encoded until a browser connects.
@@ -97,7 +100,7 @@ The dashboard is at `http://<board>:8080/`. The video pane is
 | Symptom | Cause and fix |
 |---|---|
 | `/health` reports `state: error`, `errors: ["camera_missing"]` | No V4L2 node matched `camera.match`. Check `v4l2-ctl --list-devices`, the USB cable, and that `kria` is in the `video` group (`sudo usermod -aG video kria`, log in again). |
-| `/health` reports `errors: ["model_missing"]` | `models/yolox_nano.xmodel` is missing; re-run the deploy with `--model`. |
+| `/health` reports `errors: ["model_missing"]` | `models/yolox_nano.xmodel` or `models/movenet.xmodel` is missing; re-run the deploy with `--model` / `--movenet-model` (or set `movenet.enabled: false`). |
 | `/health` reports `errors: ["dpu_error"]` | VART could not load the graph: `xdputil query` must report `DPUCZDX8G_ISA1_B4096` with fingerprint `0x101000016010407`. A stale `/tmp/DPU_0` lock file, or a unit started before `cpsa-dpu.service`, are the usual causes. |
 | `cpsa-showcase` exits with code 2 | Startup failure: the journal names the reason (`cannot start the showcase: <code>: <message>`). The process published `status` with `state: "error"` before exiting, so `/health` reports the same. |
 | The deploy fails at step 4 | `xir`/`vart` do not import from `.venv`: the VART bindings must be in the system dist-packages, and the venv must be created with `--system-site-packages` (the script rebuilds one that was not). |

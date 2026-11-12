@@ -15,6 +15,7 @@ set -euo pipefail
 
 readonly DEFAULT_HOST="10.42.0.83"
 readonly DEFAULT_USER="kria"
+readonly DEFAULT_MOVENET_MODEL="build/vitis/movenet/compiled/movenet.xmodel"
 readonly REMOTE_HOME="/home/kria"
 readonly REMOTE_DIR="cpsa"
 readonly MODELS_DIR="models"
@@ -25,6 +26,7 @@ readonly OBSOLETE_UNITS="cpsa-supervisor.service"
 host="$DEFAULT_HOST"
 user="$DEFAULT_USER"
 model=""
+movenet_model=""
 wheels=""
 dry_run=0
 restart=1
@@ -33,8 +35,8 @@ usage() {
   cat <<'EOF'
 Usage: deploy/deploy.sh --model PATH [options]
 
-Install the showcase (YOLOX-nano, "Cosa vede l'IA") on the KV260 and enable
-cpsa-showcase at boot.
+Install the showcase (YOLOX-nano + MoveNet, "Cosa vede l'IA") on the KV260 and
+enable cpsa-showcase at boot.
 
 Required:
   --model PATH       Compiled YOLOX-nano model (.xmodel). It is installed as
@@ -42,6 +44,11 @@ Required:
                      config/showcase.yaml names (models/yolox_nano.xmodel).
 
 Options:
+  --movenet-model PATH
+                     Compiled MoveNet model (.xmodel). Installed as
+                     ~/cpsa/models/<basename>, so the basename must be
+                     models/movenet.xmodel. Default:
+                     build/vitis/movenet/compiled/movenet.xmodel
   --host HOST        Board host or SSH alias (default: 10.42.0.83).
   --user USER        SSH user on the board (default: kria).
   --wheels DIR       Directory of linux-aarch64 / cp310 wheels prepared on this
@@ -117,6 +124,11 @@ while (($# > 0)); do
       model="$2"
       shift 2
       ;;
+    --movenet-model)
+      [[ $# -ge 2 && -n "${2:-}" ]] || die "--movenet-model needs a value"
+      movenet_model="$2"
+      shift 2
+      ;;
     --wheels)
       [[ $# -ge 2 && -n "${2:-}" ]] || die "--wheels needs a value"
       wheels="$2"
@@ -149,11 +161,15 @@ fi
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)" ||
   die "cannot determine the repository root from ${BASH_SOURCE[0]}"
+if [[ -z "$movenet_model" ]]; then
+  movenet_model="${repo_root}/${DEFAULT_MOVENET_MODEL}"
+fi
 ssh_target="${user}@${host}"
 ssh_opts=(-o BatchMode=yes -o ConnectTimeout=10)
 rsync_opts=(-e "ssh -o BatchMode=yes -o ConnectTimeout=10")
 healthy_url="http://${host}:${SHOWCASE_PORT}/health"
 model_name="$(basename -- "$model")"
+movenet_name="$(basename -- "$movenet_model")"
 
 preflight_failed=0
 for tool in ssh rsync curl python3; do
@@ -169,6 +185,11 @@ if [[ ! -f "$repo_root/web/dist/index.html" ]]; then
 fi
 if [[ ! -f "$model" ]]; then
   warn "model file not found: $model"
+  preflight_failed=1
+fi
+if [[ ! -f "$movenet_model" ]]; then
+  warn "MoveNet model file not found: $movenet_model"
+  warn "  build it with tools/vitis/zoo_movenet.sh, or pass --movenet-model"
   preflight_failed=1
 fi
 if ((preflight_failed)); then
@@ -213,12 +234,14 @@ rsync_excludes=(
 run rsync -az --delete "${rsync_opts[@]}" "${rsync_excludes[@]}" \
   "$repo_root/" "${ssh_target}:${REMOTE_HOME}/${REMOTE_DIR}/"
 
-note "step 2: syncing web/dist and the model"
+note "step 2: syncing web/dist and the models"
 remote "mkdir -p \"${REMOTE_HOME}/${REMOTE_DIR}/${MODELS_DIR}\" \"${REMOTE_HOME}/${REMOTE_DIR}/runs/logs\""
 run rsync -az --delete "${rsync_opts[@]}" \
   "$repo_root/web/dist/" "${ssh_target}:${REMOTE_HOME}/${REMOTE_DIR}/web/dist/"
 run rsync -az "${rsync_opts[@]}" \
   "$model" "${ssh_target}:${REMOTE_HOME}/${REMOTE_DIR}/${MODELS_DIR}/${model_name}"
+run rsync -az "${rsync_opts[@]}" \
+  "$movenet_model" "${ssh_target}:${REMOTE_HOME}/${REMOTE_DIR}/${MODELS_DIR}/${movenet_name}"
 
 if [[ -n "$wheels" ]]; then
   note "step 3: syncing offline wheels"
@@ -340,8 +363,8 @@ if [[ "$health" != "running ok" ]]; then
   warn "health reports ${health:-no answer}, not state=running with fps > 0"
   warn "the files, the units and the venv are installed, but the showcase is not running."
   warn "common causes: the DPU app is not loaded (systemctl status cpsa-dpu),"
-  warn "models/${model_name} is missing, the camera is not connected or VART"
-  warn "cannot be reached."
+  warn "models/${model_name} or models/${movenet_name} is missing, the camera is not"
+  warn "connected or VART cannot be reached."
   warn "inspect: ssh ${ssh_target} 'journalctl -u cpsa-showcase -e'"
   exit 1
 fi

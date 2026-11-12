@@ -22,7 +22,7 @@ import numpy as np
 from aiohttp import ClientSession
 
 from cpsa import protocol
-from cpsa.channel import MessageChannel
+from cpsa.channel import CommandChannel, MessageChannel
 from cpsa.config import WebConfig
 from cpsa.server import VIDEO_BOUNDARY, WebServer, serve
 from tests.contract.protocol_schemas import validate_server_message
@@ -115,10 +115,12 @@ class Running:
     def __init__(self, tmp_path: Path, **overrides: Any) -> None:
         self.frames = FakeFrames()
         self.messages = MessageChannel(FakeQueue())
+        self.commands = CommandChannel(FakeQueue())
         self.server = WebServer(
             web_config(tmp_path, **overrides),
             frames=self.frames,
             messages=self.messages,
+            commands=self.commands,
             server_version="9.9.9",
         )
 
@@ -129,6 +131,7 @@ class Running:
     def __exit__(self, *exc_info: object) -> None:
         self.server.stop()
         self.messages.close()
+        self.commands.close()
 
     def url(self, path: str) -> str:
         return f"http://127.0.0.1:{self.server.port}{path}"
@@ -339,6 +342,56 @@ def test_an_unknown_command_is_rejected_with_its_ref_seq(tmp_path: Path) -> None
     assert data["code"] == "bad_command"
     assert data["ref_seq"] == 3
     assert "mode.set" in data["message"]
+
+
+def test_model_set_is_routed_to_the_pipeline(tmp_path: Path) -> None:
+    with Running(tmp_path) as running:
+
+        async def scenario() -> tuple[str, dict[str, Any]]:
+            async with ClientSession() as session:
+                ws = await session.ws_connect(running.url("/ws"))
+                try:
+                    await receive(ws, "hello")
+                    await ws.send_json(
+                        {"v": 1, "type": "model.set", "seq": 4, "data": {"model": "movenet"}}
+                    )
+                    for _ in range(200):
+                        command = running.commands.get_nowait()
+                        if command is not None:
+                            return command
+                        await asyncio.sleep(0.01)
+                    raise AssertionError("the command never reached the pipeline")
+                finally:
+                    await ws.close()
+
+        topic, data = run(scenario)
+
+    assert topic == "model.set"
+    assert data == {"model": "movenet"}
+
+
+def test_an_unknown_model_is_a_bad_command_and_is_not_forwarded(tmp_path: Path) -> None:
+    with Running(tmp_path) as running:
+
+        async def scenario() -> dict[str, Any]:
+            async with ClientSession() as session:
+                ws = await session.ws_connect(running.url("/ws"))
+                try:
+                    await receive(ws, "hello")
+                    await ws.send_json(
+                        {"v": 1, "type": "model.set", "seq": 5, "data": {"model": "medical"}}
+                    )
+                    message = await receive(ws, "error")
+                finally:
+                    await ws.close()
+            return dict(message["data"])
+
+        data = run(scenario)
+
+    assert data["code"] == "bad_command"
+    assert data["ref_seq"] == 5
+    assert "medical" in data["message"]
+    assert running.commands.get_nowait() is None
 
 
 def test_an_invalid_message_is_a_bad_command(tmp_path: Path) -> None:

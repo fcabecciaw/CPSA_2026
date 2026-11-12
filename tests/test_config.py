@@ -35,6 +35,7 @@ DOCUMENT = {
         "max_misses": 6,
     },
     "model": {"path": "models/yolox_nano.xmodel", "conf_thr": 0.35, "iou_thr": 0.45},
+    "movenet": {"path": "models/movenet.xmodel", "enabled": True, "publish_hz": 30},
     "labels": "it",
     "web": {
         "host": "0.0.0.0",
@@ -58,6 +59,10 @@ def test_the_shipped_configuration_parses_and_names_the_machine() -> None:
 
     assert config.model.name == "yolox_nano"
     assert config.model.path == Path("models/yolox_nano.xmodel")
+    assert config.movenet.name == "movenet"
+    assert config.movenet.path == Path("models/movenet.xmodel")
+    assert config.movenet.enabled is True
+    assert config.movenet.publish_hz == 30.0
     assert config.camera.device == "auto"
     assert config.camera.width == 640 and config.camera.height == 480
     assert config.camera.fps == 60.0
@@ -100,6 +105,9 @@ def test_a_document_parses_with_the_default_camera_match() -> None:
         ("tracker", "deadband_iou"),
         ("tracker", "enabled"),
         ("model", "path"),
+        ("movenet", "path"),
+        ("movenet", "enabled"),
+        ("movenet", "publish_hz"),
         ("web", "jpeg_quality"),
         ("log", "level"),
     ],
@@ -143,6 +151,8 @@ def test_a_missing_key_is_named(section: str, key: str) -> None:
         ("tracker", "max_misses", -1),
         ("model", "conf_thr", 1.5),
         ("model", "iou_thr", -0.1),
+        ("movenet", "enabled", "yes"),
+        ("movenet", "publish_hz", 0),
         ("web", "port", 0),
         ("web", "port", 70000),
         ("web", "jpeg_quality", 101),
@@ -167,6 +177,17 @@ def test_white_balance_accepts_auto_and_the_control_range() -> None:
     for temperature in (2500, 4000, 6500):
         data["camera"]["white_balance"] = temperature  # type: ignore[index]
         assert parse(data).camera.white_balance == temperature
+
+
+def test_the_pose_model_can_be_disabled_or_slowed() -> None:
+    data = document()
+    data["movenet"]["enabled"] = False  # type: ignore[index]
+    data["movenet"]["publish_hz"] = 15  # type: ignore[index]
+
+    config = parse(data)
+
+    assert config.movenet.enabled is False
+    assert config.movenet.publish_hz == 15.0
 
 
 def test_the_tracker_can_be_disabled() -> None:
