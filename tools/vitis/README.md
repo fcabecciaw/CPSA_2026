@@ -154,6 +154,62 @@ adds seeded synthetic frames, and letterboxes every frame with
 `DpuPoseEstimator` and `OnnxPoseEstimator`. Use `--count` for the real run
 (100–200 frames); `--height/--width` follow the model input.
 
+## Hand21 (hand model)
+
+The hand demos' YOLOv8n-pose `HAND21` model (LeakyReLU, 21 keypoints, one
+`hand` class, trained at 320, exported at 256x320) uses the same pipeline with
+two schema additions:
+
+- `dump_quant_outputs.py` already derives `n_kpt` from the checkpoint's
+  `kpt_shape` through `deploy.spec()`, so there is no half-bust constant to
+  override and no `--n-kpt` flag.
+- `eval_quant.py` recognises a 21-keypoint dump and reports hand PCK@0.2
+  (normalised by the largest side of the matched ground-truth hand box), per
+  keypoint and mean, plus detection recall at IoU 0.5; the half-bust path is
+  unchanged.
+
+`prepare_hand21_data.py` copies a deterministic val subset, a calibration set
+(val images plus the IR frames passed through
+`cpsa.adapters.camera.irdepth.ir_to_input`) and the IR frames under `build/`,
+because the container only mounts the repository root. `overlay_hand21.py`
+renders the IR contact sheet with boxes, 21 keypoints and the `HAND21` bones;
+the sheet stays untracked because the IR capture may contain faces.
+
+```sh
+uv run python tools/vitis/prepare_hand21_data.py \
+  --dataset /path/to/hand-topdown --ir /path/to/ir_capture/ir.npy \
+  --out build/models/hand_topdown
+tools/vitis/run_vitis.sh python tools/vitis/dump_quant_outputs.py \
+  --weights build/models/hand_topdown/best.pt \
+  --calib-images train=build/vitis/hand_topdown/calib \
+  --test-images half=build/models/hand_topdown/val_subset/images \
+  --test-images ir=build/vitis/hand_topdown/ir50 \
+  --calib-count 120 --test-count 256 --height 256 --width 320 --threads 1 \
+  --name hand21_topdown --out build/vitis/hand_topdown/quant
+tools/vitis/run_vitis.sh bash tools/vitis/compile.sh \
+  build/vitis/hand_topdown/quant/hand21_topdown.xmodel \
+  build/vitis/hand_topdown/compiled hand21_topdown
+cd ml
+uv run python ../tools/vitis/eval_quant.py \
+  --dump ../build/vitis/hand_topdown/quant/quant_outputs.npz \
+  --weights ../build/models/hand_topdown/best.pt \
+  --test-images ../build/models/hand_topdown/val_subset/images \
+  --labels ../build/models/hand_topdown/val_subset/labels \
+  --out ../build/vitis/hand_topdown/eval
+uv run python ../tools/vitis/overlay_hand21.py \
+  --dump ../build/vitis/hand_topdown/quant/quant_outputs.npz \
+  --images ../build/vitis/hand_topdown/ir50 \
+  --weights ../build/models/hand_topdown/best.pt \
+  --out ../build/vitis/hand_topdown/ir50_overlay.png \
+  --out-fp32 ../build/vitis/hand_topdown/ir50_overlay_fp32.png
+```
+
+Observed on 256 val frames and 50 IR frames (`--threads 1`): 5 subgraphs with
+1 DPU (271 ops), input `1x256x320x3` int8 `fp=6`, outputs
+`1x{32,16,8}x{40,20,10}x128`; INT8 PCK@0.2 0.869 vs FP32 0.874 and detection
+recall 0.926 vs 0.929; 13 of the 50 IR frames have a detection (15 INT8 / 16
+FP32 hands).
+
 ## Board
 
 The board (Kria KV260, Vitis AI 3.5 VART built natively, see

@@ -85,6 +85,7 @@ from cpsa_ml.eval import (  # noqa: E402
     read_yolo_pose_labels,
 )
 
+from cpsa.vision.layouts import HAND21  # noqa: E402
 from cpsa.vision.pose_decode import (  # noqa: E402
     QuantizedRawHeadDecoder,
     decode_raw_heads,
@@ -548,6 +549,374 @@ def predict_fp32(
         "checkpoint": checkpoint_info,
     }
     return frames, timing
+
+
+# ---------------------------------------------------------------------------
+# Hand21 metrics (one hand, 21 keypoints)
+# ---------------------------------------------------------------------------
+
+#: A predicted keypoint counts as correct within this fraction of the hand box.
+HAND21_PCK_THRESHOLD = 0.2
+#: Box IoU at which a prediction is matched to a ground-truth hand.
+HAND21_MATCH_IOU = 0.5
+HAND21_N_KPT = len(HAND21.names)
+
+
+def box_iou_matrix(
+    boxes_a: NDArray[np.float64],
+    boxes_b: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Pairwise IoU of ``(N, 4)`` and ``(M, 4)`` ``x1, y1, x2, y2`` boxes."""
+
+    a = np.asarray(boxes_a, dtype=np.float64).reshape(-1, 4)
+    b = np.asarray(boxes_b, dtype=np.float64).reshape(-1, 4)
+    if a.size == 0 or b.size == 0:
+        return np.zeros((a.shape[0], b.shape[0]), dtype=np.float64)
+    left = np.maximum(a[:, None, 0], b[None, :, 0])
+    top = np.maximum(a[:, None, 1], b[None, :, 1])
+    right = np.minimum(a[:, None, 2], b[None, :, 2])
+    bottom = np.minimum(a[:, None, 3], b[None, :, 3])
+    intersection = np.clip(right - left, 0.0, None) * np.clip(bottom - top, 0.0, None)
+    area_a = np.clip(a[:, 2] - a[:, 0], 0.0, None) * np.clip(a[:, 3] - a[:, 1], 0.0, None)
+    area_b = np.clip(b[:, 2] - b[:, 0], 0.0, None) * np.clip(b[:, 3] - b[:, 1], 0.0, None)
+    union = area_a[:, None] + area_b[None, :] - intersection
+    return np.where(union > 0.0, intersection / np.where(union > 0.0, union, 1.0), 0.0)
+
+
+def match_hands(
+    targets: Sequence[PersonTarget],
+    predictions: Sequence[PersonPrediction],
+    iou_thr: float = HAND21_MATCH_IOU,
+) -> list[tuple[int, int]]:
+    """Greedy one-to-one ``(target, prediction)`` matches above ``iou_thr``.
+
+    Candidate pairs are taken in descending IoU (ties keep the target then
+    prediction order), so the matching is deterministic and a prediction is
+    never scored against two ground-truth hands.
+    """
+
+    if not targets or not predictions:
+        return []
+    overlaps = box_iou_matrix(
+        np.stack([target.box for target in targets]),
+        np.stack([prediction.box for prediction in predictions]),
+    )
+    order = np.argsort(-overlaps, axis=None, kind="stable")
+    used_targets: set[int] = set()
+    used_predictions: set[int] = set()
+    pairs: list[tuple[int, int]] = []
+    for flat_index in order:
+        overlap = float(overlaps.flat[int(flat_index)])
+        if overlap < iou_thr:
+            break
+        target_index, prediction_index = divmod(int(flat_index), len(predictions))
+        if target_index in used_targets or prediction_index in used_predictions:
+            continue
+        used_targets.add(target_index)
+        used_predictions.add(prediction_index)
+        pairs.append((target_index, prediction_index))
+    return pairs
+
+
+def hand21_metrics(
+    samples: Sequence[ImageSample],
+    *,
+    n_kpt: int = HAND21_N_KPT,
+    threshold: float = HAND21_PCK_THRESHOLD,
+    match_iou: float = HAND21_MATCH_IOU,
+    kpt_conf_thr: float = 0.0,
+) -> dict[str, Any]:
+    """PCK@``threshold`` and detection recall for single-hand 21-keypoint dumps.
+
+    PCK normalises the keypoint error by the largest side of the matched
+    ground-truth hand box, which is the hand analogue of the half-bust
+    ``PCK@0.2fw`` (there is no face to measure a hand against).  Only matched
+    hands contribute keypoints; :func:`match_hands` links a prediction to at
+    most one target at ``match_iou`` so the detection recall
+    (``matched / ground-truth hands``) and the pose accuracy stay separate.
+    """
+
+    names = (
+        tuple(HAND21.names)
+        if n_kpt == len(HAND21.names)
+        else tuple(f"kpt_{index}" for index in range(n_kpt))
+    )
+    visible = np.zeros(n_kpt, dtype=np.int64)
+    correct = np.zeros(n_kpt, dtype=np.int64)
+    ground_truth = 0
+    predicted = 0
+    matched = 0
+    frames_with_detection = 0
+
+    for sample in samples:
+        ground_truth += len(sample.targets)
+        predicted += len(sample.predictions)
+        if sample.predictions:
+            frames_with_detection += 1
+        for target_index, prediction_index in match_hands(
+            sample.targets, sample.predictions, match_iou
+        ):
+            target = sample.targets[target_index]
+            prediction = sample.predictions[prediction_index]
+            matched += 1
+            box = np.asarray(target.box, dtype=np.float64)
+            normaliser = float(max(box[2] - box[0], box[3] - box[1]))
+            if not normaliser > 0.0:
+                continue
+            truth = target.keypoints[:n_kpt]
+            guess = prediction.keypoints[:n_kpt]
+            for index in range(n_kpt):
+                if truth[index, 2] <= 0.0 or not np.isfinite(truth[index, :2]).all():
+                    continue
+                visible[index] += 1
+                if guess[index, 2] < kpt_conf_thr or not np.isfinite(guess[index, :2]).all():
+                    continue
+                error = float(np.linalg.norm(guess[index, :2] - truth[index, :2]))
+                if error <= threshold * normaliser:
+                    correct[index] += 1
+
+    per_keypoint = {
+        name: {
+            "pck": float(correct[index] / visible[index]) if visible[index] else None,
+            "visible": int(visible[index]),
+            "correct": int(correct[index]),
+        }
+        for index, name in enumerate(names)
+    }
+    total_visible = int(visible.sum())
+    return {
+        "schema": "hand21",
+        "frames": len(samples),
+        "frames_with_detection": frames_with_detection,
+        "threshold": float(threshold),
+        "normaliser": "gt_box_max_side",
+        "match_iou": float(match_iou),
+        "kpt_conf_thr": float(kpt_conf_thr),
+        "pck": {
+            "threshold": float(threshold),
+            "mean": float(correct.sum() / total_visible) if total_visible else None,
+            "visible": total_visible,
+            "per_keypoint": per_keypoint,
+        },
+        "detection": {
+            "gt": ground_truth,
+            "predicted": predicted,
+            "matched": matched,
+            "recall": float(matched / ground_truth) if ground_truth else None,
+        },
+    }
+
+
+def hand21_rows(
+    int8: dict[str, Any],
+    fp32_host: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Comparison rows: detection recall, mean PCK and one row per keypoint."""
+
+    def value(report: dict[str, Any] | None, path: Sequence[str]) -> float | None:
+        return None if report is None else metric_value(report, path)
+
+    rows = [
+        {
+            "metric": f"detection.recall_iou{HAND21_MATCH_IOU}",
+            "int8": value(int8, ("detection", "recall")),
+            "fp32_host": value(fp32_host, ("detection", "recall")),
+        },
+        {
+            "metric": f"pck@{HAND21_PCK_THRESHOLD:.1f}.mean",
+            "int8": value(int8, ("pck", "mean")),
+            "fp32_host": value(fp32_host, ("pck", "mean")),
+        },
+    ]
+    for name in int8["pck"]["per_keypoint"]:
+        rows.append(
+            {
+                "metric": f"pck@{HAND21_PCK_THRESHOLD:.1f}.{name}",
+                "int8": value(int8, ("pck", "per_keypoint", name, "pck")),
+                "fp32_host": value(fp32_host, ("pck", "per_keypoint", name, "pck")),
+            }
+        )
+    for row in rows:
+        row["delta_int8_fp32"] = delta(row["int8"], row["fp32_host"])
+    return rows
+
+
+def render_hand21_markdown(
+    rows: Sequence[dict[str, Any]],
+    *,
+    split: str,
+    frames: int,
+    int8_label: str = "INT8",
+    fp32_label: str = "FP32 host",
+) -> str:
+    """Markdown table for one hand21 split."""
+
+    lines = [
+        f"Hand21 `{split}`: {frames} frames, {int8_label} vs {fp32_label}",
+        "",
+        f"| metric | {int8_label} | {fp32_label} | Δ {int8_label}−{fp32_label} |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+    for row in rows:
+        lines.append(
+            f"| {row['metric']} | {_format_value(row['int8'])} | "
+            f"{_format_value(row['fp32_host'])} | {_format_delta(row['delta_int8_fp32'])} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def group_detection_summary(
+    dump: QuantDump,
+    conf_thr: float,
+    iou_thr: float,
+) -> dict[str, dict[str, int]]:
+    """Per dumped group: frames, frames with a detection, detections."""
+
+    groups = dump.groups if any(dump.groups) else tuple("" for _ in range(len(dump)))
+    summary: dict[str, dict[str, int]] = {}
+    for group in sorted(set(groups)):
+        indices = [index for index, name in enumerate(groups) if name == group]
+        subset = dump.subset(indices)
+        frames = decode_int8(subset, int8_decoder(subset), conf_thr, iou_thr)
+        summary[group or "all"] = {
+            "frames": len(indices),
+            "frames_with_detection": sum(1 for persons in frames if persons),
+            "detections": sum(len(persons) for persons in frames),
+        }
+    return summary
+
+
+def run_hand21_evaluation(args: argparse.Namespace, dump: QuantDump) -> int:
+    """Score a hand21 dump: PCK@0.2 per keypoint, detection recall, INT8 vs FP32."""
+
+    if args.eval_split:
+        specs = parse_eval_splits(args.eval_split)
+        selections = {spec.name: split_indices(dump, spec) for spec in specs}
+    else:
+        images_dir, labels_dir = resolve_dirs(args)
+        name = args.test_split or "test"
+        spec = EvalSplit(name=name, images=images_dir, labels=labels_dir)
+        specs = [spec]
+        selections = {
+            name: [
+                index
+                for index, frame_name in enumerate(dump.names)
+                if (labels_dir / f"{frame_name}.txt").is_file()
+            ]
+        }
+    for spec in specs:
+        if not selections[spec.name]:
+            raise SystemExit(
+                f"no dumped frame matches hand21 split {spec.name!r}; check --labels/--eval-split"
+            )
+
+    args.out.mkdir(parents=True, exist_ok=True)
+    score_fp32 = args.weights is not None and not args.skip_fp32
+    results: dict[str, Any] = {}
+    tables: list[str] = []
+    for spec in specs:
+        selected = selections[spec.name]
+        subset = dump.subset(selected)
+        int8_metrics = hand21_metrics(
+            build_samples(
+                decode_int8(subset, int8_decoder(subset), args.conf_thr, args.iou_thr),
+                subset.names,
+                spec.labels,
+                subset.image_widths,
+                subset.image_heights,
+                subset.n_kpt,
+            ),
+            n_kpt=dump.n_kpt,
+            kpt_conf_thr=args.kpt_conf_thr,
+        )
+        entry: dict[str, Any] = {
+            "frames": len(selected),
+            "images": str(spec.images),
+            "labels": str(spec.labels),
+            "int8": int8_metrics,
+        }
+        if score_fp32:
+            fp32_frames, timing = predict_fp32(
+                args.weights,
+                subset,
+                resolve_test_images(subset, spec.images),
+                deploy_module_path=args.deploy_module,
+                conf_thr=args.conf_thr,
+                iou_thr=args.iou_thr,
+                progress_every=args.progress_every,
+            )
+            entry["fp32_host"] = hand21_metrics(
+                build_samples(
+                    fp32_frames,
+                    subset.names,
+                    spec.labels,
+                    subset.image_widths,
+                    subset.image_heights,
+                    subset.n_kpt,
+                ),
+                n_kpt=dump.n_kpt,
+                kpt_conf_thr=args.kpt_conf_thr,
+            )
+            entry["fp32_timing"] = timing
+        rows = hand21_rows(int8_metrics, entry.get("fp32_host"))
+        entry["rows"] = rows
+        results[spec.name] = entry
+        table = render_hand21_markdown(
+            rows,
+            split=spec.name,
+            frames=len(selected),
+            int8_label="INT8",
+            fp32_label="FP32 host" if score_fp32 else "n/a",
+        )
+        tables.append(table)
+        meta = dict(_dump_meta(args, dump, spec.images, spec.labels, frames=len(selected)))
+        meta["split"] = spec.name
+        _write_json(
+            args.out / f"metrics_int8_hand21_{_split_slug(spec.name)}.json",
+            {"meta": meta, "metrics": int8_metrics},
+        )
+        if "fp32_host" in entry:
+            _write_json(
+                args.out / f"metrics_fp32_host_hand21_{_split_slug(spec.name)}.json",
+                {"meta": meta, "metrics": entry["fp32_host"]},
+            )
+        print(
+            f"[hand21 {spec.name}] {len(selected)} frames: "
+            f"detection recall {_format_value(int8_metrics['detection']['recall'])}, "
+            f"PCK@{HAND21_PCK_THRESHOLD:.1f} {_format_value(int8_metrics['pck']['mean'])}",
+            flush=True,
+        )
+
+    primary = specs[0].name
+    groups = group_detection_summary(dump, args.conf_thr, args.iou_thr)
+    summary = {
+        "schema": "hand21",
+        "variant": args.variant,
+        "inputs": {
+            "dump": str(dump.path),
+            "weights": str(args.weights) if args.weights is not None else None,
+            "splits": {
+                spec.name: {"images": str(spec.images), "labels": str(spec.labels)}
+                for spec in specs
+            },
+        },
+        "primary_split": primary,
+        "splits": results,
+        "groups": groups,
+    }
+    _write_json(args.out / "comparison_hand21.json", summary)
+    report = "\n".join(tables)
+    report += (
+        "\nDumped groups: "
+        + ", ".join(
+            f"{name} {entry['frames_with_detection']}/{entry['frames']} frames with a detection"
+            for name, entry in groups.items()
+        )
+        + "\n"
+    )
+    (args.out / "comparison_hand21.md").write_text(report, encoding="utf-8")
+    print(report, flush=True)
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1100,6 +1469,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--limit must be positive")
 
     dump = load_dump(args.dump, limit=args.limit)
+    if dump.n_kpt == HAND21_N_KPT:
+        return run_hand21_evaluation(args, dump)
     if dump.n_kpt != EvalConfig().n_kpt:
         raise SystemExit(
             f"the dump has {dump.n_kpt} keypoints; the half-bust metrics need {EvalConfig().n_kpt}"

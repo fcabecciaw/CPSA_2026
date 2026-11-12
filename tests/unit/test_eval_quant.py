@@ -18,7 +18,9 @@ for _path in (TOOLS, ROOT / "src", ROOT / "ml" / "src"):
 
 import dump_quant_outputs as dq  # noqa: E402
 import eval_quant as eq  # noqa: E402
+from cpsa_ml.eval import ImageSample, PersonPrediction, PersonTarget  # noqa: E402
 
+from cpsa.vision.layouts import HAND21  # noqa: E402
 from cpsa.vision.pose_decode import decode_raw_heads, letterbox  # noqa: E402
 
 INPUT_SIZE = (64, 96)
@@ -818,3 +820,235 @@ def test_split_evaluation_rejects_an_unmatched_name(tmp_path: Path) -> None:
                 str(tmp_path / "out"),
             ]
         )
+
+
+# ---------------------------------------------------------------------------
+# Hand21 path (one hand, 21 keypoints, box-normalised PCK)
+# ---------------------------------------------------------------------------
+
+HAND21_N_KPT = 21
+HAND21_CHANNELS = 4 * REG_MAX + NUM_CLASSES + 3 * HAND21_N_KPT
+
+
+def _hand_keypoints(box: tuple[float, float, float, float]) -> np.ndarray:
+    x1, y1, x2, y2 = box
+    xs = np.linspace(x1 + 5.0, x2 - 5.0, HAND21_N_KPT)
+    ys = np.linspace(y1 + 5.0, y2 - 5.0, HAND21_N_KPT)
+    return np.stack([xs, ys, np.ones(HAND21_N_KPT)], axis=1)
+
+
+def _hand21_label_line(n_kpt: int = HAND21_N_KPT) -> str:
+    values = ["0", "0.5", "0.5", "0.6", "0.5"]
+    for _ in range(n_kpt):
+        values.extend(["0.5", "0.5", "2"])
+    return " ".join(values)
+
+
+def _hand21_heads(rng: np.random.Generator, count: int) -> list[np.ndarray]:
+    return [
+        rng.integers(
+            -128,
+            128,
+            size=(count, INPUT_SIZE[0] // stride, INPUT_SIZE[1] // stride, HAND21_CHANNELS),
+            dtype=np.int8,
+        )
+        for stride in STRIDES
+    ]
+
+
+def _write_hand21_dump(
+    path: Path,
+    heads: list[np.ndarray],
+    *,
+    names: list[str],
+    groups: list[str] | None = None,
+    n_kpt: int = HAND21_N_KPT,
+) -> Path:
+    count = len(names)
+    payload: dict[str, Any] = {
+        "names": np.asarray(names),
+        "image_widths": np.asarray([INPUT_SIZE[1]] * count, dtype=np.int32),
+        "image_heights": np.asarray([INPUT_SIZE[0]] * count, dtype=np.int32),
+        "scales": np.asarray([1.0] * count, dtype=np.float64),
+        "pad_x": np.asarray([0.0] * count, dtype=np.float64),
+        "pad_y": np.asarray([0.0] * count, dtype=np.float64),
+        "strides": np.asarray(STRIDES, dtype=np.int32),
+        "fix_points": np.asarray(FIX_POINTS, dtype=np.int32),
+        "input_size": np.asarray(INPUT_SIZE, dtype=np.int32),
+        "n_kpt": np.int32(n_kpt),
+        "reg_max": np.int32(REG_MAX),
+        "num_classes": np.int32(NUM_CLASSES),
+        "channel_layout": np.asarray([4 * REG_MAX, NUM_CLASSES, 3 * n_kpt], dtype=np.int32),
+    }
+    if groups is not None:
+        payload["groups"] = np.asarray(groups)
+    for stride, head in zip(STRIDES, heads, strict=True):
+        payload[f"int8_head_stride{stride}"] = head
+    np.savez_compressed(path, **payload)
+    return path
+
+
+def _hand21_sample(
+    box: tuple[float, float, float, float] = (10.0, 20.0, 110.0, 60.0),
+    *,
+    prediction_box: tuple[float, float, float, float] | None = None,
+    shift: tuple[float, float] = (0.0, 0.0),
+    index: int = 0,
+) -> ImageSample:
+    keypoints = _hand_keypoints(box)
+    target = PersonTarget(box=np.asarray(box), keypoints=keypoints)
+    predicted = keypoints.copy()
+    predicted[index, 0] += shift[0]
+    predicted[index, 1] += shift[1]
+    prediction = PersonPrediction(
+        box=np.asarray(prediction_box if prediction_box is not None else box),
+        score=0.9,
+        keypoints=predicted,
+    )
+    return ImageSample(name="frame_0", predictions=(prediction,), targets=(target,))
+
+
+def test_hand21_metrics_perfect_prediction() -> None:
+    metrics = eq.hand21_metrics([_hand21_sample()], n_kpt=HAND21_N_KPT)
+
+    assert metrics["schema"] == "hand21"
+    assert metrics["detection"] == {"gt": 1, "predicted": 1, "matched": 1, "recall": 1.0}
+    assert metrics["frames_with_detection"] == 1
+    assert metrics["pck"]["mean"] == pytest.approx(1.0)
+    assert list(metrics["pck"]["per_keypoint"]) == list(HAND21.names)
+    assert all(entry["pck"] == 1.0 for entry in metrics["pck"]["per_keypoint"].values())
+    assert metrics["pck"]["visible"] == HAND21_N_KPT
+
+
+def test_hand21_pck_normalises_by_the_hand_box() -> None:
+    # 100x40 box: PCK@0.2 allows 20 px, so 19 px is correct and 21 px is not.
+    correct = eq.hand21_metrics([_hand21_sample(shift=(19.0, 0.0))], n_kpt=HAND21_N_KPT)
+    wrong = eq.hand21_metrics([_hand21_sample(shift=(21.0, 0.0))], n_kpt=HAND21_N_KPT)
+
+    assert correct["pck"]["per_keypoint"]["wrist"]["pck"] == 1.0
+    assert wrong["pck"]["per_keypoint"]["wrist"]["pck"] == 0.0
+    assert correct["pck"]["mean"] == pytest.approx(1.0)
+    assert wrong["pck"]["mean"] == pytest.approx((HAND21_N_KPT - 1) / HAND21_N_KPT)
+
+
+def test_hand21_unmatched_target_keeps_detection_and_pose_separate() -> None:
+    # A second ground-truth hand without a prediction lowers recall but must not
+    # leak its keypoints into the PCK denominator.
+    sample = _hand21_sample()
+    extra = PersonTarget(
+        box=np.asarray((300.0, 20.0, 400.0, 60.0)),
+        keypoints=_hand_keypoints((300.0, 20.0, 400.0, 60.0)),
+    )
+    metrics = eq.hand21_metrics(
+        [
+            ImageSample(
+                name="frame_0", predictions=sample.predictions, targets=(*sample.targets, extra)
+            )
+        ],
+        n_kpt=HAND21_N_KPT,
+    )
+
+    assert metrics["detection"] == {"gt": 2, "predicted": 1, "matched": 1, "recall": 0.5}
+    assert metrics["pck"]["mean"] == pytest.approx(1.0)
+    assert metrics["pck"]["visible"] == HAND21_N_KPT
+
+
+def test_hand21_below_match_iou_reports_no_pose_accuracy() -> None:
+    # Shift the prediction by half its width: IoU ~0.33, below the 0.5 match.
+    sample = _hand21_sample(prediction_box=(60.0, 20.0, 160.0, 60.0))
+    metrics = eq.hand21_metrics([sample], n_kpt=HAND21_N_KPT)
+
+    assert metrics["detection"]["matched"] == 0
+    assert metrics["detection"]["recall"] == 0.0
+    assert metrics["pck"]["mean"] is None
+    assert metrics["pck"]["visible"] == 0
+    assert metrics["frames_with_detection"] == 1
+
+
+def test_hand21_match_hands_is_one_to_one() -> None:
+    box = (10.0, 20.0, 110.0, 60.0)
+    targets = [
+        PersonTarget(box=np.asarray(box), keypoints=_hand_keypoints(box)),
+        PersonTarget(box=np.asarray(box), keypoints=_hand_keypoints(box)),
+    ]
+    prediction = PersonPrediction(box=np.asarray(box), score=0.9, keypoints=_hand_keypoints(box))
+
+    assert eq.match_hands(targets, [prediction]) == [(0, 0)]
+    assert eq.match_hands(targets[:1], [prediction]) == [(0, 0)]
+    assert eq.match_hands([], [prediction]) == []
+    assert eq.match_hands(targets[:1], []) == []
+
+
+def test_hand21_cli_scores_a_dump(tmp_path: Path) -> None:
+    rng = np.random.default_rng(21)
+    names = ["frame_0", "frame_1"]
+    dump = _write_hand21_dump(
+        tmp_path / "quant_outputs.npz", _hand21_heads(rng, count=2), names=names
+    )
+    labels = tmp_path / "labels"
+    labels.mkdir()
+    for name in names:
+        (labels / f"{name}.txt").write_text(_hand21_label_line(), encoding="utf-8")
+    images = tmp_path / "images"
+    images.mkdir()
+    out = tmp_path / "out"
+
+    status = eq.main(
+        [
+            "--dump",
+            str(dump),
+            "--test-images",
+            str(images),
+            "--labels",
+            str(labels),
+            "--out",
+            str(out),
+            "--conf-thr",
+            "0.99",
+        ]
+    )
+
+    assert status == 0
+    report = json.loads((out / "comparison_hand21.json").read_text(encoding="utf-8"))
+    assert report["schema"] == "hand21"
+    assert report["primary_split"] == "val"
+    assert report["groups"]["all"]["frames"] == 2
+    assert (out / "metrics_int8_hand21_val.json").is_file()
+    assert "pck@0.2.mean" in (out / "comparison_hand21.md").read_text(encoding="utf-8")
+    assert not (out / "metrics_int8.json").exists()
+
+
+def test_hand21_cli_ignores_frames_without_labels(tmp_path: Path) -> None:
+    rng = np.random.default_rng(22)
+    names = ["frame_0", "frame_ir"]
+    dump = _write_hand21_dump(
+        tmp_path / "quant_outputs.npz",
+        _hand21_heads(rng, count=2),
+        names=names,
+        groups=["half", "ir"],
+    )
+    labels = tmp_path / "labels"
+    labels.mkdir()
+    (labels / "frame_0.txt").write_text(_hand21_label_line(), encoding="utf-8")
+    out = tmp_path / "out"
+
+    status = eq.main(
+        [
+            "--dump",
+            str(dump),
+            "--test-images",
+            str(tmp_path),
+            "--labels",
+            str(labels),
+            "--out",
+            str(out),
+            "--conf-thr",
+            "0.99",
+        ]
+    )
+
+    assert status == 0
+    report = json.loads((out / "comparison_hand21.json").read_text(encoding="utf-8"))
+    assert report["splits"]["val"]["frames"] == 1
+    assert report["groups"]["half"]["frames"] == 1
+    assert report["groups"]["ir"]["frames"] == 1
