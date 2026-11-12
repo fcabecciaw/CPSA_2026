@@ -32,7 +32,7 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from cpsa.config import CameraConfig
+from cpsa.config import WHITE_BALANCE_AUTO, CameraConfig
 
 logger = logging.getLogger(__name__)
 
@@ -424,13 +424,28 @@ class UvcCamera:
                 raise CameraError(f"cannot start the capture thread: {exc}") from exc
 
     def _apply_controls(self, stream: _Stream) -> None:
-        """Set the manual exposure, gain and anti-flicker frequency."""
+        """Set the manual image controls at every open.
+
+        The auto-exposure, auto-white-balance and backlight-compensation
+        controls of the F200's ISP are switched off (or set explicitly): left
+        on, they keep re-adjusting the image, which is what made the gain look
+        too bright and the boxes drift. The manual white balance is set after
+        its automatic flag, as the UVC driver only accepts a temperature while
+        auto is off.
+        """
 
         config = self._config
         stream.set_control("auto_exposure", AUTO_EXPOSURE_MANUAL)
         stream.set_control("exposure_time_absolute", config.exposure)
         stream.set_control("gain", config.gain)
         stream.set_control("power_line_frequency", POWER_LINE_MENU[config.power_line_hz])
+        if config.white_balance == WHITE_BALANCE_AUTO:
+            stream.set_control("white_balance_automatic", 1)
+        else:
+            stream.set_control("white_balance_automatic", 0)
+            stream.set_control("white_balance_temperature", int(config.white_balance))
+        stream.set_control("backlight_compensation", config.backlight_compensation)
+        stream.set_control("saturation", config.saturation)
 
     def stop(self) -> None:
         """Stop delivery, join the thread and close the device."""

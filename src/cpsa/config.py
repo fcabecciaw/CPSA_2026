@@ -2,18 +2,22 @@
 
 ``config/showcase.yaml`` is the single source: the YAML carries every value,
 this module only validates it and names the offending dotted key on error. The
-sections are exactly the F-K3 ones — ``camera``, ``model``, ``labels``, ``web``,
-``log`` — and nothing else: a stale key is rejected instead of silently ignored,
-so a tree cut from an older demo cannot boot with half its settings ignored.
+sections are exactly the showcase ones — ``camera``, ``tracker``, ``model``,
+``labels``, ``web``, ``log`` — and nothing else: a stale key is rejected instead
+of silently ignored, so a tree cut from an older demo cannot boot with half its
+settings ignored.
 
 ```yaml
-camera: { device: auto, match: RealSense, width: 640, height: 480, fps: 60,
-          exposure: 150, gain: 320, power_line_hz: 50 }
-model:  { path: models/yolox_nano.xmodel, conf_thr: 0.35, iou_thr: 0.45 }
+camera:  { device: auto, match: RealSense, width: 640, height: 480, fps: 60,
+           exposure: 100, gain: 200, white_balance: 4000,
+           backlight_compensation: 0, saturation: 110, power_line_hz: 50 }
+tracker: { enabled: true, iou_match: 0.3, alpha: 0.35, fast_alpha: 0.8,
+           deadband_iou: 0.9, min_hits: 2, max_misses: 6 }
+model:   { path: models/yolox_nano.xmodel, conf_thr: 0.35, iou_thr: 0.45 }
 labels: it
-web:    { host: 0.0.0.0, port: 8080, video_fps: 60, jpeg_quality: 70,
-          static_dir: web/dist }
-log:    { level: INFO }
+web:     { host: 0.0.0.0, port: 8080, video_fps: 60, jpeg_quality: 70,
+           static_dir: web/dist }
+log:     { level: INFO }
 ```
 """
 
@@ -29,11 +33,13 @@ import yaml
 __all__ = [
     "LABEL_LANGUAGES",
     "LOG_LEVELS",
+    "WHITE_BALANCE_AUTO",
     "CameraConfig",
     "ConfigError",
     "LogConfig",
     "ModelConfig",
     "ShowcaseConfig",
+    "TrackerConfig",
     "WebConfig",
     "load",
     "parse",
@@ -44,6 +50,22 @@ LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 LABEL_LANGUAGES = ("it", "en")
 """Values of the top-level ``labels`` key; Italian is the booth default."""
+
+WHITE_BALANCE_AUTO = "auto"
+"""``camera.white_balance`` value that leaves the ISP auto white balance on."""
+
+GAIN_RANGE = (64, 2540)
+"""Manual ``gain`` range the F200 RGB node accepts."""
+
+WHITE_BALANCE_RANGE = (2500, 6500)
+"""``white_balance_temperature`` range in Kelvin, in 100 K steps."""
+
+BACKLIGHT_COMPENSATION_RANGE = (0, 4)
+"""``backlight_compensation`` range the F200 RGB node accepts."""
+
+SATURATION_RANGE = (0, 255)
+"""V4L2 ``saturation`` range of the F200 RGB node; the camera default is 128."""
+
 
 DEFAULT_CAMERA_MATCH = "RealSense"
 """Card-name fragment ``device: auto`` looks for when ``camera.match`` is absent.
@@ -71,6 +93,12 @@ class CameraConfig:
     re-plug that renumbers the nodes cannot break the demo. ``exposure`` is the
     manual ``exposure_time_absolute`` in 100 us units and ``gain`` the manual
     V4L2 gain; ``power_line_hz`` is 0 (off), 50 or 60.
+
+    ``white_balance`` is a colour temperature in Kelvin (2500..6500 in 100 K
+    steps) or ``"auto"``, ``backlight_compensation`` is the F200 ISP strength
+    0..4 and ``saturation`` the V4L2 saturation 0..255. All of them are applied
+    at every open: the ISP's own automatic adjustments are what made the booth
+    image drift.
     """
 
     device: str
@@ -80,7 +108,34 @@ class CameraConfig:
     fps: float
     exposure: int
     gain: int
+    white_balance: int | str
+    backlight_compensation: int
+    saturation: int
     power_line_hz: int
+
+
+@dataclass(frozen=True)
+class TrackerConfig:
+    """Box stabilization between the detector and the overlay.
+
+    ``enabled: false`` publishes the raw detector boxes unchanged. Otherwise a
+    detection joins a track of the same class when their IoU is at least
+    ``iou_match``; the track filters its box with an EMA of ``alpha``
+    (``fast_alpha`` when the new box barely overlaps the filtered one, so a
+    real move is followed at once) and only moves its displayed box when it
+    leaves a ``deadband_iou`` overlap or shifts by more than 4% of its diagonal
+    or changes a side by more than 8%. A track is shown after ``min_hits``
+    consecutive detections (immediately at score 0.6) and survives
+    ``max_misses`` missed frames.
+    """
+
+    enabled: bool
+    iou_match: float
+    alpha: float
+    fast_alpha: float
+    deadband_iou: float
+    min_hits: int
+    max_misses: int
 
 
 @dataclass(frozen=True)
@@ -125,6 +180,7 @@ class ShowcaseConfig:
     """Everything the one process needs, validated."""
 
     camera: CameraConfig
+    tracker: TrackerConfig
     model: ModelConfig
     labels: str
     web: WebConfig
@@ -150,12 +206,15 @@ def parse(data: object) -> ShowcaseConfig:
 
     root = _Section(data, "")
     camera = _camera_config(root.section("camera"))
+    tracker = _tracker_config(root.section("tracker"))
     model = _model_config(root.section("model"))
     labels = root.choice("labels", LABEL_LANGUAGES)
     web = _web_config(root.section("web"))
     log = LogConfig(level=root.section("log").choice("level", LOG_LEVELS))
-    root.reject_unknown(("camera", "model", "labels", "web", "log"))
-    return ShowcaseConfig(camera=camera, model=model, labels=labels, web=web, log=log)
+    root.reject_unknown(("camera", "tracker", "model", "labels", "web", "log"))
+    return ShowcaseConfig(
+        camera=camera, tracker=tracker, model=model, labels=labels, web=web, log=log
+    )
 
 
 def _camera_config(camera: _Section) -> CameraConfig:
@@ -166,10 +225,29 @@ def _camera_config(camera: _Section) -> CameraConfig:
         height=camera.even_positive_int("height"),
         fps=camera.positive("fps"),
         exposure=camera.integer("exposure", 1, 10000),
-        gain=camera.integer("gain", 1, 65535),
+        gain=camera.integer("gain", *GAIN_RANGE),
+        white_balance=camera.white_balance("white_balance"),
+        backlight_compensation=camera.integer(
+            "backlight_compensation", *BACKLIGHT_COMPENSATION_RANGE
+        ),
+        saturation=camera.integer("saturation", *SATURATION_RANGE),
         power_line_hz=camera.power_line_hz("power_line_hz"),
     )
     camera.reject_unknown()
+    return config
+
+
+def _tracker_config(tracker: _Section) -> TrackerConfig:
+    config = TrackerConfig(
+        enabled=tracker.boolean("enabled"),
+        iou_match=tracker.fraction("iou_match"),
+        alpha=tracker.fraction("alpha"),
+        fast_alpha=tracker.fraction("fast_alpha"),
+        deadband_iou=tracker.fraction("deadband_iou"),
+        min_hits=tracker.integer("min_hits", 0, 100),
+        max_misses=tracker.integer("max_misses", 0, 100),
+    )
+    tracker.reject_unknown()
     return config
 
 
@@ -263,6 +341,30 @@ class _Section:
         if not minimum <= value <= maximum:
             raise ConfigError(
                 self._key(name), f"expected an integer between {minimum} and {maximum}"
+            )
+        return value
+
+    def boolean(self, name: str) -> bool:
+        value = self._get(name)
+        if not isinstance(value, bool):
+            raise ConfigError(self._key(name), "expected true or false")
+        return value
+
+    def white_balance(self, name: str) -> int | str:
+        """A Kelvin integer in 100 K steps, or :data:`WHITE_BALANCE_AUTO`."""
+        value = self._get(name)
+        if isinstance(value, str):
+            if value.strip().casefold() == WHITE_BALANCE_AUTO:
+                return WHITE_BALANCE_AUTO
+            raise ConfigError(self._key(name), "expected 'auto' or a Kelvin integer")
+        minimum, maximum = WHITE_BALANCE_RANGE
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ConfigError(self._key(name), "expected 'auto' or a Kelvin integer")
+        if not minimum <= value <= maximum or value % 100:
+            raise ConfigError(
+                self._key(name),
+                f"expected 'auto' or a Kelvin integer between {minimum} and {maximum} "
+                "in steps of 100",
             )
         return value
 

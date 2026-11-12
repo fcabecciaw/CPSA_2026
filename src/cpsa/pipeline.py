@@ -1,9 +1,10 @@
 """The detection loop: camera frames in, overlaid video and states out.
 
 One loop processes frames from a :class:`~cpsa.camera.UvcCamera` with a
-:class:`~cpsa.yolox.YoloxDetector` on the DPU, draws the boxes, publishes the
-overlay into the shared :class:`~cpsa.channel.FrameChannel` and the snapshot
-messages into the :class:`~cpsa.channel.MessageChannel`.
+:class:`~cpsa.yolox.YoloxDetector` on the DPU, stabilizes the boxes with the
+:class:`~cpsa.tracker.Tracker`, draws them, publishes the overlay into the
+shared :class:`~cpsa.channel.FrameChannel` and the snapshot messages into the
+:class:`~cpsa.channel.MessageChannel`.
 
 The 60 fps target needs the DPU and the CPU to work on different frames:
 
@@ -44,6 +45,7 @@ from cpsa.camera import CameraError, CameraNotFound, UvcCamera, VideoFrame
 from cpsa.channel import FrameChannel, MessageChannel
 from cpsa.config import CameraConfig, ModelConfig, ShowcaseConfig
 from cpsa.overlay import draw_overlay
+from cpsa.tracker import Tracker
 from cpsa.yolox import Detection, YoloxDetector, label_for, labels_for
 
 logger = logging.getLogger("cpsa.pipeline")
@@ -220,6 +222,7 @@ class Pipeline:
         self._labels: tuple[str, ...] = (
             tuple(labels) if labels is not None else labels_for(config.labels)
         )
+        self._tracker = Tracker(config.tracker)
         self._lock = threading.Lock()
         self._slot = _LatestSlot()
         self._stop = threading.Event()
@@ -287,6 +290,7 @@ class Pipeline:
             self._errors = []
             self._camera_error = None
             self._status_key = None
+            self._tracker.reset()
             self._timing_sums = {}
             self._timing_frames = 0
             self._timing_since = time.monotonic()
@@ -486,7 +490,10 @@ class Pipeline:
     ) -> None:
         """Draw, publish and time one decoded frame."""
 
-        objects = _objects(detections, self._labels)
+        track_started = time.perf_counter()
+        tracked = self._tracker.update(detections)
+        track_ms = (time.perf_counter() - track_started) * 1000.0
+        objects = _objects(tracked, self._labels)
         draw_started = time.perf_counter()
         overlay = draw_overlay(rgb, objects)
         draw_ms = (time.perf_counter() - draw_started) * 1000.0
@@ -505,6 +512,7 @@ class Pipeline:
                 "preprocess": stage.get("preprocess", 0.0),
                 "dpu": stage.get("dpu", 0.0),
                 "decode": stage.get("decode", 0.0),
+                "track": track_ms,
                 "draw": draw_ms,
                 "total": total_ms,
             },
@@ -620,12 +628,13 @@ class Pipeline:
             self._timing_since = time.monotonic()
         logger.info(
             "showcase stages over %d frames: camera=%.2f preprocess=%.2f dpu=%.2f "
-            "decode=%.2f draw=%.2f total=%.2f total_fps=%.1f",
+            "decode=%.2f track=%.2f draw=%.2f total=%.2f total_fps=%.1f",
             counted,
             means.get("camera", 0.0),
             means.get("preprocess", 0.0),
             means.get("dpu", 0.0),
             means.get("decode", 0.0),
+            means.get("track", 0.0),
             means.get("draw", 0.0),
             means.get("total", 0.0),
             _rate(stamps),

@@ -94,18 +94,23 @@ failure (unreadable configuration, missing model or camera) after publishing
 
 ## Configuration
 
-One file, `config/showcase.yaml`, with five sections and no unknown keys:
+One file, `config/showcase.yaml`, with six sections and no unknown keys:
 
 ```yaml
-camera:   # device (auto or /dev/videoN), match, width, height, fps, exposure, gain, power_line_hz
-model:    # path, conf_thr, iou_thr
-labels:   # it | en
-web:      # host, port, video_fps, jpeg_quality, static_dir
-log:      # level
+camera:    # device (auto or /dev/videoN), match, width, height, fps, exposure,
+           # gain, white_balance, backlight_compensation, saturation, power_line_hz
+tracker:   # enabled, iou_match, alpha, fast_alpha, deadband_iou, min_hits, max_misses
+model:     # path, conf_thr, iou_thr
+labels:    # it | en
+web:       # host, port, video_fps, jpeg_quality, static_dir
+log:       # level
 ```
 
 `camera.device: auto` resolves the node by card name at every start, so a
-re-plug does not need a restart of the unit.
+re-plug does not need a restart of the unit. The camera's automatic exposure,
+white balance and backlight compensation are switched off/overridden at every
+open, and `tracker` keeps the boxes still from frame to frame (`enabled: false`
+publishes the raw detector boxes).
 
 ## Protocol
 

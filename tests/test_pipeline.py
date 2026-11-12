@@ -13,7 +13,14 @@ import pytest
 
 from cpsa.camera import CameraNotFound, VideoFrame
 from cpsa.channel import FrameChannel
-from cpsa.config import CameraConfig, LogConfig, ModelConfig, ShowcaseConfig, WebConfig
+from cpsa.config import (
+    CameraConfig,
+    LogConfig,
+    ModelConfig,
+    ShowcaseConfig,
+    TrackerConfig,
+    WebConfig,
+)
 from cpsa.pipeline import Pipeline, StartError, cap_admits
 from cpsa.yolox import Detection
 
@@ -108,6 +115,16 @@ class SyncDetector:
 
 PERSON = Detection(box=(1.0, 1.0, 5.0, 3.0), score=0.75, class_id=0)
 
+DEFAULT_TRACKER = TrackerConfig(
+    enabled=True,
+    iou_match=0.3,
+    alpha=0.35,
+    fast_alpha=0.8,
+    deadband_iou=0.9,
+    min_hits=2,
+    max_misses=6,
+)
+
 
 def feed(camera: FakeCamera, count: int = 3, *, value: int = 0, delay: float = 0.03) -> None:
     """Push frames slowly enough that the loop takes each one from the slot."""
@@ -116,7 +133,13 @@ def feed(camera: FakeCamera, count: int = 3, *, value: int = 0, delay: float = 0
         time.sleep(delay)
 
 
-def config(tmp_path: Path, *, width: int = WIDTH, height: int = HEIGHT) -> ShowcaseConfig:
+def config(
+    tmp_path: Path,
+    *,
+    width: int = WIDTH,
+    height: int = HEIGHT,
+    tracker: TrackerConfig | None = None,
+) -> ShowcaseConfig:
     model = tmp_path / "yolox_nano.xmodel"
     model.write_bytes(b"fake xmodel")
     return ShowcaseConfig(
@@ -126,10 +149,14 @@ def config(tmp_path: Path, *, width: int = WIDTH, height: int = HEIGHT) -> Showc
             width=width,
             height=height,
             fps=60.0,
-            exposure=150,
-            gain=320,
+            exposure=100,
+            gain=300,
+            white_balance=4000,
+            backlight_compensation=0,
+            saturation=110,
             power_line_hz=50,
         ),
+        tracker=tracker if tracker is not None else DEFAULT_TRACKER,
         model=ModelConfig(path=model, conf_thr=0.35, iou_thr=0.45),
         labels="it",
         web=WebConfig(
@@ -144,13 +171,17 @@ def config(tmp_path: Path, *, width: int = WIDTH, height: int = HEIGHT) -> Showc
 
 
 def build(
-    tmp_path: Path, *, detector: object | None = None, camera: FakeCamera | None = None
+    tmp_path: Path,
+    *,
+    detector: object | None = None,
+    camera: FakeCamera | None = None,
+    tracker: TrackerConfig | None = None,
 ) -> tuple[Pipeline, FakeCamera, Sink, FrameChannel]:
     camera = camera if camera is not None else FakeCamera()
     sink = Sink()
     channel = FrameChannel.create(WIDTH, HEIGHT)
     pipeline = Pipeline(
-        config(tmp_path),
+        config(tmp_path, tracker=tracker),
         channel=channel,
         messages=sink,  # type: ignore[arg-type]
         detector_factory=lambda model: detector if detector is not None else FakeDetector(),
@@ -233,6 +264,7 @@ def test_a_missing_model_fails_before_the_camera_opens(tmp_path: Path) -> None:
     try:
         pipeline._config = ShowcaseConfig(  # type: ignore[misc]
             camera=pipeline._config.camera,
+            tracker=pipeline._config.tracker,
             model=ModelConfig(path=tmp_path / "missing.xmodel", conf_thr=0.35, iou_thr=0.45),
             labels="it",
             web=pipeline._config.web,
@@ -334,6 +366,64 @@ def test_a_frame_reaches_the_video_and_the_state_with_labels(tmp_path: Path) -> 
     assert seq >= 1
     assert not np.all(image == 90)  # the box and the tag were drawn
     assert image[2, 3].tolist() != [90, 90, 90]  # inside the PERSON box
+
+
+def test_the_tracker_keeps_the_published_box_still(tmp_path: Path) -> None:
+    detector = FakeDetector()
+    pipeline, camera, sink, channel = build(tmp_path, detector=detector)
+    offsets = [-0.05, 0.05, -0.03, 0.03, 0.0, -0.05]
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            for offset in offsets:
+                detector.detections = [
+                    Detection(box=(1.0 + offset, 1.0, 5.0 + offset, 3.0), score=0.8, class_id=0)
+                ]
+                camera.push()
+                time.sleep(0.06)
+            wait_until(lambda: len(sink.topics("showcase.state")) >= 2)
+    finally:
+        channel.close()
+        channel.unlink()
+
+    boxes = {
+        tuple(item["box"]) for state in sink.topics("showcase.state") for item in state["objects"]
+    }
+    # The first published box is whichever jittered frame was born; from then
+    # on the tracker must never move it.
+    assert len(boxes) == 1
+
+
+def test_a_disabled_tracker_publishes_the_raw_boxes(tmp_path: Path) -> None:
+    detector = FakeDetector()
+    disabled = TrackerConfig(
+        enabled=False,
+        iou_match=0.3,
+        alpha=0.35,
+        fast_alpha=0.8,
+        deadband_iou=0.9,
+        min_hits=2,
+        max_misses=6,
+    )
+    pipeline, camera, sink, channel = build(tmp_path, detector=detector, tracker=disabled)
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            for offset in (0.0, 0.0, 0.0, 0.75, 0.75, 0.75):
+                detector.detections = [
+                    Detection(box=(1.0 + offset, 1.0, 5.0 + offset, 3.0), score=0.8, class_id=0)
+                ]
+                camera.push()
+                time.sleep(0.08)
+            wait_until(lambda: len(sink.topics("showcase.state")) >= 2)
+    finally:
+        channel.close()
+        channel.unlink()
+
+    boxes = {
+        tuple(item["box"]) for state in sink.topics("showcase.state") for item in state["objects"]
+    }
+    assert len(boxes) >= 2
 
 
 def test_a_detector_without_submit_runs_the_synchronous_path(tmp_path: Path) -> None:
@@ -495,6 +585,7 @@ def test_the_stage_timings_are_logged_once_per_period(
         channel.unlink()
 
     assert "showcase stages over" in caplog.text
+    assert "track=" in caplog.text
     assert "total_fps=" in caplog.text
 
 

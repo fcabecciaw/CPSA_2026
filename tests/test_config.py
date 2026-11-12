@@ -18,9 +18,21 @@ DOCUMENT = {
         "width": 640,
         "height": 480,
         "fps": 60,
-        "exposure": 150,
-        "gain": 320,
+        "exposure": 100,
+        "gain": 200,
+        "white_balance": 4000,
+        "backlight_compensation": 0,
+        "saturation": 110,
         "power_line_hz": 50,
+    },
+    "tracker": {
+        "enabled": True,
+        "iou_match": 0.3,
+        "alpha": 0.35,
+        "fast_alpha": 0.8,
+        "deadband_iou": 0.9,
+        "min_hits": 2,
+        "max_misses": 6,
     },
     "model": {"path": "models/yolox_nano.xmodel", "conf_thr": 0.35, "iou_thr": 0.45},
     "labels": "it",
@@ -49,9 +61,19 @@ def test_the_shipped_configuration_parses_and_names_the_machine() -> None:
     assert config.camera.device == "auto"
     assert config.camera.width == 640 and config.camera.height == 480
     assert config.camera.fps == 60.0
-    assert config.camera.exposure == 150
-    assert config.camera.gain == 320
+    assert config.camera.exposure == 100
+    assert config.camera.gain == 200
+    assert config.camera.white_balance == 4000
+    assert config.camera.backlight_compensation == 0
+    assert config.camera.saturation == 110
     assert config.camera.power_line_hz == 50
+    assert config.tracker.enabled is True
+    assert config.tracker.iou_match == 0.3
+    assert config.tracker.alpha == 0.35
+    assert config.tracker.fast_alpha == 0.8
+    assert config.tracker.deadband_iou == 0.9
+    assert config.tracker.min_hits == 2
+    assert config.tracker.max_misses == 6
     assert config.web.port == 8080
     assert config.web.video_fps == 60.0
     assert config.web.jpeg_quality == 70
@@ -72,6 +94,11 @@ def test_a_document_parses_with_the_default_camera_match() -> None:
     [
         ("camera", "width"),
         ("camera", "exposure"),
+        ("camera", "white_balance"),
+        ("camera", "backlight_compensation"),
+        ("camera", "saturation"),
+        ("tracker", "deadband_iou"),
+        ("tracker", "enabled"),
         ("model", "path"),
         ("web", "jpeg_quality"),
         ("log", "level"),
@@ -94,9 +121,26 @@ def test_a_missing_key_is_named(section: str, key: str) -> None:
         ("camera", "fps", 0),
         ("camera", "fps", float("nan")),
         ("camera", "exposure", 0),
-        ("camera", "gain", 0),
+        ("camera", "gain", 63),  # the F200 offers 64..2540
+        ("camera", "gain", 2541),
+        ("camera", "white_balance", "manual"),
+        ("camera", "white_balance", 2450),
+        ("camera", "white_balance", 6501),
+        ("camera", "white_balance", 4050),  # not a 100 K step
+        ("camera", "white_balance", True),
+        ("camera", "backlight_compensation", -1),
+        ("camera", "backlight_compensation", 5),
+        ("camera", "saturation", -1),
+        ("camera", "saturation", 256),
         ("camera", "power_line_hz", 30),
         ("camera", "device", ""),
+        ("tracker", "enabled", "yes"),
+        ("tracker", "iou_match", 1.5),
+        ("tracker", "alpha", -0.1),
+        ("tracker", "fast_alpha", 2),
+        ("tracker", "deadband_iou", -1),
+        ("tracker", "min_hits", -1),
+        ("tracker", "max_misses", -1),
         ("model", "conf_thr", 1.5),
         ("model", "iou_thr", -0.1),
         ("web", "port", 0),
@@ -113,6 +157,23 @@ def test_an_invalid_value_is_named(section: str, key: str, value: object) -> Non
     with pytest.raises(ConfigError) as excinfo:
         parse(data)
     assert excinfo.value.key == f"{section}.{key}"
+
+
+def test_white_balance_accepts_auto_and_the_control_range() -> None:
+    data = document()
+    data["camera"]["white_balance"] = "auto"  # type: ignore[index]
+    assert parse(data).camera.white_balance == "auto"
+
+    for temperature in (2500, 4000, 6500):
+        data["camera"]["white_balance"] = temperature  # type: ignore[index]
+        assert parse(data).camera.white_balance == temperature
+
+
+def test_the_tracker_can_be_disabled() -> None:
+    data = document()
+    data["tracker"]["enabled"] = False  # type: ignore[index]
+
+    assert parse(data).tracker.enabled is False
 
 
 def test_labels_are_italian_or_english() -> None:

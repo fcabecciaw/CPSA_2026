@@ -32,8 +32,11 @@ def camera_config(**overrides: object) -> CameraConfig:
         "width": 8,
         "height": 4,
         "fps": 30.0,
-        "exposure": 300,
-        "gain": 320,
+        "exposure": 100,
+        "gain": 200,
+        "white_balance": 4000,
+        "backlight_compensation": 0,
+        "saturation": 110,
         "power_line_hz": 50,
     }
     settings.update(overrides)
@@ -192,14 +195,53 @@ def test_frames_carry_v4l2_timestamps_and_the_configured_controls() -> None:
     assert [frame.t for frame in frames] == [5.0, 5.033]
     assert stream.controls == {
         "auto_exposure": 1,
-        "exposure_time_absolute": 300,
-        "gain": 320,
+        "exposure_time_absolute": 100,
+        "gain": 200,
         "power_line_frequency": 1,
+        "white_balance_automatic": 0,
+        "white_balance_temperature": 4000,
+        "backlight_compensation": 0,
+        "saturation": 110,
     }
     rgb = frames[0].decode()
     assert rgb.shape == (4, 8, 3) and rgb.dtype == np.uint8
     assert np.all(np.abs(rgb.astype(int) - 128) <= 5)
     assert stream.closed and not camera.running
+
+
+def test_auto_white_balance_leaves_the_temperature_control_alone() -> None:
+    stream = FakeStream([])
+    camera, _ = make_camera(stream, white_balance="auto")
+    camera.start(lambda frame: None)
+    try:
+        assert stream.controls["white_balance_automatic"] == 1
+        assert stream.controls["backlight_compensation"] == 0
+        assert "white_balance_temperature" not in stream.controls
+    finally:
+        camera.stop()
+
+
+def test_the_image_controls_are_applied_again_after_a_restart() -> None:
+    stream = FakeStream([])
+    camera, _ = make_camera(stream)
+    camera.start(lambda frame: None)
+    camera.stop()
+    stream.controls.clear()
+
+    camera.start(lambda frame: None)
+    try:
+        assert stream.controls == {
+            "auto_exposure": 1,
+            "exposure_time_absolute": 100,
+            "gain": 200,
+            "power_line_frequency": 1,
+            "white_balance_automatic": 0,
+            "white_balance_temperature": 4000,
+            "backlight_compensation": 0,
+            "saturation": 110,
+        }
+    finally:
+        camera.stop()
 
 
 def test_non_monotonic_buffer_timestamps_fall_back_and_warn_once(

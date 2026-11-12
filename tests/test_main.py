@@ -20,7 +20,14 @@ import pytest
 from cpsa import __main__ as entry
 from cpsa.camera import VideoFrame
 from cpsa.channel import MessageChannel
-from cpsa.config import CameraConfig, LogConfig, ModelConfig, ShowcaseConfig, WebConfig
+from cpsa.config import (
+    CameraConfig,
+    LogConfig,
+    ModelConfig,
+    ShowcaseConfig,
+    TrackerConfig,
+    WebConfig,
+)
 from cpsa.yolox import Detection
 
 WIDTH, HEIGHT = 16, 8
@@ -106,9 +113,21 @@ def showcase_config(
             width=WIDTH,
             height=HEIGHT,
             fps=60.0,
-            exposure=150,
-            gain=320,
+            exposure=100,
+            gain=200,
+            white_balance=4000,
+            backlight_compensation=0,
+            saturation=110,
             power_line_hz=50,
+        ),
+        tracker=TrackerConfig(
+            enabled=True,
+            iou_match=0.3,
+            alpha=0.35,
+            fast_alpha=0.8,
+            deadband_iou=0.9,
+            min_hits=2,
+            max_misses=6,
         ),
         model=ModelConfig(path=model, conf_thr=0.35, iou_thr=0.45),
         labels="it",
