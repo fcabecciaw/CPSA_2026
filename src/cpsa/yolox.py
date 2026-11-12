@@ -1010,7 +1010,7 @@ class _Job:
     """One submitted DPU job, enough to decode its outputs in :meth:`YoloxDetector.wait`."""
 
     slot: _Slot
-    job_id: int
+    job_id: Any
     dpu_started: float
     scale: float
     pad: tuple[float, float]

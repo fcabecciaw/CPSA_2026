@@ -282,12 +282,13 @@ remote "$uv_sync"
 
 note "step 5: installing the systemd units"
 # The supervisor that used to boot the demo is gone with the modes it managed:
-# stop and disable it before the new unit takes over the same port.
+# stop and disable it before the new unit takes over the same port. Its unit file
+# stays (disabled): the board's password-less sudo covers systemctl and install,
+# not rm.
 remote "set -e; \
 if systemctl list-unit-files ${OBSOLETE_UNITS} >/dev/null 2>&1; then \
   sudo systemctl stop ${OBSOLETE_UNITS} 2>/dev/null || true; \
   sudo systemctl disable ${OBSOLETE_UNITS} 2>/dev/null || true; \
-  sudo rm -f /etc/systemd/system/${OBSOLETE_UNITS}; \
 fi; \
 cd \"${REMOTE_HOME}/${REMOTE_DIR}\" || { echo 'deploy: error: cannot change directory to ${REMOTE_HOME}/${REMOTE_DIR}' >&2; exit 1; }; \
 sudo install -m 0644 deploy/systemd/cpsa-dpu.service deploy/systemd/cpsa-showcase.service /etc/systemd/system/; \

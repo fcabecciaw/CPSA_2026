@@ -195,11 +195,15 @@ class DpuRunner:
         """Allocate one set of output buffers, zeroed."""
         return [np.zeros([1, *tensor.shape], dtype=np.int8) for tensor in self._outputs]
 
-    def execute(self, inputs: list[NDArray[np.int8]], outputs: list[NDArray[np.int8]]) -> int:
-        """Start one asynchronous DPU job and return its job id."""
-        self._executions += 1
-        return int(self._runner.execute_async(inputs, outputs))
+    def execute(self, inputs: list[NDArray[np.int8]], outputs: list[NDArray[np.int8]]) -> Any:
+        """Start one asynchronous DPU job and return its opaque job handle.
 
-    def wait(self, job_id: int) -> None:
+        The VART Python binding returns a ``(job_id, status)`` tuple; it is passed
+        back to :meth:`wait` unchanged, exactly as VART expects.
+        """
+        self._executions += 1
+        return self._runner.execute_async(inputs, outputs)
+
+    def wait(self, job: Any) -> None:
         """Wait for a job started by :meth:`execute`."""
-        self._runner.wait(job_id)
+        self._runner.wait(job)

@@ -105,7 +105,9 @@ class _Runner:
     def get_output_tensors(self) -> list[_Tensor]:
         return self._subgraph.get_output_tensors()
 
-    def execute_async(self, inputs: list[NDArray[np.int8]], outputs: list[NDArray[np.int8]]) -> int:
+    def execute_async(
+        self, inputs: list[NDArray[np.int8]], outputs: list[NDArray[np.int8]]
+    ) -> tuple[int, int]:
         self.executions += 1
         sequence = self._subgraph.payloads_by_execution
         if sequence is None:
@@ -118,10 +120,13 @@ class _Runner:
         assert len(outputs) == len(payload)
         for buffer, data in zip(outputs, payload, strict=True):
             np.copyto(buffer, data)
-        return self.executions
+        # Like the VART Python binding: a (job_id, status) tuple, passed back to wait().
+        return (self.executions, 0)
 
-    def wait(self, job_id: int) -> None:
+    def wait(self, job: tuple[int, int]) -> None:
         # Jobs complete independently: the detector may wait for N-1 after N ran.
+        assert isinstance(job, tuple), "VART hands back the (job_id, status) tuple"
+        job_id, _status = job
         assert 0 < job_id <= self.executions
 
 
