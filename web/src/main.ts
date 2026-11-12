@@ -6,7 +6,7 @@ import {
   type ConnectionInfo,
   type SocketFactory,
 } from "./client";
-import { CognitiveAgent } from "./cognitive/agent";
+import { CognitiveAgent, HEARTBEAT_MS } from "./cognitive/agent";
 import { CognitiveMemory } from "./cognitive/memory";
 import { Perception } from "./cognitive/perception";
 import { RULEBOOK } from "./cognitive/rulebook";
@@ -118,6 +118,8 @@ const menteFace = byId("mente-face");
 
 const mind = new CognitiveAgent({
   engine: new CognitiveEngine(RULEBOOK),
+  // Warm the voice cache with the lines the engine is about to choose from.
+  prefetch: (texts) => voice.prefetch(texts),
   memory: new CognitiveMemory(),
   perception: new Perception(),
   speak: (text, handlers) => {
@@ -499,7 +501,7 @@ async function boot(): Promise<void> {
     // `showcase-empty` belongs to the mode alone (ShowcaseView never touches it).
     syncViewNotes();
     renderVoice();
-  }, 250);
+  }, HEARTBEAT_MS);
 
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
