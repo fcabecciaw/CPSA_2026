@@ -11,7 +11,7 @@ import yaml
 
 from cpsa.config import ConfigError, StillConfig, TrackerConfig, load, parse
 from cpsa.tracker import BIRTH_SCORE, Tracker
-from cpsa.yolox import Detection
+from cpsa.yolox import OBJECT_CLASSES, PERSON_CLASSES, Detection
 
 ROOT = Path(__file__).resolve().parents[1]
 SHIPPED = ROOT / "config" / "showcase.yaml"
@@ -224,6 +224,81 @@ def test_a_bottle_never_takes_over_the_person_track() -> None:
 
     assert tracker.tracks == 1
     assert [item.class_id for item in output] == [0]
+
+
+# --------------------------------------------------------------------------- #
+# The alternating passes: each class group ages on its own frames
+# --------------------------------------------------------------------------- #
+
+PERSON = detection(100, 100, 340, 440, score=0.9, class_id=0)
+BOTTLE = detection(170, 260, 230, 400, score=0.5, class_id=39)
+
+
+def two_tracks(*, max_misses: int = 2) -> Tracker:
+    """A tracker holding one person and one bottle, both matched twice."""
+    tracker = Tracker(tracker_config(max_misses=max_misses))
+    tracker.update([PERSON, BOTTLE], now=0.0)
+    tracker.update([PERSON, BOTTLE], now=0.05)
+    return tracker
+
+
+def box_of(output: list[Detection], class_id: int) -> tuple[float, float, float, float]:
+    return next(item.box for item in output if item.class_id == class_id)
+
+
+def test_a_class_an_alternate_pass_does_not_look_for_is_not_missed() -> None:
+    tracker = two_tracks()
+    original = box_of(tracker.update([PERSON, BOTTLE], now=0.1), 39)
+
+    # Ten whole-frame passes report persons only: the bottle is not "missed",
+    # it simply was not looked for, so it keeps its box.
+    for step in range(10):
+        shown = tracker.update([PERSON], now=0.2 + step * 0.05, covered=PERSON_CLASSES)
+        assert tracker.tracks == 2
+        assert box_of(shown, 39) == original
+
+
+def test_a_class_ages_out_on_its_own_pass_only() -> None:
+    tracker = two_tracks()
+    # The person's passes do not touch the bottle, however many miss it.
+    for step in range(6):
+        tracker.update([PERSON], now=0.1 + step * 0.05, covered=PERSON_CLASSES)
+    assert tracker.tracks == 2
+
+    # The bottle's own passes do: max_misses is 2, so the third absence drops it.
+    for step in range(2):
+        assert tracker.update([], now=0.5 + step * 0.05, covered=OBJECT_CLASSES)
+    output = tracker.update([], now=0.7, covered=OBJECT_CLASSES)
+    assert tracker.tracks == 1
+    assert [item.class_id for item in output] == [0]
+
+
+def test_a_person_pass_cannot_relabel_an_object_track() -> None:
+    tracker = Tracker(tracker_config())
+    tracker.update([BOTTLE], now=0.0)
+    tracker.update([BOTTLE], now=0.05)
+    bottle_box = box_of(tracker.update([BOTTLE], now=0.1), 39)
+
+    # A whole-frame pass reports a person in the bottle's box: the bottle's
+    # track is not a candidate at all, so it survives as a bottle ...
+    output = tracker.update(
+        [detection(*BOTTLE.box, score=0.9, class_id=0)],
+        now=0.15,
+        covered=PERSON_CLASSES,
+    )
+    assert box_of(output, 39) == bottle_box
+
+    # ... and the zoomed pass still finds it exactly where it was.
+    later = tracker.update([BOTTLE], now=0.2, covered=OBJECT_CLASSES)
+    assert box_of(later, 39) == bottle_box
+
+
+def test_without_a_covered_set_every_frame_looks_for_every_class() -> None:
+    tracker = two_tracks()
+    for step in range(3):
+        tracker.update([PERSON], now=0.1 + step * 0.05)
+
+    assert tracker.tracks == 1
 
 
 def test_a_disabled_tracker_returns_the_raw_boxes() -> None:

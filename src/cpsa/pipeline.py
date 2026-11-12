@@ -24,6 +24,16 @@ The detectors expose that split as ``submit``/``wait``; a detector with only
 The camera slot keeps only the newest frame, so a slow frame is dropped, never
 queued.
 
+``model.zoom`` buys small-object sensitivity by hiding the frame edges, which
+is exactly where a person walks in, so with ``model.alternate`` the YOLOX view
+splits the schedule: even frames run the whole frame and keep only the person
+class, odd frames run the centre crop and keep every other class
+(:class:`cpsa.yolox.Pass`). One inference per frame, so the DPU cost does not
+move, and the tracker ages each class group only on its own passes, so the
+person a zoom frame cannot see is not dropped and neither is the bottle the
+whole-frame pass cannot see. The still gate keeps one forced-refresh deadline
+per pass, so neither group waits twice as long for its refresh.
+
 A booth stands still for minutes at a time, so the YOLOX view has a motion gate
 in front of the DPU: the loop compares each frame's 80x60 grey image with the
 one it last inferred, and while nothing moves it draws the previous boxes again
@@ -66,7 +76,16 @@ from cpsa.motion import StillGate
 from cpsa.movenet import DpuMovenet, MovenetPose
 from cpsa.overlay import draw_overlay, draw_skeleton
 from cpsa.tracker import Tracker
-from cpsa.yolox import Detection, YoloxDetector, class_thresholds, label_for, labels_for
+from cpsa.yolox import (
+    OBJECT_CLASSES,
+    PERSON_CLASSES,
+    Detection,
+    Pass,
+    YoloxDetector,
+    class_thresholds,
+    label_for,
+    labels_for,
+)
 
 logger = logging.getLogger("cpsa.pipeline")
 
@@ -153,7 +172,7 @@ class Detector(Protocol):
     @property
     def stage_ms(self) -> dict[str, float]: ...
 
-    def submit(self, rgb: NDArray[np.uint8]) -> int: ...
+    def submit(self, rgb: NDArray[np.uint8], pass_: Pass | None = None) -> int: ...
 
     def wait(self, token: int) -> Sequence[Detection]: ...
 
@@ -199,6 +218,8 @@ class _PendingFrame:
     """Which runner owns ``token``: ``yolox`` or ``movenet``."""
     t: float
     """The frame's monotonic capture time: the keypoint filter measures ``dt`` from it."""
+    pass_: Pass | None = None
+    """The YOLOX pass this frame ran; ``None`` when the schedule is off."""
 
 
 class _LatestSlot:
@@ -284,6 +305,10 @@ class Pipeline:
             tuple(labels) if labels is not None else labels_for(config.labels)
         )
         self._tracker = Tracker(config.tracker)
+        self._alternate = config.model.alternate
+        self._full_pass = Pass(1.0, PERSON_CLASSES)
+        self._zoom_pass = Pass(config.model.zoom, OBJECT_CLASSES)
+        self._schedule = 0
         still = config.tracker.still
         self._still: StillGate | None = (
             StillGate(still.motion_thr, still.force_every_s) if still.enabled else None
@@ -419,10 +444,36 @@ class Pipeline:
         self._release_runner(runner)
 
     def _reset_still(self) -> None:
-        """Forget the still gate's reference frame, as a new camera or model needs."""
+        """Forget the gate's reference, the pass schedule and the held boxes."""
         if self._still is not None:
             self._still.reset()
         self._last_objects = []
+        self._schedule = 0
+
+    def _next_pass(self) -> tuple[Pass | None, int]:
+        """Return the YOLOX pass of the next inferred frame and its gate lane.
+
+        With ``model.alternate`` the schedule starts on a whole frame (persons
+        only) and alternates with the centre crop (every other class), so a
+        person walking in from a side is seen on the frame right before the
+        zoomed one. The counter advances on every YOLOX frame, skipped ones
+        included, so the gate's two refresh deadlines keep the same rhythm.
+        Without alternation every frame is the configured zoom with no class
+        split, which is the behaviour of ``model.zoom`` alone.
+
+        Returns:
+            The pass and the lane the still gate keeps its refresh deadline on;
+            ``(None, 0)`` when the loop does not alternate.
+        """
+
+        # A live calibration can bring the zoom back to 1.0: nothing to alternate.
+        if not self._alternate or self._zoom_pass.zoom <= 1.0:
+            return None, 0
+        index = self._schedule
+        self._schedule += 1
+        if index % 2 == 0:
+            return self._full_pass, 0
+        return self._zoom_pass, 1
 
     def status(self) -> dict[str, Any]:
         """Return the F-K1 ``status`` payload for the current instant."""
@@ -594,16 +645,22 @@ class Pipeline:
         rgb = frame.decode()
         camera_ms = (time.perf_counter() - started) * 1000.0
 
+        pass_: Pass | None = None
+        lane = 0
+        if model == "yolox":
+            pass_, lane = self._next_pass()
         if model == "yolox" and self._still is not None:
             motion_started = time.perf_counter()
-            infer = self._still.update(rgb, time.monotonic())
+            infer = self._still.update(rgb, time.monotonic(), lane=lane)
             motion_ms = (time.perf_counter() - motion_started) * 1000.0
             if not infer:
                 # The scene has not moved: the boxes of the last inference are
                 # still the truth, so frame N-1 is finished and frame N is drawn
                 # from them without touching the DPU.
                 self._finish_quietly(pending)
-                self._finish_still(frame.width, frame.height, rgb, started, camera_ms, motion_ms)
+                self._finish_still(
+                    frame.width, frame.height, rgb, started, camera_ms, motion_ms, pass_
+                )
                 return None
 
         submit = getattr(runner, "submit", None)
@@ -617,14 +674,15 @@ class Pipeline:
                 rgb,
                 runner,
                 model,
-                detect(rgb),
+                detect(rgb) if pass_ is None else detect(rgb, pass_),
                 started,
                 camera_ms,
                 frame.t,
+                pass_,
             )
             return None
 
-        token = submit(rgb)
+        token = submit(rgb) if pass_ is None else submit(rgb, pass_)
         current = _PendingFrame(
             seq=frame.seq,
             width=frame.width,
@@ -635,6 +693,7 @@ class Pipeline:
             camera_ms=camera_ms,
             model=model,
             t=frame.t,
+            pass_=pass_,
         )
         self._finish_quietly(pending)
         return current
@@ -673,6 +732,7 @@ class Pipeline:
             pending.started,
             pending.camera_ms,
             pending.t,
+            pending.pass_,
         )
 
     def _finish(
@@ -687,6 +747,7 @@ class Pipeline:
         started: float,
         camera_ms: float,
         timestamp: float,
+        pass_: Pass | None = None,
     ) -> None:
         """Draw, publish and time one decoded frame."""
 
@@ -702,11 +763,13 @@ class Pipeline:
         else:
             detections = cast(Sequence[Detection], output)
             track_started = time.perf_counter()
-            tracked = self._tracker.update(detections)
+            tracked = self._tracker.update(
+                detections, covered=None if pass_ is None else pass_.classes
+            )
             track_ms = (time.perf_counter() - track_started) * 1000.0
             objects = _objects(tracked, self._labels)
 
-        stage = runner.stage_ms
+        stage = {**runner.stage_ms, **_pass_flags(pass_)}
         self._render(
             width=width,
             height=height,
@@ -730,6 +793,7 @@ class Pipeline:
         started: float,
         camera_ms: float,
         motion_ms: float,
+        pass_: Pass | None = None,
     ) -> None:
         """Draw the last inferred boxes on a frame the still gate kept off the DPU.
 
@@ -751,7 +815,7 @@ class Pipeline:
             started=started,
             camera_ms=camera_ms,
             track_ms=0.0,
-            stage={"motion": motion_ms},
+            stage={"motion": motion_ms, **_pass_flags(pass_)},
             dpu_ms=last_dpu,
             skipped=True,
         )
@@ -808,6 +872,8 @@ class Pipeline:
                 "draw": draw_ms,
                 "total": total_ms,
                 "skipped": 1.0 if skipped else 0.0,
+                "full": stage.get("full", 0.0),
+                "zoom": stage.get("zoom", 0.0),
             },
             stamps,
         )
@@ -909,6 +975,8 @@ class Pipeline:
             if active == "yolox" and callable(set_zoom):
                 set_zoom(target.zoom, target.zoom_center)
             with self._lock:
+                # The alternating schedule's object pass follows the live zoom too.
+                self._zoom_pass = Pass(target.zoom, self._zoom_pass.classes)
                 # A still scene would keep the boxes of the old crop for up to
                 # ``force_every_s``: the next frame is a full detection.
                 self._reset_still()
@@ -1141,7 +1209,7 @@ class Pipeline:
         logger.info(
             "showcase stages over %d frames: camera=%.2f preprocess=%.2f dpu=%.2f "
             "decode=%.2f motion=%.3f track=%.2f draw=%.2f total=%.2f skipped=%.0f%% "
-            "total_fps=%.1f",
+            "full=%.0f%% zoom=%.0f%% total_fps=%.1f",
             counted,
             means.get("camera", 0.0),
             means.get("preprocess", 0.0),
@@ -1152,8 +1220,23 @@ class Pipeline:
             means.get("draw", 0.0),
             means.get("total", 0.0),
             100.0 * means.get("skipped", 0.0),
+            100.0 * means.get("full", 0.0),
+            100.0 * means.get("zoom", 0.0),
             _rate(stamps),
         )
+
+
+def _pass_flags(pass_: Pass | None) -> dict[str, float]:
+    """Return the stage counters the timing line averages for one pass.
+
+    ``full`` and ``zoom`` are what the log divides by the frame count to show
+    the share of each pass; a loop that does not alternate reports neither.
+    """
+
+    if pass_ is None:
+        return {}
+    full = 1.0 if pass_.zoom <= 1.0 else 0.0
+    return {"full": full, "zoom": 1.0 - full}
 
 
 def _objects(

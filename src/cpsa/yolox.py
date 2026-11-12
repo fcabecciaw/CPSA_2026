@@ -56,6 +56,10 @@ __all__ = [
     "Detection",
     "MAX_CLASSES_PER_CELL",
     "MAX_DETECTIONS",
+    "OBJECT_CLASSES",
+    "PERSON_CLASS",
+    "PERSON_CLASSES",
+    "Pass",
     "QuantizedYoloxDecoder",
     "YOLOX_INPUT_SCALE",
     "YOLOX_INPUT_SIZE",
@@ -1251,16 +1255,23 @@ class YoloxDetector:
         self._zoom = float(zoom)
         self._zoom_center = (float(zoom_center[0]), float(zoom_center[1]))
 
-    def submit(self, rgb: NDArray[np.uint8]) -> int:
+    def submit(self, rgb: NDArray[np.uint8], pass_: Pass | None = None) -> int:
         """Preprocess ``rgb`` and start the DPU without waiting for it.
 
         Returns a token for :meth:`wait`. Submitting frame N and then waiting
         for frame N-1 overlaps the DPU with the CPU decode and the draw. Two
         jobs may be in flight (one per slot); a third submit raises.
 
+        Args:
+            rgb: The ``(H, W, 3)`` RGB uint8 frame.
+            pass_: The pass this frame runs: its crop and the classes
+                :meth:`wait` keeps. ``None`` uses the detector's configured
+                zoom and reports every class.
+
         Raises:
             RuntimeError: If both slots are busy.
-            ValueError: If ``rgb`` is not an ``(H, W, 3)`` uint8 frame.
+            ValueError: If ``rgb`` is not an ``(H, W, 3)`` uint8 frame, or the
+                pass asks for a crop the frame cannot give.
         """
 
         image = _validate_frame(rgb)
@@ -1270,8 +1281,9 @@ class YoloxDetector:
             raise RuntimeError("both DPU slots are busy; call wait() before submitting again")
         slot = self._slots[self._next_slot]
         self._next_slot = (self._next_slot + 1) % len(self._slots)
+        schedule = pass_ if pass_ is not None else Pass(self._zoom)
         height, width = int(image.shape[0]), int(image.shape[1])
-        crop = zoom_crop(width, height, self._zoom, self._zoom_center)
+        crop = zoom_crop(width, height, schedule.zoom, self._zoom_center)
         geometry = crop.size
 
         started = time.perf_counter()
@@ -1300,6 +1312,7 @@ class YoloxDetector:
             pad=pad,
             source_hw=geometry,
             origin=crop.origin,
+            classes=schedule.classes,
         )
         return token
 
@@ -1329,12 +1342,14 @@ class YoloxDetector:
             source_hw=job.source_hw,
             origin=job.origin,
         )
+        if job.classes is not None:
+            detections = [item for item in detections if item.class_id in job.classes]
         self._stage_ms["decode"] = (time.perf_counter() - started) * 1000.0
         return detections
 
-    def detect(self, rgb: NDArray[np.uint8]) -> list[Detection]:
-        """Run the DPU model on an ``(H, W, 3)`` RGB uint8 frame."""
-        return self.wait(self.submit(rgb))
+    def detect(self, rgb: NDArray[np.uint8], pass_: Pass | None = None) -> list[Detection]:
+        """Run the DPU model on an ``(H, W, 3)`` RGB uint8 frame, through ``pass_``."""
+        return self.wait(self.submit(rgb, pass_))
 
     def close(self) -> None:
         """Release the DPU runner and the two buffer sets (R2-G model swap)."""
@@ -1368,6 +1383,8 @@ class _Job:
     pad: tuple[float, float]
     source_hw: tuple[int, int]
     origin: tuple[float, float] = (0.0, 0.0)
+    classes: frozenset[int] | None = None
+    """Classes :meth:`YoloxDetector.wait` keeps; ``None`` keeps every class."""
 
 
 COCO80_EN: tuple[str, ...] = (
@@ -1535,3 +1552,37 @@ COCO80_IT: tuple[str, ...] = (
     "phon",
     "spazzolino",
 )
+
+
+PERSON_CLASS = 0
+"""COCO-80 id of ``person``: the one class a whole-frame pass reports."""
+
+PERSON_CLASSES = frozenset({PERSON_CLASS})
+"""The classes of the whole-frame pass: only a person walking in from a side."""
+
+OBJECT_CLASSES = frozenset(range(PERSON_CLASS + 1, len(COCO80_EN)))
+"""The classes of the zoomed pass: every held object and every piece of furniture."""
+
+
+@dataclass(frozen=True)
+class Pass:
+    """One detector pass: the region the network sees and the classes it reports.
+
+    The showcase alternates two passes because one crop cannot serve both ends
+    of the booth: the whole frame finds a person entering from a side, and the
+    centre crop (``model.zoom``) makes a small held bottle big enough to stay
+    above a stride cell. ``classes`` ``None`` reports every class, which is what
+    a detector without the alternating schedule does.
+
+    Attributes:
+        zoom: Crop magnification, ``1.0`` for the whole frame.
+        classes: The class ids this pass may report, ``None`` for all of them.
+    """
+
+    zoom: float
+    classes: frozenset[int] | None = None
+
+    @property
+    def persons_only(self) -> bool:
+        """Whether this pass reports nothing but the person class."""
+        return self.classes == PERSON_CLASSES

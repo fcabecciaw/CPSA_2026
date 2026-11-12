@@ -15,7 +15,7 @@ tracker: { enabled: true, iou_match: 0.3, alpha: 0.35, fast_alpha: 0.8,
            deadband_iou: 0.9, min_hits: 2, max_misses: 6 }
 model:   { path: models/yolox_nano.xmodel, conf_thr: 0.35,
            class_conf: {person: 0.40}, object_conf: 0.25, iou_thr: 0.45,
-           zoom: 1.0, zoom_center: [0.5, 0.5] }
+           zoom: 1.0, zoom_center: [0.5, 0.5], alternate: false }
 movenet: { path: models/movenet.xmodel, enabled: true, publish_hz: 30,
            smoothing: { enabled: true, min_cutoff: 1.0, beta: 0.02,
                         d_cutoff: 1.0, deadband_px: 1.5, show_score: 0.35,
@@ -225,6 +225,14 @@ class ModelConfig:
     same 416x416 input, so the objects held in front of the camera arrive
     larger and stop flickering between classes. ``zoom_center`` moves that crop
     (``[0.5, 0.5]`` is the middle); boxes are mapped back to full-frame pixels.
+
+    A zoom hides the frame edges, which is where a person walks in, so
+    ``alternate`` (on by default whenever ``zoom`` is above 1.0) splits the
+    passes: even frames run the whole frame and report only persons, odd frames
+    run the crop and report every other class. One inference per frame, no
+    extra DPU work, and each class group is only aged on its own passes.
+    ``alternate: true`` with ``zoom: 1.0`` is refused: both passes would be the
+    same frame and the split would only halve each group's update rate.
     """
 
     path: Path
@@ -234,6 +242,7 @@ class ModelConfig:
     object_conf: float | None = None
     zoom: float = 1.0
     zoom_center: tuple[float, float] = (0.5, 0.5)
+    alternate: bool = False
 
     @property
     def name(self) -> str:
@@ -377,14 +386,22 @@ def _still_config(still: _Section) -> StillConfig:
 
 
 def _model_config(model: _Section) -> ModelConfig:
+    zoom = model.optional_number("zoom", 1.0, *ZOOM_RANGE)
+    alternate = model.optional_boolean("alternate", zoom > 1.0)
+    if alternate and zoom <= 1.0:
+        raise ConfigError(
+            model._key("alternate"),
+            "expected the key to be absent or false when model.zoom is 1.0",
+        )
     config = ModelConfig(
         path=Path(model.text("path")).expanduser(),
         conf_thr=model.fraction("conf_thr"),
         iou_thr=model.fraction("iou_thr"),
         class_conf=model.fraction_map("class_conf"),
         object_conf=model.optional_fraction("object_conf"),
-        zoom=model.optional_number("zoom", 1.0, *ZOOM_RANGE),
+        zoom=zoom,
         zoom_center=model.fraction_pair("zoom_center", (0.5, 0.5)),
+        alternate=alternate,
     )
     model.reject_unknown()
     return config

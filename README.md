@@ -102,7 +102,7 @@ camera:    # device (auto or /dev/videoN), match, width, height, fps, exposure,
            # gain, white_balance, backlight_compensation, saturation, power_line_hz
 tracker:   # enabled, iou_match, alpha, fast_alpha, deadband_iou, min_hits, max_misses,
            # still: enabled, motion_thr, force_every_s
-model:     # path, conf_thr, iou_thr, zoom, zoom_center
+model:     # path, conf_thr, iou_thr, zoom, zoom_center, alternate
 labels:    # it | en
 web:       # host, port, video_fps, jpeg_quality, static_dir
 log:       # level
@@ -113,6 +113,14 @@ frame, and `1.3`-`1.5` feed the central part of it into the same 416x416 input,
 so a small object reaches the network larger without extra DPU work;
 `zoom_center` moves that crop, and the boxes still come back in full-frame
 pixels.
+
+A zoom hides the frame edges, which is where a person walks in, so `model.alternate`
+is on by default whenever `zoom` is above `1.0`: even frames run the whole frame
+and report only persons, odd frames run the crop and report every other class.
+It is one inference per frame, so the DPU cost does not change, and the tracker
+ages each class group only on its own passes, so the person a zoom frame cannot
+see is not dropped and neither is the bottle the whole-frame pass cannot see.
+`alternate: false` goes back to running the configured zoom on every frame.
 
 `camera.device: auto` resolves the node by card name at every start, so a
 re-plug does not need a restart of the unit. The camera's automatic exposure,

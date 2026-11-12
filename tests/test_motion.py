@@ -82,6 +82,38 @@ def test_a_still_scene_still_gets_a_forced_detection() -> None:
     assert still.update(frame(90), 0.64) is False
 
 
+def test_each_pass_lane_gets_its_own_forced_detection() -> None:
+    """The alternating schedule refreshes each pass, not whichever ran last."""
+    still = gate(force_every_s=0.5)
+
+    # Warm up: the first still frames go through and seed both deadlines.
+    assert still.update(frame(90), 0.0, lane=0) is True
+    assert still.update(frame(90), 0.1, lane=1) is True
+    assert still.update(frame(90), 0.2, lane=0) is True
+    assert still.update(frame(90), 0.3, lane=1) is False
+    assert still.update(frame(90), 0.4, lane=0) is False
+    assert still.update(frame(90), 0.5, lane=1) is False
+    assert still.update(frame(90), 0.6, lane=0) is False
+
+    # Lane 1 is 0.6 s past its own detection; lane 0 is still at 0.4 s, so it
+    # must not inherit lane 1's refresh and wait for its own deadline.
+    assert still.update(frame(90), 0.7, lane=1) is True
+    assert still.update(frame(90), 0.8, lane=0) is True
+
+
+def test_reset_forgets_the_reference_for_every_pass_lane() -> None:
+    still = gate(force_every_s=30.0)
+    for index in range(4):
+        still.update(frame(90), 0.02 * index, lane=index % 2)
+    assert still.update(frame(90), 0.1, lane=0) is False
+
+    still.reset()
+
+    # Both passes infer again on their first frame after the reset.
+    assert still.update(frame(90), 0.1, lane=0) is True
+    assert still.update(frame(90), 0.1, lane=1) is True
+
+
 def test_sensor_noise_on_a_still_scene_counts_as_still() -> None:
     still = gate(motion_thr=1.0)
 

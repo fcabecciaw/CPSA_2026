@@ -12,7 +12,7 @@ import pytest
 from numpy.typing import NDArray
 
 from cpsa import yolox
-from cpsa.yolox import Detection
+from cpsa.yolox import OBJECT_CLASSES, PERSON_CLASSES, Detection, Pass
 
 INPUT_DIMS = [1, 416, 416, 3]
 OUTPUT_DIMS = {
@@ -468,6 +468,70 @@ def test_a_zoomed_detector_maps_its_boxes_to_the_full_frame(
     assert all(
         crop.top <= item.box[1] < item.box[3] <= crop.top + crop.height for item in detections
     )
+
+
+def test_a_full_pass_reports_persons_only_in_full_frame_pixels(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A person walks in at the left edge: its box starts outside the frame and
+    # is clipped to x=0, which is the pixel the crop of a zoom pass never sees.
+    outputs = {
+        8: _head(
+            3,
+            [
+                (
+                    20,
+                    0,
+                    {
+                        "tx": -2.0,
+                        "log_w": math.log(12.0),
+                        "log_h": math.log(20.0),
+                        "class_id": 0,
+                    },
+                ),
+                (10, 10, {"tx": 0.5, "ty": 0.5, "log_w": 0.0, "log_h": 0.0, "class_id": 39}),
+            ],
+            8,
+        ),
+        16: _head(3, [], 16),
+        32: _head(3, [], 32),
+    }
+    detector = _detector(monkeypatch, tmp_path, payloads=outputs, zoom=1.5)
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    detections = detector.detect(frame, Pass(1.0, PERSON_CLASSES))
+
+    assert [item.class_id for item in detections] == [0]
+    assert detections[0].box[0] == 0.0
+    assert 0.0 < detections[0].box[2] <= 640.0
+    assert 0.0 <= detections[0].box[1] < detections[0].box[3] <= 480.0
+
+
+def test_a_zoom_pass_reports_objects_only_inside_the_crop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    outputs = {
+        8: _head(
+            3,
+            [
+                (8, 8, {"tx": 0.5, "ty": 0.5, "log_w": 0.0, "log_h": 0.0, "class_id": 0}),
+                (20, 20, {"tx": 0.5, "ty": 0.5, "log_w": 1.0, "log_h": 1.0, "class_id": 39}),
+            ],
+            8,
+        ),
+        16: _head(3, [], 16),
+        32: _head(3, [], 32),
+    }
+    detector = _detector(monkeypatch, tmp_path, payloads=outputs, zoom=1.5)
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    crop = yolox.zoom_crop(640, 480, 1.5)
+
+    detections = detector.detect(frame, Pass(1.5, OBJECT_CLASSES))
+
+    assert [item.class_id for item in detections] == [39]
+    box = detections[0].box
+    assert crop.left <= box[0] < box[2] <= crop.left + crop.width
+    assert crop.top <= box[1] < box[3] <= crop.top + crop.height
 
 
 @pytest.mark.parametrize("zoom", [0.9, 0.0, float("nan")])

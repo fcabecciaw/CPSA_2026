@@ -627,6 +627,19 @@ def test_boxes_to_source_inverts_the_letterbox_and_clips() -> None:
     assert mapped.tolist() == [[0.0, 0.0, 180.0, 400.0]]
 
 
+def test_the_pass_classes_split_persons_from_every_other_class() -> None:
+    assert yolox.PERSON_CLASS == 0
+    assert frozenset({0}) == yolox.PERSON_CLASSES
+    assert frozenset(range(1, len(COCO80_EN))) == yolox.OBJECT_CLASSES
+    assert yolox.PERSON_CLASSES.isdisjoint(yolox.OBJECT_CLASSES)
+
+
+def test_a_pass_knows_whether_it_reports_only_persons() -> None:
+    assert yolox.Pass(1.0, yolox.PERSON_CLASSES).persons_only is True
+    assert yolox.Pass(1.5, yolox.OBJECT_CLASSES).persons_only is False
+    assert yolox.Pass(1.5).persons_only is False
+
+
 def test_boxes_to_source_rejects_a_bad_scale() -> None:
     with pytest.raises(ValueError):
         boxes_to_source(np.zeros((0, 4)), 0.0, (0.0, 0.0), (10, 10))

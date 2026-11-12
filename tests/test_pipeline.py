@@ -30,7 +30,7 @@ from cpsa.config import (
 )
 from cpsa.movenet import MovenetPose
 from cpsa.pipeline import Pipeline, StartError, cap_admits
-from cpsa.yolox import Detection
+from cpsa.yolox import OBJECT_CLASSES, PERSON_CLASSES, Detection, Pass
 
 WIDTH, HEIGHT = 8, 4
 
@@ -100,6 +100,8 @@ class FakeDetector:
         self.detections = list(detections)
         self.stage_ms = {"preprocess": 1.0, "dpu": 2.0, "decode": 0.5}
         self.calls: list[str] = []
+        self.passes: list[Pass | None] = []
+        self.frames: list[np.ndarray] = []
         self.closed = False
         self.zooms: list[tuple[float, tuple[float, float]]] = []
         self._token = 0
@@ -108,8 +110,10 @@ class FakeDetector:
         self.zooms.append((zoom, zoom_center))
         self.calls.append("set_zoom")
 
-    def submit(self, rgb: np.ndarray) -> int:
+    def submit(self, rgb: np.ndarray, pass_: Pass | None = None) -> int:
         self.calls.append("submit")
+        self.passes.append(pass_)
+        self.frames.append(rgb)
         self._token += 1
         return self._token
 
@@ -130,10 +134,39 @@ class SyncDetector:
         self.detections = list(detections)
         self.stage_ms = {"preprocess": 1.0, "dpu": 2.0, "decode": 0.5}
         self.calls = 0
+        self.passes: list[Pass | None] = []
 
-    def detect(self, rgb: np.ndarray) -> list[Detection]:
+    def detect(self, rgb: np.ndarray, pass_: Pass | None = None) -> list[Detection]:
         self.calls += 1
+        self.passes.append(pass_)
         return list(self.detections)
+
+
+class PassDetector(FakeDetector):
+    """A detector that returns the detections of the pass it is running.
+
+    The real graph reports only the classes of its pass, so the whole-frame
+    pass cannot see the bottle in the crop and the zoomed one cannot see the
+    person at the edge: this fake keeps the same split for the loop tests.
+    """
+
+    def __init__(self, persons: Sequence[Detection], objects: Sequence[Detection]) -> None:
+        super().__init__()
+        self.persons = list(persons)
+        self.objects = list(objects)
+        self._by_token: dict[int, Pass | None] = {}
+
+    def submit(self, rgb: np.ndarray, pass_: Pass | None = None) -> int:
+        token = super().submit(rgb, pass_)
+        self._by_token[token] = pass_
+        return token
+
+    def wait(self, token: int) -> list[Detection]:
+        self.calls.append("wait")
+        pass_ = self._by_token.pop(token)
+        if pass_ is not None and pass_.persons_only:
+            return list(self.persons)
+        return list(self.objects)
 
 
 class FakePoseDetector:
@@ -235,6 +268,8 @@ def config(
     tracker: TrackerConfig | None = None,
     movenet_enabled: bool = True,
     publish_hz: float = 30.0,
+    zoom: float = 1.0,
+    alternate: bool = False,
 ) -> ShowcaseConfig:
     model = tmp_path / "yolox_nano.xmodel"
     model.write_bytes(b"fake xmodel")
@@ -255,7 +290,13 @@ def config(
             power_line_hz=50,
         ),
         tracker=tracker if tracker is not None else DEFAULT_TRACKER,
-        model=ModelConfig(path=model, conf_thr=0.35, iou_thr=0.45),
+        model=ModelConfig(
+            path=model,
+            conf_thr=0.35,
+            iou_thr=0.45,
+            zoom=zoom,
+            alternate=alternate,
+        ),
         movenet=MovenetConfig(
             path=movenet_model,
             enabled=movenet_enabled,
@@ -284,6 +325,8 @@ def build(
     commands: CommandChannel | None = None,
     movenet_enabled: bool = True,
     publish_hz: float = 30.0,
+    zoom: float = 1.0,
+    alternate: bool = False,
     detector_factory: Callable[[ModelConfig], object] | None = None,
     pose_factory: Callable[[MovenetConfig], FakePoseDetector] | None = None,
     calibration_store: CalibrationStore | None = None,
@@ -298,6 +341,8 @@ def build(
             tracker=tracker,
             movenet_enabled=movenet_enabled,
             publish_hz=publish_hz,
+            zoom=zoom,
+            alternate=alternate,
         ),
         channel=channel,
         messages=sink,  # type: ignore[arg-type]
@@ -692,6 +737,142 @@ def test_a_disabled_gate_infers_on_every_frame(tmp_path: Path) -> None:
     assert submitted == 10
 
 
+# --------------------------------------------------------------------------- #
+# The alternating passes: whole frame for persons, crop for everything else
+# --------------------------------------------------------------------------- #
+
+#: A person walking in at the left edge: the crop of a zoomed pass never sees it.
+EDGE_PERSON = Detection(box=(0.0, 0.0, 1.5, 4.0), score=0.8, class_id=0)
+#: A small object in the middle: the whole frame shrinks it below a stride cell.
+CENTRE_BOTTLE = Detection(box=(3.0, 1.5, 4.5, 3.0), score=0.5, class_id=39)
+
+
+def shown_labels(sink: Sink) -> list[str]:
+    """The labels of the newest published state, sorted."""
+    return sorted(item["label"] for item in sink.topics("showcase.state")[-1]["objects"])
+
+
+def test_the_alternating_passes_are_the_whole_frame_then_the_zoom(tmp_path: Path) -> None:
+    detector = FakeDetector([PERSON])
+    pipeline, camera, sink, channel = build(tmp_path, detector=detector, zoom=1.5, alternate=True)
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            feed(camera, 8, delay=0.03)
+            wait_until(lambda: len(detector.passes) >= 4)
+            passes = list(detector.passes[:4])
+    finally:
+        channel.close()
+        channel.unlink()
+
+    assert passes == [
+        Pass(1.0, PERSON_CLASSES),
+        Pass(1.5, OBJECT_CLASSES),
+        Pass(1.0, PERSON_CLASSES),
+        Pass(1.5, OBJECT_CLASSES),
+    ]
+
+
+def test_without_alternation_every_frame_runs_the_configured_zoom(tmp_path: Path) -> None:
+    detector = FakeDetector([PERSON])
+    pipeline, camera, sink, channel = build(tmp_path, detector=detector, zoom=1.5, alternate=False)
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            feed(camera, 8, delay=0.03)
+            wait_until(lambda: len(detector.passes) >= 4)
+            passes = list(detector.passes[:4])
+    finally:
+        channel.close()
+        channel.unlink()
+
+    assert passes == [None, None, None, None]
+
+
+def test_a_person_at_the_frame_edge_survives_the_zoom_passes(tmp_path: Path) -> None:
+    detector = PassDetector([EDGE_PERSON], [CENTRE_BOTTLE])
+    pipeline, camera, sink, channel = build(tmp_path, detector=detector, zoom=1.5, alternate=True)
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            feed(camera, 14, value=90, delay=0.04)
+            wait_until(
+                lambda: any(len(state["objects"]) == 2 for state in sink.topics("showcase.state"))
+            )
+            # Ten more frames: half of them are zooms that cannot see the edge.
+            feed(camera, 10, value=90, delay=0.03)
+            wait_until(lambda: len(sink.topics("showcase.state")) >= 2)
+            time.sleep(0.1)
+            labels = shown_labels(sink)
+    finally:
+        channel.close()
+        channel.unlink()
+
+    assert labels == ["bottiglia", "persona"]
+
+
+def test_a_small_object_in_the_crop_survives_the_whole_frame_passes(tmp_path: Path) -> None:
+    detector = PassDetector([EDGE_PERSON], [CENTRE_BOTTLE])
+    pipeline, camera, sink, channel = build(tmp_path, detector=detector, zoom=1.5, alternate=True)
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            feed(camera, 14, value=90, delay=0.04)
+            wait_until(
+                lambda: any(len(state["objects"]) == 2 for state in sink.topics("showcase.state"))
+            )
+            feed(camera, 10, value=90, delay=0.03)
+            wait_until(lambda: len(sink.topics("showcase.state")) >= 2)
+            time.sleep(0.1)
+            latest = sink.topics("showcase.state")[-1]["objects"]
+            classes = sorted(item["class_id"] for item in latest)
+    finally:
+        channel.close()
+        channel.unlink()
+
+    assert classes == [0, 39]
+
+
+def test_the_alternating_passes_still_go_through_the_motion_gate(tmp_path: Path) -> None:
+    detector = FakeDetector([PERSON])
+    pipeline, camera, sink, channel = build(
+        tmp_path,
+        detector=detector,
+        tracker=tracker_with_still(),
+        zoom=1.5,
+        alternate=True,
+    )
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            feed(camera, 16, delay=0.02)
+            wait_until(lambda: len(sink.topics("showcase.state")) >= 2)
+            passes = list(detector.passes[:4])
+            submits = detector.calls.count("submit")
+
+            # The frames do not move: alternating does not defeat the gate, so
+            # the DPU is not touched again.
+            feed(camera, 16, delay=0.02)
+            wait_until(lambda: len(sink.topics("showcase.state")) >= 3)
+            time.sleep(0.05)
+            submits_after = detector.calls.count("submit")
+    finally:
+        channel.close()
+        channel.unlink()
+
+    assert {item.zoom for item in passes if item is not None} == {1.0, 1.5}
+    assert submits > 0
+    assert submits_after == submits
+
+
+def test_the_stage_flags_name_the_pass_of_each_frame() -> None:
+    from cpsa.pipeline import _pass_flags
+
+    assert _pass_flags(None) == {}
+    assert _pass_flags(Pass(1.0, PERSON_CLASSES)) == {"full": 1.0, "zoom": 0.0}
+    assert _pass_flags(Pass(1.5, OBJECT_CLASSES)) == {"full": 0.0, "zoom": 1.0}
+
+
 def test_a_detector_without_submit_runs_the_synchronous_path(tmp_path: Path) -> None:
     detector = SyncDetector([PERSON])
     pipeline, camera, sink, channel = build(tmp_path, detector=detector)
@@ -854,6 +1035,8 @@ def test_the_stage_timings_are_logged_once_per_period(
     assert "showcase stages over" in caplog.text
     assert "track=" in caplog.text
     assert "movenet_dpu" not in caplog.text
+    assert "full=" in caplog.text
+    assert "zoom=" in caplog.text
     assert "total_fps=" in caplog.text
 
 

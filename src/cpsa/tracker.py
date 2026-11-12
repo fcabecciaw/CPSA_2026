@@ -16,6 +16,14 @@ And a track whose displayed box has held still for a second is *settled*: it
 gets a wider deadband, a 5%-quantized score and thirty missed frames of life,
 which is what keeps a table of still objects rock steady.
 
+A frame may also look for only part of the classes: the alternating YOLOX
+schedule runs a whole-frame pass that reports persons and a zoomed pass that
+reports everything else. Such a frame passes ``covered`` -- the classes its
+inference could see -- and a track of an uncovered class is left exactly as it
+was: not matched, not counted as missed, not aged out. Each class group
+therefore ages on its own passes only, which is what lets a person be found at
+the frame edge every other frame and a held bottle in the crop on the others.
+
 The tracker is pure numpy on little ``(4,)`` boxes, so 20 boxes cost a fraction
 of the 16.7 ms of a 60 fps frame.
 """
@@ -238,7 +246,12 @@ class Tracker:
         """Forget every track, for example when the camera is reopened."""
         self._tracks.clear()
 
-    def update(self, detections: Sequence[Detection], now: float | None = None) -> list[Detection]:
+    def update(
+        self,
+        detections: Sequence[Detection],
+        now: float | None = None,
+        covered: frozenset[int] | None = None,
+    ) -> list[Detection]:
         """Match ``detections`` to the tracks and return the boxes to display.
 
         Args:
@@ -246,6 +259,11 @@ class Tracker:
             now: ``time.monotonic()`` of the frame; the default reads the clock.
                 The class-switch and settle timers run on it, so a frame rate
                 that changes (the still gate skips frames) cannot stretch them.
+            covered: The classes this frame's inference could report, when the
+                loop runs a schedule that splits them between passes. A track
+                of an uncovered class is neither matched nor counted as missed,
+                so a person-only pass cannot age a bottle out (and the other
+                way round); ``None`` means the frame looked for every class.
         """
 
         config = self._config
@@ -257,7 +275,7 @@ class Tracker:
             -1, 4
         )
         scores = self._overlaps(boxes, old_count)
-        matched = self._match(scores, detections, old_count)
+        matched = self._match(scores, detections, old_count, covered)
         changed: list[tuple[_Track, bool]] = []
         for index, detection in enumerate(detections):
             track_index = matched.get(index)
@@ -277,10 +295,15 @@ class Tracker:
             changed.append((track, was_shown))
         matched_tracks = set(matched.values())
         for track_index in range(old_count):
-            if track_index not in matched_tracks:
-                track = self._tracks[track_index]
-                track.misses += 1
-                track.hits = 0
+            if track_index in matched_tracks:
+                continue
+            track = self._tracks[track_index]
+            if covered is not None and track.class_id not in covered:
+                # This pass did not look for that class: the track waits for
+                # its own pass instead of ageing.
+                continue
+            track.misses += 1
+            track.hits = 0
         self._tracks = [track for track in self._tracks if track.misses <= self._miss_limit(track)]
         self._move_displayed(changed, when)
         return self._published()
@@ -297,6 +320,7 @@ class Tracker:
         scores: NDArray[np.float64],
         detections: Sequence[Detection],
         track_count: int,
+        covered: frozenset[int] | None,
     ) -> dict[int, int]:
         """Greedy IoU matching across classes, an agreeing class first.
 
@@ -304,7 +328,9 @@ class Tracker:
         long as the IoU is at least :data:`MATCH_IOU` (``iou_match`` when the
         class agrees): the label is the track's business, not the matcher's, so
         a detector that calls a cup a bowl keeps the track instead of replacing
-        it. ``scores`` is left untouched; the caller needs the raw IoU.
+        it. Tracks of a class outside ``covered`` are not candidates at all, so
+        a person-only pass cannot relabel the bottle it is holding.
+        ``scores`` is left untouched; the caller needs the raw IoU.
         """
         config = self._config
         if not detections or track_count == 0:
@@ -317,6 +343,13 @@ class Tracker:
         )
         same_class = detection_classes[:, None] == classes[None, :]
         allowed = np.where(same_class, scores >= config.iou_match, scores >= MATCH_IOU)
+        if covered is not None:
+            looked_for = np.fromiter(
+                (track.class_id in covered for track in self._tracks),
+                dtype=np.bool_,
+                count=track_count,
+            )
+            allowed &= looked_for[None, :]
         preference = np.where(same_class, scores + CLASS_PREFERENCE, scores)
         preference[~allowed] = -1.0
         matched: dict[int, int] = {}

@@ -97,6 +97,7 @@ def test_the_shipped_configuration_parses_and_names_the_machine() -> None:
     assert config.model.object_conf == 0.45
     assert config.model.zoom == 1.5
     assert config.model.zoom_center == (0.5, 0.5)
+    assert config.model.alternate is True
     assert config.movenet.name == "movenet"
     assert config.movenet.path == Path("models/movenet.xmodel")
     assert config.movenet.enabled is True
@@ -151,6 +152,7 @@ def test_a_document_without_class_thresholds_keeps_the_global_default() -> None:
     assert model.object_conf is None
     assert model.zoom == 1.0
     assert model.zoom_center == (0.5, 0.5)
+    assert model.alternate is False
     assert class_thresholds(model.conf_thr, class_conf=model.class_conf) == {
         class_id: model.conf_thr for class_id in range(len(COCO80_EN))
     }
@@ -195,6 +197,49 @@ def test_an_invalid_zoom_center_is_named(value: object) -> None:
     with pytest.raises(ConfigError) as excinfo:
         parse(data)
     assert excinfo.value.key == "model.zoom_center"
+
+
+def test_alternation_defaults_to_on_with_a_zoom() -> None:
+    data = document()
+    data["model"]["zoom"] = 1.5  # type: ignore[index]
+
+    assert parse(data).model.alternate is True
+
+
+def test_alternation_can_be_switched_off_with_a_zoom() -> None:
+    data = document()
+    data["model"]["zoom"] = 1.5  # type: ignore[index]
+    data["model"]["alternate"] = False  # type: ignore[index]
+
+    assert parse(data).model.alternate is False
+
+
+def test_alternation_stays_off_without_a_zoom() -> None:
+    data = document()
+    data["model"]["zoom"] = 1.0  # type: ignore[index]
+
+    assert parse(data).model.alternate is False
+
+
+def test_alternation_without_a_zoom_is_refused() -> None:
+    data = document()
+    data["model"]["zoom"] = 1.0  # type: ignore[index]
+    data["model"]["alternate"] = True  # type: ignore[index]
+
+    with pytest.raises(ConfigError) as excinfo:
+        parse(data)
+    assert excinfo.value.key == "model.alternate"
+
+
+@pytest.mark.parametrize("value", ["yes", 1, None, [True]])
+def test_an_invalid_alternate_is_named(value: object) -> None:
+    data = document()
+    data["model"]["zoom"] = 1.5  # type: ignore[index]
+    data["model"]["alternate"] = value  # type: ignore[index]
+
+    with pytest.raises(ConfigError) as excinfo:
+        parse(data)
+    assert excinfo.value.key == "model.alternate"
 
 
 def test_the_class_thresholds_resolve_to_the_showcase_classes() -> None:

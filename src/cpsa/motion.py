@@ -68,9 +68,14 @@ class StillGate:
     80x60 grey image and the one of the last inferred frame, in grey levels:
     sensor noise lands around 0.5, a person moving across the booth above 1.
 
+    The scene's stillness is shared: one reference frame and one still counter
+    for every frame the loop hands over. Only the forced detection runs per
+    *lane* -- the alternating YOLOX schedule runs two kinds of pass, so each
+    needs its own deadline or one pass would refresh only every other time.
+
     Args:
         motion_thr: Score below which the scene counts as still.
-        force_every_s: Longest time without a full detection, in seconds.
+        force_every_s: Longest time without a full detection, per lane.
     """
 
     def __init__(self, motion_thr: float, force_every_s: float) -> None:
@@ -78,7 +83,7 @@ class StillGate:
         self._force_every_s = float(force_every_s)
         self._reference: NDArray[np.uint8] | None = None
         self._still = 0
-        self._last_infer = 0.0
+        self._last_infer: dict[int, float] = {}
         self._score = math.inf
 
     @property
@@ -95,15 +100,18 @@ class StillGate:
         """Forget the reference frame, for example when the camera is reopened."""
         self._reference = None
         self._still = 0
-        self._last_infer = 0.0
+        self._last_infer.clear()
         self._score = math.inf
 
-    def update(self, rgb: NDArray[np.uint8], now: float) -> bool:
+    def update(self, rgb: NDArray[np.uint8], now: float, *, lane: int = 0) -> bool:
         """Record one frame and return ``True`` when it must go to the detector.
 
         Args:
             rgb: The frame the loop decoded, ``(height, width, 3)`` uint8.
             now: ``time.monotonic()`` of the frame, for the refresh timer.
+            lane: Which pass of the loop this frame belongs to. Each lane has
+                its own forced-refresh deadline; ``0`` is the only lane when
+                the loop runs one kind of pass.
 
         Returns:
             ``True`` to preprocess, infer and decode the frame, ``False`` to
@@ -115,9 +123,9 @@ class StillGate:
         self._score = math.inf if reference is None else float(cv2.absdiff(small, reference).mean())
         still = self._score < self._motion_thr
         self._still = self._still + 1 if still else 0
-        forced = now - self._last_infer >= self._force_every_s
+        forced = now - self._last_infer.get(lane, 0.0) >= self._force_every_s
         if not still or self._still < STILL_FRAMES or forced:
             self._reference = small
-            self._last_infer = now
+            self._last_infer[lane] = now
             return True
         return False

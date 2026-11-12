@@ -38,9 +38,11 @@ other class at 0.25) on int8 heads whose object cells half hold a second class
 above threshold, so the line reports the multi-label decode and its class-aware
 NMS -- the stage that keeps a bottle held in front of a person detectable.
 
-``preprocess 1.5x`` is the same letterbox fed the centred crop ``model.zoom``
-1.5 would use: the crop is a view of the frame, so the only cost is the smaller
-bilinear resize -- not a second pass over the frame.
+``preprocess alt`` is the shipped ``model.alternate`` schedule: the letterbox
+fed the whole frame on one frame and the centred crop ``model.zoom`` 1.5 uses on
+the next. The crop is a view, so the resize costs no more than the whole-frame
+one; what the passes do add is the pad refill, because the letterbox geometry
+changes with every pass and the border is rewritten each time.
 
 ``motion`` is the still gate in front of the YOLOX DPU
 (:class:`~cpsa.motion.StillGate`): one grey conversion, one 80x60 area resize
@@ -455,22 +457,27 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     preprocess_ms = report("preprocess", timed(args.runs, preprocess), args.target_ms)
 
-    # model.zoom crops before the letterbox; the crop is a view, so the stage
-    # only pays a smaller resize than the whole-frame one above.
+    # model.alternate runs the whole frame on even frames and the centre crop on
+    # odd ones. Each pass changes the letterbox geometry, so the pad border is
+    # refilled every frame: this is the shipped per-frame preprocess cost.
     zoomed = zoom_crop(args.width, args.height, 1.5)
+    crop = frame[
+        zoomed.top : zoomed.top + zoomed.height,
+        zoomed.left : zoomed.left + zoomed.width,
+    ]
+    passes = (frame, crop)
+    scheduled = [0]
 
-    def preprocess_zoom() -> None:
-        crop = frame[
-            zoomed.top : zoomed.top + zoomed.height,
-            zoomed.left : zoomed.left + zoomed.width,
-        ]
-        prepare_input_into(crop, YOLOX_INPUT_SIZE, lut, view, fill_pad=False)
+    def preprocess_alternate() -> None:
+        source = passes[scheduled[0] & 1]
+        scheduled[0] += 1
+        prepare_input_into(source, YOLOX_INPUT_SIZE, lut, view, fill_pad=True)
 
-    preprocess_zoom_ms = report(
-        "preprocess 1.5x",
-        timed(args.runs, preprocess_zoom),
+    preprocess_alternate_ms = report(
+        "preprocess alt",
+        timed(args.runs, preprocess_alternate),
         args.target_ms,
-        note="centred crop, same 416x416 input",
+        note="whole frame / 1.5x crop, pad refilled",
     )
 
     labels = ("persona", "bicicletta", "auto", "bottiglia", "tazza", "libro")
@@ -836,8 +843,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # R2-G loads one model at a time: the DPU runs frame N while the CPU decodes
     # and draws N-1, so each view has its own loop estimate.
-    yolox_dpu_ms = preprocess_ms + dpu_ms
-    yolox_cpu_ms = camera_cv2 + preprocess_ms + decode_ms + draw_ms
+    yolox_preprocess_ms = max(preprocess_ms, preprocess_alternate_ms)
+    yolox_dpu_ms = yolox_preprocess_ms + dpu_ms
+    yolox_cpu_ms = camera_cv2 + yolox_preprocess_ms + decode_ms + draw_ms
     yolox_loop_ms = max(yolox_dpu_ms, yolox_cpu_ms)
     yolov5_dpu_frame_ms = yolov5_preprocess_ms + yolov5_dpu_ms
     yolov5_cpu_ms = camera_cv2 + yolov5_preprocess_ms + yolov5_decode_ms + draw_ms
@@ -873,8 +881,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"stabilize={movenet_stabilize_ms:.2f}"
     )
     print(
-        f"zoom: preprocess 1.5x={preprocess_zoom_ms:.2f} ms "
-        f"(whole frame {preprocess_ms:.2f}), no extra DPU work"
+        f"alternate: preprocess full/zoom={preprocess_alternate_ms:.2f} ms "
+        f"(whole frame {preprocess_ms:.2f}), one inference per frame"
     )
     print(
         f"still frame: camera+motion+draw="
