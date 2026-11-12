@@ -6,13 +6,10 @@
   "properties": {
     "code": {
       "enum": [
-        "camera_missing",
-        "camera_error",
         "model_missing",
         "dpu_error",
-        "imu_not_found",
-        "asset_invalid",
-        "busy",
+        "camera_missing",
+        "camera_error",
         "bad_command",
         "internal"
       ]
@@ -24,7 +21,8 @@
       "type": [
         "integer",
         "null"
-      ]
+      ],
+      "minimum": 1
     }
   },
   "required": [

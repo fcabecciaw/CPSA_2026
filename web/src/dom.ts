@@ -26,11 +26,3 @@ export function byId<T extends HTMLElement = HTMLElement>(id: string): T {
 export function clear(node: Element): void {
   node.replaceChildren();
 }
-
-export function chip(text: string, className = "chip"): HTMLSpanElement {
-  return el("span", className, text);
-}
-
-export function code(text: string): HTMLElement {
-  return el("code", "code", text);
-}

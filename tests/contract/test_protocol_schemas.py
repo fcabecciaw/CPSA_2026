@@ -1,12 +1,14 @@
-"""Protocol v1 schemas are valid and every example message conforms (FR-506, D3)."""
+"""Protocol v1 schemas are valid, every example conforms and the builders match (F-K1)."""
 
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 from jsonschema import Draft202012Validator, ValidationError
 
+from cpsa import protocol
 from tests.contract.protocol_schemas import (
     CLIENT_TYPES,
     SCHEMA_DIR,
@@ -16,6 +18,7 @@ from tests.contract.protocol_schemas import (
 )
 
 EXAMPLES = sorted((SCHEMA_DIR / "examples").glob("*.json"))
+WALL = "2026-11-12T15:00:00.000Z"
 
 
 @pytest.mark.parametrize("path", sorted(SCHEMA_DIR.glob("*.schema.json")), ids=lambda p: p.name)
@@ -36,6 +39,88 @@ def test_example_validates(path) -> None:
         validate_server_message(message)
 
 
+def _server(message_type: str, data: dict[str, Any]) -> dict[str, Any]:
+    return protocol.envelope(message_type, data, 1, 1001.0, WALL)
+
+
+def test_builder_output_validates() -> None:
+    object_ = protocol.ShowcaseObject(
+        label="persona", class_id=0, score=0.913, box=(120.5, 48.0, 380.2, 470.0)
+    )
+    keypoints = [[float(index * 10), float(index * 20), 0.5] for index in range(17)]
+    messages = [
+        _server("hello", protocol.hello("0.1.0")),
+        _server(
+            "status",
+            protocol.status(
+                state="running",
+                camera="ok",
+                model="yolox_nano",
+                fps=59.4,
+                dpu_ms=4.7,
+                errors=[],
+                uptime_s=12.5,
+            ),
+        ),
+        _server(
+            "showcase.state",
+            protocol.showcase_state(
+                "yolox_nano", 640, 480, [object_], fps=59.4, dpu_ms=4.7, total_ms=11.2
+            ),
+        ),
+        _server(
+            "pose.state",
+            protocol.pose_state(
+                "movenet",
+                640,
+                480,
+                keypoints,
+                score=0.71,
+                fps=59.4,
+                dpu_ms=2.5,
+                total_ms=11.2,
+            ),
+        ),
+        _server("error", protocol.error("bad_command", "unknown command")),
+        _server("pong", protocol.pong(7)),
+    ]
+
+    for message in messages:
+        validate_server_message(message)
+
+
+def test_the_model_set_command_validates() -> None:
+    validate_client_message({"v": 1, "type": "model.set", "seq": 2, "data": {"model": "movenet"}})
+
+
+def test_an_unknown_active_model_is_rejected() -> None:
+    data = protocol.status(
+        state="running", camera="ok", model="m", fps=None, dpu_ms=None, errors=[], uptime_s=0.0
+    )
+    data["active_model"] = "medical"
+    with pytest.raises(ValidationError):
+        validate_server_message(_server("status", data))
+
+
+def test_a_swapping_status_validates_and_needs_the_swap_fields() -> None:
+    data = protocol.status(
+        state="running",
+        camera="ok",
+        model="m",
+        fps=None,
+        dpu_ms=None,
+        errors=[],
+        uptime_s=1.0,
+        switching=True,
+        swap_ms=61.4,
+    )
+    validate_server_message(_server("status", data))
+
+    del data["switching"]
+    with pytest.raises(ValidationError):
+        validate_server_message(_server("status", data))
+
+
 def test_envelope_rejects_zero_seq() -> None:
     message = json.loads((SCHEMA_DIR / "examples" / "status.json").read_text(encoding="utf-8"))
     message["seq"] = 0
@@ -48,3 +133,54 @@ def test_unknown_error_code_is_rejected() -> None:
     message["data"]["code"] = "oops"
     with pytest.raises(ValidationError):
         validate_server_message(message)
+
+
+def test_unknown_status_state_is_rejected() -> None:
+    data = protocol.status(
+        state="running", camera="ok", model="m", fps=None, dpu_ms=None, errors=[], uptime_s=0.0
+    )
+    data["state"] = "idle"
+    with pytest.raises(ValidationError):
+        validate_server_message(_server("status", data))
+
+
+def test_a_calibrated_status_validates_and_needs_the_calibration_key() -> None:
+    data = protocol.status(
+        state="running",
+        camera="ok",
+        model="m",
+        fps=None,
+        dpu_ms=None,
+        errors=[],
+        uptime_s=1.0,
+        calibration={
+            "zoom": 1.5,
+            "zoom_center": [0.5, 0.45],
+            "gain": 320,
+            "exposure": 200,
+            "saturation": 110,
+        },
+    )
+    validate_server_message(_server("status", data))
+    validate_server_message(_server("status", {**data, "calibration": None}))
+
+    del data["calibration"]
+    with pytest.raises(ValidationError):
+        validate_server_message(_server("status", data))
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {},
+        {"zoom": 2.5},
+        {"exposure": 150},
+        {"gain": 10},
+        {"zoom_center": [0.5]},
+        {"hue": 3},
+        {"detector": "yolov8"},
+    ],
+)
+def test_a_bad_calibration_set_is_rejected_by_its_schema(data: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        validate_client_message({"v": 1, "type": "calibration.set", "data": data})

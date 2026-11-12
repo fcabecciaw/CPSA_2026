@@ -1,0 +1,342 @@
+/*
+ * "Calibrazione": a round button in the top bar and a compact card under it
+ * (debug mode only), plus the dashed outline of the YOLOX crop over the video.
+ *
+ * In its own file, like the voice picker, so the booth layout in styles.css is
+ * untouched; the tokens are the ones the rest of the surface uses. The card
+ * opens to the right, over ARI's pane, and leaves the video uncovered.
+ */
+
+.calibration {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.calibration-open .calibration-toggle {
+  border-color: rgba(79, 214, 255, 0.55);
+  background: rgba(79, 214, 255, 0.1);
+  color: var(--beam);
+}
+
+.calibration-card {
+  position: absolute;
+  top: calc(100% + 0.6rem);
+  right: 0;
+  z-index: 30;
+  display: grid;
+  gap: 0.75rem;
+  width: 20rem;
+  max-width: calc(100vw - 2 * var(--gutter));
+  padding: 0.85rem 0.95rem 0.9rem;
+  border: 1px solid var(--hairline);
+  border-radius: 0.8rem;
+  background: rgba(7, 6, 26, 0.95);
+  box-shadow:
+    0 1.4rem 2.8rem rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(79, 214, 255, 0.05) inset;
+  backdrop-filter: blur(10px);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  white-space: normal;
+  /* Four groups: on a short screen the card scrolls instead of leaving it. */
+  max-height: calc(100vh - 7rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.calibration-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.calibration-title {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 0.92rem;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  color: var(--starlight);
+}
+
+.calibration-note {
+  margin: 0;
+  white-space: nowrap;
+  color: var(--dim);
+  font-size: 0.7rem;
+}
+
+.calibration-card[data-ready="true"] .calibration-note::before {
+  content: "";
+  display: inline-block;
+  width: 0.45em;
+  height: 0.45em;
+  margin-right: 0.45em;
+  border-radius: 50%;
+  background: var(--ok);
+  vertical-align: 0.08em;
+}
+
+.calibration-group {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0.6rem 0 0;
+  border: 0;
+  border-top: 1px solid var(--hairline);
+  min-width: 0;
+}
+
+.calibration-legend {
+  float: left;
+  width: 100%;
+  margin: 0 0 0.1rem;
+  padding: 0;
+  color: var(--dim);
+  font-size: 0.66rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.calibration-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.3rem 0.75rem;
+}
+
+.calibration-label {
+  color: var(--muted);
+}
+
+.calibration-value {
+  color: var(--beam);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.calibration-slider {
+  grid-column: 1 / -1;
+  width: 100%;
+  height: 1.1rem;
+  margin: 0;
+  accent-color: var(--ion);
+  cursor: pointer;
+}
+
+.calibration-slider:disabled,
+.calibration-segment:disabled,
+.calibration-reset:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.calibration-segmented {
+  display: inline-grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  padding: 2px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--glass);
+}
+
+.calibration-segment {
+  padding: 0.22rem 0.7rem;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition:
+    background 160ms ease,
+    color 160ms ease;
+}
+
+.calibration-segment[aria-pressed="true"] {
+  background: rgba(79, 214, 255, 0.16);
+  color: var(--beam);
+}
+
+.calibration-row-stacked {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* "Modello oggetti": one option above the other, the whole card wide. */
+.calibration-choices {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.calibration-choice {
+  display: grid;
+  grid-template-columns: auto max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--hairline);
+  border-radius: 0.55rem;
+  background: var(--glass);
+  color: var(--muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease;
+}
+
+.calibration-choice:hover:not(:disabled) {
+  border-color: var(--rim-strong);
+  color: var(--starlight);
+}
+
+.calibration-choice-mark {
+  width: 0.7rem;
+  height: 0.7rem;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  opacity: 0.7;
+}
+
+.calibration-choice-name {
+  white-space: nowrap;
+  color: inherit;
+}
+
+.calibration-choice-detail {
+  justify-self: end;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dim);
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.calibration-choice[aria-pressed="true"] {
+  border-color: rgba(79, 214, 255, 0.55);
+  background: rgba(79, 214, 255, 0.12);
+  color: var(--beam);
+}
+
+.calibration-choice[aria-pressed="true"] .calibration-choice-mark {
+  border-color: var(--ion);
+  background: radial-gradient(circle, var(--ion) 0 45%, transparent 50%);
+  opacity: 1;
+}
+
+.calibration-choice:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.calibration-choice:focus-visible {
+  outline: 2px solid var(--ion);
+  outline-offset: 2px;
+}
+
+/* YOLOv5 sees the whole frame: the zoom controls stay visible but quiet. */
+.calibration-card[data-detector="yolov5"] .calibration-slider[data-key="zoom"],
+.calibration-card[data-detector="yolov5"] .calibration-slider[data-key="centre_x"],
+.calibration-card[data-detector="yolov5"] .calibration-slider[data-key="centre_y"] {
+  filter: grayscale(1);
+}
+
+/* Notes wrap inside the card (`.calibration-hint` alone stays on one line). */
+.calibration-hint.calibration-zoom-note,
+.calibration-hint.calibration-presence-hint {
+  margin: 0;
+  white-space: normal;
+  line-height: 1.35;
+}
+
+.calibration-presence-hint {
+  font-variant-numeric: tabular-nums;
+}
+
+.calibration-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--hairline);
+}
+
+.calibration-reset {
+  padding: 0.3rem 0.85rem;
+  border: 1px solid var(--rim-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--starlight);
+  font: inherit;
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    color 160ms ease;
+}
+
+.calibration-reset:hover:not(:disabled) {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.calibration-hint {
+  white-space: nowrap;
+  color: var(--dim);
+  font-size: 0.68rem;
+}
+
+.calibration-toggle:focus-visible,
+.calibration-segment:focus-visible,
+.calibration-reset:focus-visible,
+.calibration-slider:focus-visible {
+  outline: 2px solid var(--ion);
+  outline-offset: 2px;
+}
+
+/* The crop YOLOX analyses: a thin dashed outline over the video, never a mask. */
+.analysis-rect {
+  position: absolute;
+  z-index: 2;
+  box-sizing: border-box;
+  border: 1.5px dashed rgba(79, 214, 255, 0.85);
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px rgba(2, 1, 9, 0.35);
+  pointer-events: none;
+  transition:
+    left 120ms ease-out,
+    top 120ms ease-out,
+    width 120ms ease-out,
+    height 120ms ease-out;
+}
+
+.analysis-rect-label {
+  position: absolute;
+  top: 0.35rem;
+  left: 0.45rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(2, 1, 9, 0.7);
+  color: var(--beam);
+  font-family: var(--mono);
+  font-size: clamp(10px, 0.7vw, 13px);
+  letter-spacing: 0.04em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .analysis-rect,
+  .calibration-segment,
+  .calibration-choice,
+  .calibration-reset {
+    transition: none;
+  }
+}

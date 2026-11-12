@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "ping.schema.json",
-  "title": "ping data (client to server)",
+  "title": "ping data (client to server), the only command",
   "type": "object",
   "properties": {
     "id": {}

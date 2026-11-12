@@ -2,18 +2,18 @@
  * WebSocket client for the dashboard.
  *
  * Connects to the same origin at `/ws` (IF-101), reconnects with exponential
- * backoff, and sends a `ping` every 10 s (IF-203). Every command carries a
- * per-connection `seq` starting at 1 and reset on reconnect; the server echoes
- * it as `error.ref_seq` (IF-304). It does not hold protocol state: every
- * message is handed to the caller, and the server resends a snapshot on
- * reconnect (FR-504).
+ * backoff, and sends a `ping` every 10 s (IF-203). It does not hold protocol
+ * state: every message is handed to the caller, and the server resends a
+ * snapshot on reconnect (FR-504). Besides `ping` it sends the commands the
+ * dashboard asks for: `model.set` and the debug panel's `calibration.*`.
  */
 
 import {
   PROTOCOL_VERSION,
   parseServerMessage,
+  type CalibrationValues,
   type ClientCommand,
-  type Mode,
+  type ModelName,
   type ServerMessage,
 } from "./protocol";
 
@@ -83,8 +83,7 @@ export class DashboardClient {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private pendingPings = new Map<number, number>();
   private pingId = 0;
-  /** Command counter for the current connection; 0 means nothing sent yet. */
-  private seq = 0;
+  private commandSeq = 0;
   private attempt = 0;
   private rttMs: number | null = null;
   private stopped = false;
@@ -126,15 +125,6 @@ export class DashboardClient {
     this.setInfo({ phase: "closed", retryInMs: null });
   }
 
-  /** Sends a mode change; returns the command `seq`, or null if not sent. */
-  sendMode(mode: Mode): number | null {
-    if (this.info.phase !== "open") {
-      this.handlers.onNotice("Comando non inviato: server non connesso.");
-      return null;
-    }
-    return this.send({ v: PROTOCOL_VERSION, type: "mode.set", data: { mode } });
-  }
-
   private open(): void {
     this.setInfo({ phase: this.attempt === 0 ? "connecting" : "reconnecting", retryInMs: null });
 
@@ -151,8 +141,8 @@ export class DashboardClient {
     socket.onopen = () => {
       this.attempt = 0;
       this.rttMs = null;
-      // IF-304 / v1 client envelope: the command counter is per connection.
-      this.seq = 0;
+      // IF-304: the per-connection command counter starts again at 1.
+      this.commandSeq = 0;
       this.setInfo({ phase: "open", attempt: 0, retryInMs: null, rttMs: null });
       this.startPing();
     };
@@ -201,18 +191,61 @@ export class DashboardClient {
     }
   }
 
-  private send(command: ClientCommand): number | null {
-    const socket = this.socket;
-    if (socket === null) {
+  /**
+   * F-E1: ask the board for the other model. Returns the command `seq` so the
+   * caller can recognise the `error.ref_seq` of a board that does not know the
+   * command yet, instead of leaving a red banner on screen.
+   */
+  setModel(model: ModelName): number | null {
+    this.commandSeq += 1;
+    if (this.socket === null) {
       return null;
     }
-    const seq = ++this.seq;
+    this.send({
+      v: PROTOCOL_VERSION,
+      type: "model.set",
+      seq: this.commandSeq,
+      data: { model },
+    });
+    return this.commandSeq;
+  }
+
+  /**
+   * Debug panel: apply calibration values on the board (any subset). Returns
+   * the command `seq`, or `null` while there is no connection.
+   */
+  setCalibration(values: Partial<CalibrationValues>): number | null {
+    const seq = this.nextCommandSeq();
+    if (seq !== null) {
+      this.send({ v: PROTOCOL_VERSION, type: "calibration.set", seq, data: { ...values } });
+    }
+    return seq;
+  }
+
+  /** Debug panel: back to `config/showcase.yaml` and forget the stored values. */
+  resetCalibration(): number | null {
+    const seq = this.nextCommandSeq();
+    if (seq !== null) {
+      this.send({ v: PROTOCOL_VERSION, type: "calibration.reset", seq, data: {} });
+    }
+    return seq;
+  }
+
+  /** The `seq` of the next command, or `null` (still counted) without a socket. */
+  private nextCommandSeq(): number | null {
+    this.commandSeq += 1;
+    return this.socket === null ? null : this.commandSeq;
+  }
+
+  private send(command: ClientCommand): void {
+    const socket = this.socket;
+    if (socket === null) {
+      return;
+    }
     try {
-      socket.send(JSON.stringify({ ...command, seq }));
-      return seq;
+      socket.send(JSON.stringify({ ...command, v: PROTOCOL_VERSION }));
     } catch (error) {
       this.handlers.onNotice(`Invio non riuscito: ${errorText(error)}`);
-      return null;
     }
   }
 

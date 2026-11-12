@@ -1,4 +1,9 @@
-"""Enforce the package dependency direction (PLAN.md §3) with a static import scan."""
+"""The dependency direction of the flat showcase package, from a static import scan.
+
+Each module may import only the modules listed for it: the pipeline owns the
+policy and the hardware, the server knows only the protocol and the shared
+state, and the model loader is the single module that touches Vitis AI.
+"""
 
 from __future__ import annotations
 
@@ -8,129 +13,114 @@ from pathlib import Path
 
 import pytest
 
-SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
-PACKAGE_ROOT = SRC_ROOT / "cpsa"
+PACKAGE_ROOT = Path(__file__).resolve().parents[2] / "src" / "cpsa"
 
 ANYTHING = None  # sentinel: no restriction on external imports
 
-# layer -> (internal layers it may import, extra third-party top-level modules it may import)
+STDLIB = frozenset(sys.stdlib_module_names) | {"__future__"}
+
+#: module -> (internal modules it may import, external top-level modules it may import)
 RULES: dict[str, tuple[frozenset[str], frozenset[str] | None]] = {
-    "domain": (frozenset(), frozenset()),
-    "imu": (frozenset({"domain"}), frozenset({"numpy"})),
-    "ports": (frozenset({"domain", "vision"}), frozenset({"numpy"})),
-    "application": (
-        frozenset({"domain", "imu", "ports", "vision"}),
-        frozenset({"numpy", "yaml"}),
-    ),
-    "adapters": (frozenset({"domain", "ports", "vision", "protocol"}), ANYTHING),
-    "protocol": (frozenset({"domain", "vision"}), frozenset()),
-    "supervisor": (
-        frozenset({"domain", "ports", "protocol", "application", "vision"}),
-        frozenset(),
-    ),
-    "vision": (frozenset({"domain"}), frozenset({"numpy"})),
-    "board": (
+    "__init__": (frozenset(), frozenset()),
+    "config": (frozenset(), frozenset({"yaml"})),
+    "protocol": (frozenset(), frozenset()),
+    "channel": (frozenset(), frozenset({"numpy"})),
+    "dpu": (frozenset(), frozenset({"numpy", "vart", "xir"})),
+    "calibration": (frozenset({"config"}), frozenset()),
+    "camera": (frozenset({"config"}), frozenset({"cv2", "linuxpy", "numpy"})),
+    "yolox": (frozenset({"dpu"}), frozenset({"cv2", "numpy"})),
+    "motion": (frozenset(), frozenset({"cv2", "numpy"})),
+    "yolov5": (frozenset({"dpu", "yolox"}), frozenset({"cv2", "numpy"})),
+    "movenet": (frozenset({"dpu"}), frozenset({"cv2", "numpy"})),
+    "overlay": (frozenset({"protocol"}), frozenset({"cv2", "numpy"})),
+    "tracker": (frozenset({"config", "yolox"}), frozenset({"numpy"})),
+    "keypoints": (frozenset({"config", "movenet"}), frozenset({"numpy"})),
+    "pipeline": (
         frozenset(
             {
-                "domain",
-                "imu",
-                "ports",
-                "application",
-                "adapters",
-                "vision",
                 "protocol",
-                "supervisor",
+                "calibration",
+                "camera",
+                "channel",
+                "config",
+                "keypoints",
+                "motion",
+                "movenet",
+                "overlay",
+                "tracker",
+                "yolov5",
+                "yolox",
             }
         ),
-        ANYTHING,
+        frozenset({"numpy"}),
     ),
-    "recorder": (
-        frozenset({"domain", "imu", "ports", "application", "adapters", "vision"}),
-        ANYTHING,
+    "server": (
+        frozenset({"protocol", "calibration", "channel", "config"}),
+        frozenset({"aiohttp", "cv2", "numpy"}),
     ),
-    "__init__": (frozenset(), frozenset()),
+    "__main__": (
+        frozenset({"__init__", "calibration", "channel", "config", "pipeline", "server"}),
+        frozenset(),
+    ),
 }
 
-HARDWARE_MODULES = frozenset(
-    {"ctypes", "blue_st_sdk", "bluepy", "mbientlab", "flux_led", "playsound", "dbus_fast"}
-)
+#: Hardware and framework imports that belong to exactly one module.
+SOLE_OWNERS = {
+    "vart": "dpu",
+    "xir": "dpu",
+    "linuxpy": "camera",
+    "aiohttp": "server",
+    "yaml": "config",
+}
 
 
-def _module_name(path: Path) -> str:
-    parts = list(path.relative_to(SRC_ROOT).with_suffix("").parts)
-    if parts[-1] == "__init__":
-        parts.pop()
-    return ".".join(parts)
-
-
-def _layer_of(module: str) -> str:
-    parts = module.split(".")
-    return parts[1] if len(parts) > 1 else "__init__"
-
-
-def imported_modules(source: str, module: str, is_package: bool) -> set[str]:
-    """Return absolute names of every module imported by ``source``."""
-    found: set[str] = set()
-    package = module if is_package else module.rpartition(".")[0]
-    for node in ast.walk(ast.parse(source)):
+def _imports(path: Path) -> tuple[set[str], set[str]]:
+    """Return the internal and the external top-level names a module imports."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    internal: set[str] = set()
+    external: set[str] = set()
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            found.update(alias.name for alias in node.names)
+            names = [alias.name for alias in node.names]
         elif isinstance(node, ast.ImportFrom):
             if node.level:
-                base = package.split(".")
-                base = base[: len(base) - (node.level - 1)]
-                name = ".".join([*base, node.module] if node.module else base)
-            else:
-                name = node.module or ""
-            found.add(name)
-    return found
+                raise AssertionError(f"{path.name} uses a relative import (module {node.module})")
+            names = [node.module or ""]
+        else:
+            continue
+        for name in names:
+            parts = name.split(".")
+            if parts[0] == "cpsa":
+                if len(parts) > 1:
+                    internal.add(parts[1])
+            elif parts[0]:
+                external.add(parts[0])
+    return internal, external
 
 
-def violations(layer: str, imports: set[str]) -> list[str]:
-    allowed_internal, allowed_external = RULES[layer]
-    problems = []
-    for name in sorted(imports):
-        top = name.split(".")[0]
-        if top == "cpsa":
-            target = _layer_of(name)
-            if target != layer and target not in allowed_internal:
-                problems.append(f"{name}: layer '{layer}' may not import layer '{target}'")
-        elif layer not in ("adapters", "board", "recorder") and top in HARDWARE_MODULES:
-            problems.append(f"{name}: hardware/native module outside adapters/board")
-        elif (
-            allowed_external is not ANYTHING
-            and top not in sys.stdlib_module_names
-            and top not in allowed_external
-        ):
-            problems.append(f"{name}: third-party module not allowed in layer '{layer}'")
-    return problems
+MODULES = sorted(path.stem for path in PACKAGE_ROOT.glob("*.py"))
 
 
-SOURCE_FILES = sorted(PACKAGE_ROOT.rglob("*.py"))
+def test_every_module_has_a_rule() -> None:
+    assert sorted(RULES) == MODULES
 
 
-@pytest.mark.parametrize("path", SOURCE_FILES, ids=lambda p: str(p.relative_to(SRC_ROOT)))
-def test_module_respects_layer_rules(path: Path) -> None:
-    module = _module_name(path)
-    imports = imported_modules(path.read_text(), module, path.name == "__init__.py")
-    assert violations(_layer_of(module), imports) == []
+@pytest.mark.parametrize("module", MODULES)
+def test_a_module_imports_only_what_its_layer_allows(module: str) -> None:
+    allowed_internal, allowed_external = RULES[module]
+
+    internal, external = _imports(PACKAGE_ROOT / f"{module}.py")
+
+    assert internal <= allowed_internal, f"{module} imports {sorted(internal - allowed_internal)}"
+    assert module not in internal, f"{module} imports itself"
+    if allowed_external is not ANYTHING:
+        unexpected = external - allowed_external - STDLIB
+        assert unexpected == set(), f"{module} imports {sorted(unexpected)}"
 
 
-@pytest.mark.parametrize(
-    ("layer", "imports"),
-    [
-        ("domain", {"numpy"}),
-        ("imu", {"cpsa.application.slot"}),
-        ("application", {"cpsa.adapters.clock"}),
-        ("application", {"ctypes"}),
-        ("adapters", {"cpsa.application.config"}),
-    ],
-)
-def test_checker_flags_forbidden_imports(layer: str, imports: set[str]) -> None:
-    assert violations(layer, imports)
-
-
-def test_relative_imports_are_resolved() -> None:
-    source = "from ..domain import model\nfrom . import window\n"
-    found = imported_modules(source, "cpsa.imu.sync", is_package=False)
-    assert found == {"cpsa.domain", "cpsa.imu"}
+def test_vitis_ai_is_imported_by_the_model_loader_only() -> None:
+    for module in MODULES:
+        _internal, external = _imports(PACKAGE_ROOT / f"{module}.py")
+        for name, owner in SOLE_OWNERS.items():
+            if name in external:
+                assert module == owner, f"{module} imports {name}, owned by {owner}"

@@ -6,8 +6,9 @@ __pycache__/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+# The Vitis AI and Docker artifacts of tools/vitis; never committed.
 build/
 /data/
-# Built on the host by the tests and on the board by deploy/deploy.sh (step 3);
-# never committed, because the two architectures differ.
-src/cpsa/adapters/native/lib/libcpsa_kalman2d.so
+# The live calibration the dashboard's debug panel stores on the board.
+/config/calibration.json
+/config/.calibration.json.*

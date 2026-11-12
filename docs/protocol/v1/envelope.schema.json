@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "envelope.schema.json",
-  "title": "Protocol v1 envelope (IF-102)",
+  "title": "Protocol v1 server envelope (F-K1)",
   "type": "object",
   "properties": {
     "v": {
@@ -16,7 +16,8 @@
       "minimum": 1
     },
     "t": {
-      "type": "number"
+      "type": "number",
+      "description": "Monotonic seconds, for latency measurement."
     },
     "wall": {
       "type": "string",

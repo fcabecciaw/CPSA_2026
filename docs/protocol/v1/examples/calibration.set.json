@@ -1,0 +1,17 @@
+{
+  "v": 1,
+  "type": "calibration.set",
+  "seq": 3,
+  "data": {
+    "zoom": 1.5,
+    "zoom_center": [
+      0.5,
+      0.45
+    ],
+    "gain": 320,
+    "exposure": 200,
+    "saturation": 110,
+    "person_conf": 0.45,
+    "held_conf": 0.25
+  }
+}

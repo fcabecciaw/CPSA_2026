@@ -2,31 +2,36 @@
   "v": 1,
   "type": "status",
   "seq": 2,
-  "t": 1002.0,
-  "wall": "2026-11-12T08:00:00Z",
+  "t": 1001.0,
+  "wall": "2026-11-12T15:00:00.000Z",
   "data": {
-    "mode": "medical",
-    "mode_state": "running",
-    "perception": {
-      "fps": 9.5,
-      "dpu_ms": 4.2,
-      "camera": "ok",
-      "model": "pose_halfbust62",
-      "timing": {
-        "analyzed_fps": 9.5,
-        "camera_fps": 30.0,
-        "decode_ms": 1.8,
-        "preprocess_ms": 0.9,
-        "dpu_ms": 4.2,
-        "postprocess_ms": 1.1,
-        "pose_ms": 6.5,
-        "track_ms": 0.7,
-        "latency_ms": 45.3,
-        "dropped": 0
-      }
-    },
-    "imu": "connected",
+    "state": "running",
+    "camera": "ok",
+    "model": "yolox_nano",
+    "active_model": "yolox",
+    "switching": false,
+    "swap_ms": 61.4,
+    "fps": 59.4,
+    "dpu_ms": 4.7,
     "errors": [],
-    "uptime_s": 125.4
+    "uptime_s": 12.5,
+    "calibration": {
+      "detector": "yolox",
+      "detectors": [
+        "yolox",
+        "yolov5"
+      ],
+      "zoom": 1.5,
+      "zoom_center": [
+        0.5,
+        0.5
+      ],
+      "gain": 200,
+      "exposure": 100,
+      "saturation": 110,
+      "person_conf": 0.4,
+      "held_conf": 0.3,
+      "object_conf": 0.45
+    }
   }
 }

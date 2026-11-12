@@ -1,0 +1,22 @@
+[Unit]
+Description=CPSA local Italian TTS (Kokoro + XTTS-v2)
+Documentation=file://%h/cpsa/tools/tts/README.md
+After=network-online.target
+
+[Service]
+Type=simple
+# Adjust WorkingDirectory if the repository is not ~/cpsa.
+WorkingDirectory=%h/cpsa/tools/tts
+Environment=COQUI_TOS_AGREED=1
+Environment=CPSA_TTS_LOG_LEVEL=INFO
+ExecStart=%h/.local/bin/uv run --no-sync cpsa-tts serve --warm
+Restart=on-failure
+RestartSec=3
+# The service only synthesizes short sentences: keep it modest and predictable.
+TimeoutStopSec=20
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+
+[Install]
+WantedBy=default.target

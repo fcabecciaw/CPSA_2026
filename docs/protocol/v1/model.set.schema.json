@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "model.set.schema.json",
+  "title": "model.set data (client to server), load the other DPU model (R2-G)",
+  "type": "object",
+  "properties": {
+    "model": {
+      "enum": [
+        "yolox",
+        "movenet"
+      ],
+      "description": "Model to load on the DPU: YOLOX boxes or the MoveNet skeleton. The pipeline releases the loaded runner and builds this one, so the views are exclusive; an unknown or disabled value is error bad_command."
+    }
+  },
+  "required": [
+    "model"
+  ],
+  "additionalProperties": true
+}

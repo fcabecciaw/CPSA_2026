@@ -1,0 +1,79 @@
+# The one configuration file of the showcase (F-K3).
+#
+# `cpsa-showcase` reads this file and nothing else; every key below is required
+# and an unknown key is rejected, so a stale section can never be ignored.
+# Paths are relative to the repository root, which the systemd unit sets as the
+# working directory.
+camera:                       # Intel RealSense F200 RGB node over V4L2
+  device: auto                # auto: resolve by card name at every start (survives a re-plug)
+  match: RealSense            # card-name fragment the kernel reports for the F200
+  width: 640                  # YUYV frame size; the overlay and the stream use it
+  height: 480
+  fps: 60                     # 60 fps demo target
+  exposure: 100               # exposure_time_absolute 100 = 1/100 s: flicker-safe at 50 Hz
+  gain: 200                   # manual V4L2 gain, 64..2540: the value the user picked live
+  white_balance: 4000         # Kelvin, 2500..6500 in 100 K steps, or auto: auto drifts
+  backlight_compensation: 0   # 0..4: the ISP backlight compensation also drifts the image
+  saturation: 110             # V4L2 saturation 0..255 (camera default 128): calms the colour noise
+  power_line_hz: 50           # anti-flicker: 0 (off), 50 or 60
+  mirror: true                # flip left-right like a mirror before detection (labels stay readable)
+  # replay_dir: build/replay  # unset: V4L2 camera. A directory of JPG/PNG loops instead (--replay DIR)
+  # replay_hold_frames: 6     # frames per image: 6 at 60 fps = 10 scene changes per second
+  # replay_jitter_px: 2       # per-frame shift in pixels, so the still gate keeps inferring
+
+tracker:                      # detector boxes, stabilized so they stand still on screen
+  enabled: true               # false: publish the raw detector boxes
+  iou_match: 0.3              # a detection joins a track of its class above this IoU
+  alpha: 0.35                 # EMA weight of a new box in the filtered box
+  fast_alpha: 0.8             # EMA weight when the new box barely overlaps the filtered one
+  deadband_iou: 0.9           # the displayed box moves only below this IoU with the filtered one
+  min_hits: 2                 # consecutive frames before a low-score track is shown
+  max_misses: 6               # missed frames a shown track survives before it is dropped
+  still:                      # keep a scene that does not move off the DPU
+    enabled: true             # false: infer on every frame, as before
+    motion_thr: 1.0           # grey levels of the 80x60 frame diff that count as motion
+    force_every_s: 0.5        # a full detection at least this often, to find new still objects
+
+model:                        # object detector, COCO-80: YOLOv5-nano (shipped) or YOLOX-nano
+  path: models/yolox_nano.xmodel  # compiled KV260 xmodel (deploy.sh --model)
+  kind: yolov5                # yolox | yolov5: object detector at start (YOLOX if the yolov5 file is missing; the card switches live)
+  yolov5_path: models/yolov5_nano.xmodel  # YOLOv5-nano 640x640 (deploy.sh --yolov5-model); zoom ignored
+  conf_thr: 0.35              # class-independent default of objectness * class score
+  class_conf:                 # per-class overrides, by COCO name (0..1)
+    person: 0.40              # a person is only reported above this score
+    bottle: 0.30              # objects people hold up stay easy to catch
+    cup: 0.30
+    cell phone: 0.35
+    book: 0.35
+  object_conf: 0.45           # every other class: high, so the room does not invent a tv
+  iou_thr: 0.45               # class-aware NMS IoU threshold
+  zoom: 1.5                   # YOLOX only: centre crop before the letterbox: 1.3-1.5 makes small objects big (1.0 = off)
+  zoom_center: [0.5, 0.5]     # crop centre as a fraction of the frame (1.0 = whole frame)
+  alternate: true             # YOLOX only: even frames: whole frame, persons only; odd: the crop, every other class
+
+movenet:                      # single-pose skeleton model, loaded by model.set (R2-G)
+  path: models/movenet.xmodel # compiled KV260 xmodel (deploy.sh --movenet-model)
+  enabled: true               # false: YOLOX only, model.set movenet is rejected
+  publish_hz: 30              # cap of pose.state while MoveNet is loaded
+  smoothing:                  # keypoints stabilized like the tracker does for boxes
+    enabled: true             # false: publish the raw keypoints
+    min_cutoff: 1.0           # Hz: One Euro cutoff at rest, where the body stands still
+    beta: 0.02                # px: how much measured speed raises the cutoff (follow a swing)
+    d_cutoff: 1.0             # Hz: cutoff of the speed estimate itself
+    deadband_px: 1.5          # the drawn joint moves only past this (or 1% of the shoulder width)
+    show_score: 0.35          # a joint appears after show_frames frames at or above this score
+    hide_score: 0.25          # ... and disappears after hide_frames frames below this one
+    show_frames: 2            # consecutive confident frames before a joint is shown
+    hide_frames: 4            # consecutive weak frames before a shown joint is dropped
+
+labels: it                    # it | en: language of the boxes and of the panel
+
+web:                          # HTTP and WebSocket endpoints (F-K2)
+  host: 0.0.0.0
+  port: 8080
+  video_fps: 60               # /video.mjpeg frames per second, encoded only while a client watches
+  jpeg_quality: 70            # cv2.imencode quality of the stream
+  static_dir: web/dist        # `npm run build` output
+
+log:
+  level: INFO                 # DEBUG, INFO, WARNING, ERROR or CRITICAL; systemd's journal keeps the lines

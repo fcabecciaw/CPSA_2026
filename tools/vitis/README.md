@@ -1,9 +1,10 @@
-# `tools/vitis` — KV260 DPU quantize and compile pipeline
+# `tools/vitis` — the KV260 DPU model pipeline
 
-Reproducible PC-side pipeline that takes a Hard-Swish YOLOv8-pose model
-(`HALFBUST_62`, 62 keypoints, input `1x3x480x640`) through Vitis AI 3.5 PTQ
-into an `.xmodel` compiled for the KV260 DPU (`DPUCZDX8G_ISA1_B4096`,
-fingerprint `0x101000016010407`).
+PC-side pipeline that turns the Vitis AI model-zoo **YOLOX-nano**,
+**YOLOv5-nano** and **MoveNet** into `.xmodel` files compiled for the KV260 DPU
+(`DPUCZDX8G_ISA1_B4096`, fingerprint `0x101000016010407`). No training and no
+requantization: the zoo packages are already quantized (see the YOLOv5 section
+for the package that is no longer downloadable).
 
 Vitis AI 3.5's `DPUCZDX8G_ISA1_B4096` target alias maps to fingerprint
 `0x101000056010407` (the 3.x feature code), which the 2.5-era KV260 B4096
@@ -12,165 +13,249 @@ against an explicit `{"fingerprint": "0x101000016010407"}` arch file and reads
 the fingerprint back from the artifact; override it with
 `VITIS_DPU_FINGERPRINT`, or pass a complete arch file with `VITIS_ARCH_JSON`.
 
-The graph is cut before DFL and the pose decode: every stride (8, 16, 32)
-returns its raw head tensor with channels
-
-```text
-[ box (4 * reg_max = 64) | class logits (nc) | keypoints (3 * K = 186) ]
-```
-
-which is exactly what `cpsa.vision.pose_decode.decode_raw_heads` and
-`cpsa.adapters.pose.dpu.DpuPoseEstimator` consume. DFL softmax, sigmoid, anchor
-decode and NMS stay on the CPU in `cpsa`.
-
-The deploy graph lives in `ml/src/cpsa_ml/deploy.py` (`RawHeadDeploy`, exports
-and tests in `ml/tests/test_deploy.py`).
+The graph is cut before the decode: every stride (8, 16, 32) returns its raw
+head tensor with 85 channels, `[tx, ty, tw, th, objectness, 80 class logits]`.
+Sigmoid, grid/anchor decode and NMS stay on the CPU, in `cpsa.yolox`.
 
 ## Images
 
 | Image | Tag | Purpose |
 |---|---|---|
 | `xilinx/vitis-ai-pytorch-cpu` | `ubuntu2004-3.5.0.306` | base: Vitis AI 3.5 compiler + `pytorch_nndct` |
-| `cpsa-vitis-pytorch` | `3.5.0.306` | the base plus `ultralytics==8.4.203` (no deps) |
+| `cpsa-vitis-pytorch` | `3.5.0.306` | the base plus the packages the scripts import |
 
 Base digest:
 `sha256:baf43fd9d6e1ea5a2c12b727ac3aafd15ead936172bcd636d7af98b0cca49298`.
+`run_vitis.sh` builds the derived image on first use.
 
-The container Python is 3.8.6 with PyTorch 1.13.1 and `pytorch_nndct` 3.5.0.
-`cpsa_ml` targets 3.10, so the container does not import the package: it loads
-`ml/src/cpsa_ml/deploy.py` by path, rebuilds the same `PoseModel` from the
-exported YAML, and loads the host `state_dict` strictly. `run_vitis.sh` builds
-the derived image on first use.
-
-## Full run
+## Compiling the detector
 
 ```sh
-# 1. Export the deploy bundle on the host (ml environment, PyTorch 2.x).
-cd ml
-uv run python -m cpsa_ml.deploy --schema halfbust62 --seed 0 \
-  --out ../build/vitis/artifacts
-cd ..
-
-# 2. Calibration frames: camera captures + augmentations + synthetic, letterboxed
-#    to 480x640, RGB, [0, 1], saved as (3, H, W) float32 .npy.
-uv run python tools/vitis/make_calib.py --count 120 --out build/vitis/calib
-
-# 3. Calibrate, test and export the quantized xmodel (vai_q_pytorch).
-#    --threads caps OMP/MKL/torch: one thread is fastest on a busy host.
-tools/vitis/run_vitis.sh python tools/vitis/quantize.py \
-  --artifacts build/vitis/artifacts --calib build/vitis/calib \
-  --out build/vitis/quant --calib-count 120 --test-count 24 --threads 1
-
-# 4. Compile for the KV260 DPU (vai_c_xir).
-tools/vitis/run_vitis.sh bash tools/vitis/compile.sh \
-  build/vitis/quant/pose_halfbust62.xmodel build/vitis/compiled pose_halfbust62
-
-# 5. Inspect subgraphs, tensors and fix-points.
-tools/vitis/run_vitis.sh python tools/vitis/inspect_xmodel.py \
-  build/vitis/compiled/pose_halfbust62.xmodel \
-  --out build/vitis/report/inspect_compiled.json
-
-# 6. Decoder compatibility (host: deploy graph vs Ultralytics, quantized
-#    test outputs through decode_raw_heads with the runtime int8 helpers).
-cd ml
-PYTHONPATH=../src uv run python ../tools/vitis/verify_deploy.py \
-  --artifacts ../build/vitis/artifacts --quant ../build/vitis/quant \
-  --inspect ../build/vitis/report/inspect_compiled.json \
-  --out ../build/vitis/report/decoder_check.json
+tools/vitis/zoo_yolox_nano.sh            # download, extract, compile, inspect
+tools/vitis/zoo_yolox_nano.sh --skip-download
 ```
 
-Outputs land in `build/vitis/` (git-ignored): `artifacts/`, `calib/`,
-`quant/`, `compiled/`, `report/`, `logs/`.
+The script downloads the float+QAT package
+(`pt_yolox-nano_coco_416_416_1G_3.0.zip`, 23.7 MB), compiles the QAT-converted
+`qat/convert_qat_results/YOLOX_0_int.xmodel` with the pinned-fingerprint
+`compile.sh`, and inspects the artifact.
 
-Observed for the randomly initialised `HALFBUST_62` model (see
-`docs/notes/vitis-compile.md` for details):
+Outputs (git-ignored): `build/models/zoo/yolox_nano/` (package),
+`build/vitis/yolox_nano/compiled/yolox_nano.xmodel`,
+`build/vitis/report/inspect_yolox_nano.json`, `build/vitis/logs/zoo_yolox_nano_*.log`.
+The script fails unless the artifact reports one DPU subgraph, fingerprint
+`0x101000016010407`, input `1x416x416x3`, and the three `85`-channel heads.
 
-| Stage | Result |
-|---|---|
-| Calibration | 120 frames, 133 s (`--threads 1`), test 24 frames |
-| Quantized vs float | cosine 0.99990-0.99992, max abs error 0.031 |
-| Compiled graph | 5 subgraphs, 1 DPU (389 ops), no compute on CPU |
-| DPU tensors | input `1x480x640x3` int8 `fp=7`; outputs `1x{H,W}x251` int8 `fp=4` |
-| Host decoder check | float graph matches Ultralytics within `3.1e-5 px`; int8 outputs decode with the same candidate counts |
-| Board | 289 ms/frame end to end, 3.46 fps; DPU runner alone 25.3 ms/frame |
+Observed: 5 subgraphs, 1 DPU (371 ops), input `1x416x416x3` xint8 `fp=-2`,
+outputs `1x{52,26,13}x{52,26,13}x85` xint8 `fp=3`. The package
+(`yolox/models/yolo_head_q.py`) applies `sigmoid` to channels `4:` and then
+`xy = (t_xy + grid) * stride`, `wh = exp(t_wh) * stride`, so the runtime decodes
+with `logits=True`.
 
-## Variant speed matrix
-
-`tools/vitis/variants.sh` builds the activation x input-size matrix used to
-choose the training configuration. Latency does not depend on the weights, so
-the matrix uses the seeded random initialisation; accuracy is measured
-separately with trained weights.
+`inspect_xmodel.py` prints the same facts for any `.xmodel`:
 
 ```sh
-# hswish/relu/lrelu x 480x640/384x512/288x384, 40 calibration frames per size.
-tools/vitis/variants.sh
-# One cell, rebuilding calibration and artifacts.
-tools/vitis/variants.sh --activations relu --sizes 288x384 --force
+tools/vitis/run_vitis.sh python tools/vitis/inspect_xmodel.py model.xmodel
 ```
 
-Per cell the script exports the deploy bundle from
-`ml/configs/yolov8n-pose-<act>.yaml` at the requested `--height/--width`,
-quantizes with `--threads 1`, compiles with the pinned fingerprint, and inspects
-the artifact. It fails unless the graph has exactly one DPU subgraph, no compute
-on the CPU (only the `data-fix`/`fix2float` dtype boundaries) and fingerprint
-`0x101000016010407`. Calibration frames depend only on the input size, so they
-are generated once per size (`build/vitis/variants/calib_<H>x<W>/`) and shared
-by the three activations.
+## Decoder reference check
 
-Outputs land in `build/vitis/variants/<act>_<H>x<W>/` (`artifacts/`, `quant/`,
-`compiled/`, `report/`, `logs/`); `build/vitis/variants/matrix.tsv` collects one
-row per built variant. Board latency per compiled model:
+`yolox_reference.py` compares the detector's CPU half (`cpsa.yolox`) against the
+package's own post-processing on real images. The reference model needs
+PyTorch/`pytorch_nndct` (container Python 3.8) while `cpsa` runs on the host, so
+it has three modes:
 
 ```sh
-# On the board, with the matching `bench_pose.py` and `src/cpsa`:
-PYTHONPATH=src python3 scripts/bench_pose.py \
-  --xmodel pose_<act>.xmodel --layout halfbust62 \
-  --frames 200 --warmup 10 --conf-thr 0.25 --json
+# 1. Host: letterbox the images exactly as the runtime does (BGR, pad 114).
+uv run --no-sync python tools/vitis/yolox_reference.py prepare \
+  --images build/vitis/yolox_reference/images --work build/vitis/yolox_reference
+
+# 2. Container: run the package model and its own post-processing.
+tools/vitis/run_vitis.sh python tools/vitis/yolox_reference.py dump \
+  --model build/models/zoo/yolox_nano/pt_yolox-nano_coco_416_416_1G_3.0 \
+  --work build/vitis/yolox_reference
+
+# 3. Host: identical preprocessing, int8 head round-trip, decode and compare.
+uv run --no-sync python tools/vitis/yolox_reference.py check \
+  --work build/vitis/yolox_reference --out build/vitis/report/yolox_reference.json
 ```
 
-`docs/notes/vitis-compile.md` records the measured matrix.
+The reference path is the QAT-converted deployable model
+(`qat/convert_qat_results/deployable.pth`), the weights the `int` xmodel was
+dumped from. Re-running `pytorch_nndct`'s quantized simulation in the Vitis AI
+3.5 container is not possible: the package's `quant_info.json` was produced by
+3.0 and 3.5 rejects its node names. Both sides decode the same head tensors
+rounded through int8 with the graph's output fix point (`fp=3`), which is what
+the board decodes.
 
-## Running with trained weights
+`check` requires pixel-identical preprocessing, the same class, IoU >= 0.9 and
+no extra or missing boxes; boxes that collapse below 1 px^2 against the frame
+edge are excluded on both sides (predictions into the letterbox padding have no
+usable area). Observed on 27 COCO images (plus the package demo and two
+Ultralytics samples): 177 matched boxes, minimum IoU 0.999987, no failures.
 
-The pipeline takes the Kaggle `best.pt` unchanged:
+## YOLOv5-nano (`src/cpsa/yolov5.py`, Y5)
 
 ```sh
-cd ml
-uv run python -m cpsa_ml.deploy --schema halfbust62 --weights /path/to/best.pt \
-  --out ../build/vitis/artifacts
+tools/vitis/zoo_yolov5_nano.sh              # download, prepare, inspect
+tools/vitis/zoo_yolov5_nano.sh --skip-download
 ```
 
-`load_deploy_weights` accepts the Ultralytics `{"model": ...}` checkpoint
-layout and loads it strictly, so the architecture and the keypoint schema must
-match (`halfbust62`, `nc = 1`). The rest of the pipeline is unchanged.
+Two routes, in order: the float+QAT package
+(`pt_yolov5-nano_coco_640_640_4.6G_3.0.zip`) with its
+`qat/convert_qat_results/*_int.xmodel` compiled by `compile.sh`, or the prebuilt
+`yolov5_nano_pt-zcu102_zcu104_kv260-r3.0.0.tar.gz`. **The package route does not
+currently work**: the zoo returns a 1005-byte README-only archive for it (the
+YOLO packages are no longer published; the README tells customers to contact
+AMD), so there are no QAT weights and no `_int.xmodel` to compile. The prebuilt
+tar is downloadable (1.5 MB, md5 `61210fe6d964e34301af0640e0b17d93`) and is
+already compiled by Vitis AI 3.0 for `DPUCZDX8G_ISA1_B4096`, so the script
+re-stamps its recorded fingerprint `0x101000056010407` to `0x101000016010407`
+with `restamp_xmodel.py` (one protobuf varint, nothing else). **That is a
+fingerprint rewrite of a prebuilt artifact, not a compile, and the re-stamped
+file has not been loaded on a board.** Compiling the already-compiled graph is
+not an option (`vai_c_xir` refuses a non-leaf subgraph).
 
-## Calibration data
+Outputs (git-ignored): `build/models/zoo/yolov5_nano/`,
+`build/vitis/yolov5_nano/compiled/yolov5_nano.xmodel`,
+`build/vitis/report/inspect_yolov5_nano.json`, `build/vitis/logs/zoo_yolov5_nano_*.log`.
+The script fails unless the artifact reports one DPU subgraph, fingerprint
+`0x101000016010407`, target `DPUCZDX8G_ISA1_B4096`, input `1x640x640x3`, and the
+three `255`-channel heads at strides 8, 16 and 32.
 
-`make_calib.py` reads the camera captures in
-`/home/fabio/cpsa-session-state/scratchpad/cap` (override with `--source`,
-repeatable), augments them (flip, brightness, contrast, crop, rotation, noise),
-adds seeded synthetic frames, and letterboxes every frame with
-`cpsa.vision.pose_decode.letterbox` — the same preprocessing as
-`DpuPoseEstimator` and `OnnxPoseEstimator`. Use `--count` for the real run
-(100–200 frames); `--height/--width` follow the model input.
+Observed: 5 subgraphs, 1 DPU (209 ops), input `1x640x640x3` xint8 `fp=6`,
+outputs `1x80x80x255` `fp=3`, `1x40x40x255` `fp=4`, `1x20x20x255` `fp=4`. The
+graph stays in the logit domain (no sigmoid in the xmodel), and the prototxt
+preprocessing is `mean 0, scale 0.00392156` over RGB, i.e. `pixel / 255` with a
+letterbox padded with 114. A head cell holds **three anchor slots**, anchor-major
+(`slot a` at channel `85 * a`), with the zoo anchors
+`(10,13)(16,30)(33,23)` / `(30,61)(62,45)(59,119)` / `(116,90)(156,198)(373,326)`;
+the zoo post-processing decodes `cx = (sigmoid(tx) * 2 - 0.5 + col) * stride`,
+`w = (sigmoid(tw) * 2) ** 2 * anchor_w`, `score = sigmoid(obj) * sigmoid(cls)`.
 
-## Board
+The reference check mirrors `yolox_reference.py`: `prepare` letterboxes on the
+host, `dump` runs the reference model in the container and applies a literal
+port of the zoo's `yolov3_post_process` (`type: YOLOV5`) and its per-class NMS,
+and `check` decodes the same int8 head tensors through `cpsa.yolov5`:
 
-The board (Kria KV260, Vitis AI 3.5 VART built natively, see
-`docs/notes/vart-kv260.md`) must have the DPU app loaded
-(`sudo xmutil loadapp kv260-benchmark-b4096`); `xdputil query` must report
+```sh
+uv run --no-sync python tools/vitis/yolov5_reference.py prepare \
+  --images build/vitis/yolov5_reference/images --work build/vitis/yolov5_reference
+tools/vitis/run_vitis.sh python tools/vitis/yolov5_reference.py dump \
+  --work build/vitis/yolov5_reference
+uv run --no-sync python tools/vitis/yolov5_reference.py check \
+  --work build/vitis/yolov5_reference --out build/vitis/report/yolov5_reference.json
+```
+
+The reference model is the public Ultralytics YOLOv5n v7.0 float checkpoint
+(`build/third_party/yolov5n.pt`, same architecture and anchors), because the QAT
+weights are not downloadable; `dump` asserts the checked model has the zoo's
+strides, the `3 x 85` head layout and the prototxt anchors, rounds both heads
+through the graph's output `fix_point` (3, 4, 4) and the input through `fp=6`,
+so both sides decode the very same tensors. **What this proves is the decode and
+post-processing equivalence, not the accuracy of the zoo weights.** Observed on
+28 COCO images (20 of them with a person and an object): 211 matched boxes,
+minimum IoU 0.999999767, no missing or extra boxes, no failures.
+
+## MoveNet (`src/cpsa/movenet.py`, M1)
+
+```sh
+tools/vitis/zoo_movenet.sh            # download, extract, compile, inspect
+tools/vitis/zoo_movenet.sh --skip-download
+```
+
+`pt_movenet_coco_192_192_0.5G_3.0.zip` (11.4 MB) ships the quantized
+`quantized/MoveNet_int.xmodel`, which is recompiled with the same pinned
+fingerprint. Outputs (git-ignored): `build/models/zoo/movenet/` (package),
+`build/vitis/movenet/compiled/movenet.xmodel`,
+`build/vitis/report/inspect_movenet.json`, `build/vitis/logs/zoo_movenet_*.log`.
+The script fails unless the artifact reports one DPU subgraph, fingerprint
+`0x101000016010407`, a `1x192x192x3` input and the four heads below.
+
+Observed: 6 subgraphs, 1 DPU, input `1x192x192x3` xint8 `fp=6`, four `48x48`
+heads at stride 4:
+
+| head | shape | `fix_point` | contents |
+|---|---|---|---|
+| heatmaps | `1x48x48x17` | 3 | keypoint logits, sigmoid in a CPU subgraph |
+| centers | `1x48x48x1` | 3 | person-center logits, sigmoid in a CPU subgraph |
+| regs | `1x48x48x34` | 2 | `(dx, dy)` per keypoint from the center cell |
+| offsets | `1x48x48x34` | 7 | sub-cell `(dx, dy)` per keypoint |
+
+The input `fix_point` is 6, i.e. the int8 grid covers `[-2, 2)`, while the zoo
+preprocessing is a plain RGB square resize with no normalization. Feeding raw
+`0..255` saturates every pixel above 2 at `127` and the pose collapses; the
+runtime feeds `pixel / 128` (`int8 = round(pixel / 2)`,
+`movenet.MOVENET_INPUT_SCALE`). Measured against the package's float model on 24
+COCO person crops (keypoints both sides score >= 0.3): `pixel / 128` 2.69 px
+mean, `/127.5 - 1` 3.94 px, `/255` 4.26 px, raw 37.87 px. The package's own
+reported accuracy uses raw pixels and does not transfer to the compiled grid.
+
+Because the graph-level heatmaps and centers are post-sigmoid but the DPU
+subgraph exports logits, `movenet.decode` applies `sigmoid` itself, then the
+zoo threshold (`0.1`), the analytic center prior (`1 / (distance + 1.8)`, the
+package's `center_weight_origin.npy`), the regression target from the center
+cell, the `1 / (distance + 1.8)` heatmap weighting and the offset field.
+
+The runtime is not wired into the pipeline yet (that is M2); `movenet_reference.py`
+checks it standalone:
+
+```sh
+uv run --no-sync python tools/vitis/movenet_reference.py prepare \
+  --images build/vitis/movenet_reference/images --work build/vitis/movenet_reference
+tools/vitis/run_vitis.sh python tools/vitis/movenet_reference.py dump \
+  --model build/models/zoo/movenet/pt_movenet_coco_192_192_0.5G_3.0 \
+  --work build/vitis/movenet_reference
+uv run --no-sync python tools/vitis/movenet_reference.py check \
+  --work build/vitis/movenet_reference --out build/vitis/report/movenet_reference.json
+```
+
+`dump` runs the package's quantized TorchScript model on the dequantized inputs,
+inverts the `nn.Sigmoid` the package ends its heatmap and center heads with,
+round-trips all four heads through the DPU fix points and decodes them with the
+package's own `movenetDecode` (the function `movenet.decode` mirrors).
+`movenetDecode` returns no scores, so the tool reads each score from the
+package's heatmap at the package's own peak cell and aborts if that peak does not
+reproduce the package coordinates. `check` requires pixel-identical
+preprocessing and int8 inputs, the same set of keypoints at score >= 0.3, and at
+least 20 images with a mean distance <= 2 px on the 192 grid. Observed on 24
+COCO person crops: 102 compared keypoints, mean 0.0000 px, max 0.0000 px, no
+failures.
+
+## The 60 fps runtime
+
+The showcase loop does not dequantize the three heads and sigmoid every cell:
+`cpsa.yolox.QuantizedYoloxDecoder` thresholds the objectness and the best class
+in the int8 domain first and runs the float decode only on the survivors, which
+is bit-identical to the float path on the dequantized heads for every box above
+`conf_thr`. Preprocessing letterboxes with `cv2.resize` + `cv2.copyMakeBorder`
+and quantizes through `cv2.LUT` straight into the DPU input view, and
+`YoloxDetector.submit`/`wait` keeps two frames in flight so frame N runs on the
+DPU while frame N-1 is decoded and drawn.
+
+`scripts/profile_showcase.py` reports the per-stage means (camera conversion,
+preprocess, DPU, decode, draw, JPEG) and the achievable loop rate with that
+overlap:
+
+```sh
+# On the board, with the unit stopped so the DPU is free.
+sudo systemctl stop cpsa-showcase
+cd ~/cpsa && PYTHONPATH=src python3 scripts/profile_showcase.py \
+  --model models/yolox_nano.xmodel --runs 60
+```
+
+With `--model` it runs the real graph; without it the DPU stage assumes the
+measured 4.7 ms so the CPU stages can be profiled before a deploy. The script
+exits 0 when the measurement ran; `--target-ms 16.7` labels the budget line
+PASS/OVER. Host numbers are not board numbers: on a laptop the loop is CPU-bound
+and the DPU stage is the stand-in.
+
+## On the board
+
+The board (Kria KV260, Vitis AI 3.5 VART built natively) must have the DPU app
+loaded (`sudo xmutil loadapp kv260-benchmark-b4096`, done by
+`deploy/systemd/cpsa-dpu.service`); `xdputil query` must report
 `DPUCZDX8G_ISA1_B4096_0101000016010407` / fingerprint `0x101000016010407`.
 
-```sh
-scp build/vitis/compiled/pose_halfbust62.xmodel kria@10.42.0.83:~/bench/
-# On the board:
-cd ~/bench && PYTHONPATH=src python3 scripts/bench_pose.py \
-  --xmodel pose_halfbust62.xmodel --layout halfbust62 --frames 200
-```
-
-`scripts/bench_pose.py` reports mean/median/p95 latency and fps with the
-`DpuPoseEstimator` (VART runner + `decode_raw_heads` on the CPU). Measured
-here: 289.0 ms mean, 291.5 ms p95, 3.46 fps for the full estimator, and
-25.3 ms/frame for the DPU runner alone; the Python decode is ~182 ms of the
-total. If `show_dpu`/`xdputil query` fails with
-`cannot open file: /tmp/DPU_0`, remove the stale `/tmp/DPU_0` lock file.
+If `xdputil query` fails with `cannot open file: /tmp/DPU_0`, remove the stale
+`/tmp/DPU_0` lock file.

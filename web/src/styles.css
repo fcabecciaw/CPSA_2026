@@ -1,27 +1,85 @@
 /*
- * Booth-first layout: readable at 2–3 m in a bright room (PRODUCT.md),
- * with a 1280×720 and a 1920×1080 screen in mind. System fonts only, no
- * external assets (NFR-07).
+ * The booth surface: the camera on the left, ARI on the right.
+ *
+ * One visual language taken from ARI's particle sphere: the cyan → violet →
+ * magenta of its surface over a violet-black night. The video is framed like a
+ * screen with a thin ring in those three colours; ARI lives in a glass panel
+ * lit from behind, speaks in subtitles and names what it sees as chips.
+ *
+ * Presentation mode (default) hides every `.debug-only` element; debug mode
+ * (`<html data-ui="debug">`, the top-right button or `d`) shows the scores,
+ * the "mente" strip, fps/latency and the voice picker instead of the chips.
+ *
+ * Fonts are bundled (no internet at the booth): Unbounded for the few display
+ * words, Atkinson Hyperlegible Next for everything read from three metres,
+ * Atkinson Hyperlegible Mono only for the numbers of the debug readouts.
+ * No backdrop-filter: blurring over the live video and the WebGL sphere would
+ * cost frames.
  */
+
+@import "@fontsource-variable/unbounded/index.css";
+@import "@fontsource-variable/atkinson-hyperlegible-next/index.css";
+@import "@fontsource-variable/atkinson-hyperlegible-mono/index.css";
 
 :root {
   color-scheme: dark;
-  --bg: #0a0f1a;
-  --panel: #121b2b;
-  --panel-raised: #172236;
-  --line: #2b3a52;
-  --text: #f3f7fc;
-  --muted: #b9c5d8;
-  --muted-strong: #d4dcea;
-  --accent: #8fd0ff;
-  --accent-ink: #04172a;
-  --ok: #8ce3b0;
-  --warn: #ffd479;
-  --danger: #ff9a9a;
+
+  /* The night and the sphere's three lights. */
+  --void: #07061a;
+  --void-raised: #100c2b;
+  --ion: #4fd6ff;
+  --violet: #7a6cff;
+  --plasma: #ff4fd8;
+  --spectrum: linear-gradient(120deg, var(--ion), var(--violet) 52%, var(--plasma));
+
+  /* Text on the night: 15:1, 8.6:1 and 4.8:1 against --void. */
+  --starlight: #f1f0ff;
+  --haze: #b7b4dc;
+  --dusk: #8682b3;
+
+  --glass: rgba(150, 140, 255, 0.07);
+  --glass-strong: rgba(150, 140, 255, 0.12);
+  --rim: rgba(190, 182, 255, 0.16);
+  --rim-strong: rgba(190, 182, 255, 0.3);
+
+  --ok: #6ee7b0;
+  --warn: #ffd27a;
+  --danger: #ff8fa3;
+
+  --display: "Unbounded Variable", "Unbounded", system-ui, sans-serif;
+  --font:
+    "Atkinson Hyperlegible Next Variable", "Atkinson Hyperlegible Next", system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --mono: "Atkinson Hyperlegible Mono Variable", ui-monospace, "DejaVu Sans Mono", monospace;
+
+  --radius: clamp(16px, 1.3vw, 28px);
+  --gutter: clamp(14px, 1.5vw, 32px);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  /* The camera column: 1.3 parts of 2.3, and its 4:3 frame's height. */
+  --camera-share: 0.5652;
+  --camera-width: calc((100vw - 3 * var(--gutter)) * var(--camera-share));
+  --frame-height: calc(var(--camera-width) * 0.75);
+
+  /* Aliases kept for voicepicker.css. */
+  --text: var(--starlight);
+  --muted: var(--haze);
+  --dim: var(--dusk);
+  --beam: var(--ion);
+  --hairline: var(--rim);
+  --ink: var(--void);
 }
 
 * {
   box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+[data-ui="presentation"] .debug-only,
+[data-ui="debug"] .presentation-only {
+  display: none !important;
 }
 
 html,
@@ -31,1113 +89,996 @@ body {
 
 body {
   margin: 0;
+  overflow: hidden;
   background:
-    radial-gradient(1200px 700px at 18% -12%, #16263f 0%, transparent 62%),
-    var(--bg);
-  color: var(--text);
-  font-family:
-    system-ui,
-    -apple-system,
-    "Segoe UI",
-    Roboto,
-    "Helvetica Neue",
-    Arial,
-    sans-serif;
-  font-size: clamp(15px, 0.55vw + 8px, 19px);
-  line-height: 1.35;
+    radial-gradient(60vw 50vh at 78% 30%, rgba(122, 108, 255, 0.16), transparent 70%),
+    radial-gradient(50vw 45vh at 12% 95%, rgba(79, 214, 255, 0.07), transparent 70%),
+    radial-gradient(40vw 40vh at 95% 100%, rgba(255, 79, 216, 0.07), transparent 70%),
+    var(--void);
+  color: var(--starlight);
+  font-family: var(--font);
+  font-size: clamp(15px, 0.5vw + 8.6px, 19px);
+  line-height: 1.4;
   -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
 }
 
-h1,
-h2,
-p {
-  overflow-wrap: break-word;
+::selection {
+  background: rgba(122, 108, 255, 0.45);
+  color: var(--starlight);
 }
 
-/* Desktop and booth: the dashboard fits the window; panels clip or scroll inside. */
+:focus-visible {
+  outline: 2px solid var(--ion);
+  outline-offset: 3px;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+.sr-only,
+[data-ui="presentation"] .conn-text,
+.mute-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.icon {
+  width: 1.25em;
+  height: 1.25em;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .app {
-  height: 100vh;
   height: 100dvh;
-  display: flex;
-  flex-direction: column;
-  gap: clamp(10px, 0.8vw, 18px);
-  padding: clamp(12px, 1vw, 22px);
-}
-
-/* --- Masthead and connection bar ---------------------------------------- */
-
-.masthead {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: clamp(10px, 1.4vh, 22px);
+  padding: clamp(12px, 1.6vh, 28px) var(--gutter) var(--gutter);
+}
+
+/* --- the bar ------------------------------------------------------------ */
+
+.topbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  gap: clamp(14px, 1.6vw, 34px);
+  gap: var(--gutter);
+  min-height: clamp(44px, 5.4vh, 64px);
 }
 
-.identity {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding-right: clamp(8px, 1vw, 18px);
-  border-right: 1px solid var(--line);
-}
-
+/* The title of the demo and one line on what it is: no project acronym. */
 .brand {
   display: flex;
-  align-items: baseline;
-  gap: 0.45rem;
-  margin: 0;
-  font-size: clamp(1.1rem, 0.7vw + 0.7rem, 1.6rem);
-  font-weight: 800;
-  letter-spacing: 0.1em;
-}
-
-.brand-unica {
-  color: var(--accent);
-}
-
-.brand-eolab {
-  color: var(--text);
-}
-
-.brand-sep {
-  color: var(--line);
-}
-
-.affiliation {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.72rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.headline h1 {
-  margin: 0;
-  font-size: clamp(1.7rem, 1.5vw + 0.9rem, 3.1rem);
-  line-height: 1.02;
-  letter-spacing: -0.015em;
-}
-
-.subtitle {
-  margin: 0.18rem 0 0;
-  color: var(--muted);
-  font-size: clamp(0.8rem, 0.3vw + 0.6rem, 1.05rem);
-}
-
-.connection {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  min-width: 16rem;
-  padding: 0.5rem 0.95rem;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-}
-
-.connection-copy {
+  flex-direction: column;
+  gap: 0.15em;
   min-width: 0;
 }
 
+.wordmark {
+  margin: 0;
+  font-family: var(--display);
+  font-size: clamp(18px, 1.45vw, 30px);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
+  color: var(--starlight);
+}
+
+.tagline,
+.brand-line {
+  margin: 0;
+  overflow: hidden;
+  font-size: 0.86em;
+  color: var(--haze);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brand-line {
+  color: var(--dusk);
+}
+
+/* Oggetti | Scheletro: one track, one luminous thumb that slides. */
+.modes {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 4px;
+  border: 1px solid var(--rim);
+  border-radius: 999px;
+  background: var(--glass);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.modes-thumb {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: calc(50% - 4px);
+  border-radius: 999px;
+  background: linear-gradient(
+    120deg,
+    rgba(79, 214, 255, 0.32),
+    rgba(122, 108, 255, 0.4) 55%,
+    rgba(255, 79, 216, 0.32)
+  );
+  box-shadow:
+    inset 0 0 0 1px rgba(214, 208, 255, 0.35),
+    0 6px 22px -8px rgba(122, 108, 255, 0.8);
+  transition: transform 420ms var(--ease-out);
+}
+
+.modes:has(#mode-skeleton.mode-active) .modes-thumb {
+  transform: translateX(100%);
+}
+
+.mode {
+  position: relative;
+  z-index: 1;
+  min-width: clamp(104px, 7.6vw, 150px);
+  padding: 0.5em 1.2em;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--haze);
+  font-size: clamp(15px, 1vw, 20px);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: color 240ms ease;
+}
+
+.mode:hover,
+.mode-active {
+  color: var(--starlight);
+}
+
+.readout {
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  gap: clamp(10px, 1vw, 20px);
+  min-width: 0;
+  color: var(--haze);
+  white-space: nowrap;
+}
+
+.conn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55em;
+  padding: 0.5em;
+  font-size: 0.86em;
+}
+
 .dot {
-  flex: none;
-  width: 0.65rem;
-  height: 0.65rem;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
-  background: var(--muted);
+  background: var(--dusk);
 }
 
 .dot-open {
   background: var(--ok);
-  box-shadow: 0 0 0 4px rgb(140 227 176 / 18%);
+  box-shadow: 0 0 0 3px rgba(110, 231, 176, 0.16);
 }
 
 .dot-connecting,
 .dot-reconnecting {
   background: var(--warn);
+  animation: pulse 1.6s ease-in-out infinite;
 }
 
 .dot-closed {
   background: var(--danger);
 }
 
-.conn-text {
-  margin: 0;
-  font-weight: 700;
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
 }
 
-.conn-detail {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.76rem;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.gauge {
+  font-family: var(--mono);
+  font-size: 0.86em;
+  color: var(--starlight);
 }
 
-/* --- Control bar --------------------------------------------------------- */
-
-.controlbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.55rem 1.15rem;
-  padding: 0.5rem 0.8rem;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 14px;
+.voice-paused {
+  color: var(--warn);
 }
 
-.mode-group {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-
-.control-label {
-  color: var(--muted);
-  font-size: 0.72rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.mode-group button {
-  padding: 0.28rem 0.8rem;
-  color: var(--text);
-  font: inherit;
-  font-size: 0.82rem;
-  font-weight: 700;
-  background: var(--panel-raised);
-  border: 1px solid var(--line);
-  border-radius: 999px;
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: clamp(38px, 2.5vw, 50px);
+  height: clamp(38px, 2.5vw, 50px);
+  padding: 0;
+  border: 1px solid var(--rim);
+  border-radius: 50%;
+  background: var(--glass);
+  color: var(--haze);
+  font-size: clamp(15px, 1vw, 20px);
   cursor: pointer;
+  transition:
+    color 200ms ease,
+    border-color 200ms ease,
+    background 200ms ease;
 }
 
-.mode-group button:hover:not(:disabled) {
-  border-color: var(--accent);
+.icon-button:hover {
+  border-color: var(--rim-strong);
+  color: var(--starlight);
 }
 
-.mode-group button[aria-pressed="true"] {
-  color: var(--accent-ink);
-  background: var(--accent);
-  border-color: var(--accent);
-}
-
-.mode-group button:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-.mode-status {
-  margin: 0;
-  color: var(--muted-strong);
-  font-size: 0.82rem;
-}
-
-.mode-error {
-  margin: 0;
-  color: var(--danger);
-  font-size: 0.76rem;
-  font-weight: 600;
-}
-
-.mode-error:empty {
+.mute .icon-voice-off,
+.mute[aria-pressed="true"] .icon-voice-on {
   display: none;
 }
 
-.health {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.3rem 0.9rem;
-  margin: 0;
-  padding: 0;
-  list-style: none;
+.mute[aria-pressed="true"] .icon-voice-off {
+  display: block;
 }
 
-.health-item {
-  display: flex;
-  gap: 0.32rem;
-  font-size: 0.74rem;
-}
-
-.health-key {
-  color: var(--muted);
-}
-
-.health-value {
-  font-weight: 700;
-}
-
-.health-note {
-  color: var(--muted);
-  font-size: 0.68rem;
-}
-
-/* --- Timings (F13) ------------------------------------------------------- */
-
-.timing {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.15rem 0.7rem;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.timing-label {
-  color: var(--muted);
-  font-size: 0.7rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.timing-item {
-  display: flex;
-  gap: 0.26rem;
-  font-size: 0.7rem;
-}
-
-.timing-key {
-  color: var(--muted);
-}
-
-.timing-value {
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.tone-ok {
-  color: var(--ok);
-}
-
-.tone-warn {
+.mute[aria-pressed="true"] {
+  border-color: rgba(255, 210, 122, 0.45);
   color: var(--warn);
 }
 
-.tone-danger {
-  color: var(--danger);
+/* The debug toggle stays quiet until it is on. */
+.debug-toggle {
+  border-color: transparent;
+  background: transparent;
+  color: var(--dusk);
 }
 
-.tone-muted {
-  color: var(--muted);
+.debug-toggle[aria-pressed="true"] {
+  border-color: rgba(79, 214, 255, 0.5);
+  background: rgba(79, 214, 255, 0.1);
+  color: var(--ion);
 }
 
+/* --- the status toast --------------------------------------------------- */
+
+/* Centred under the camera, in the room the 4:3 frame leaves below it. */
 .notice {
-  flex-basis: 100%;
-  min-height: 1.05em;
+  position: fixed;
+  bottom: clamp(14px, 2vh, 28px);
+  left: calc(var(--gutter) + var(--camera-width) / 2);
+  z-index: 30;
+  max-width: min(80vw, 60ch);
   margin: 0;
-  font-size: 0.76rem;
+  padding: 0.6em 1.2em;
+  border: 1px solid var(--rim);
+  border-radius: 999px;
+  background: rgba(16, 12, 43, 0.92);
+  box-shadow: 0 14px 40px -12px rgba(0, 0, 0, 0.7);
+  font-size: 0.9em;
+  color: var(--haze);
+  text-align: center;
+  transform: translateX(-50%);
+}
+
+.notice:empty,
+[data-ui="presentation"] .notice-info {
+  display: none;
 }
 
 .notice-error {
+  border-color: rgba(255, 143, 163, 0.45);
   color: var(--danger);
-  font-weight: 600;
 }
 
 .notice-warn {
+  border-color: rgba(255, 210, 122, 0.4);
   color: var(--warn);
 }
 
-.notice-info {
-  color: var(--muted);
-}
+/* --- the stage ---------------------------------------------------------- */
 
-/* --- Layout -------------------------------------------------------------- */
-
-.layout {
-  flex: 1;
+.stage {
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(300px, 0.95fr) minmax(430px, 1.35fr) minmax(340px, 1fr);
-  grid-template-rows: minmax(0, 1fr);
-  gap: clamp(10px, 0.8vw, 16px);
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  gap: var(--gutter);
 }
 
-.side {
+.pane {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* --- the camera: a 4:3 screen with a thin spectrum ring ----------------- */
+
+/* Frame and ARI's panel share one height and sit centred, like a diptych. */
+.pane-camera {
+  display: grid;
+  place-items: center;
+  container-type: size;
+}
+
+.frame-wrap {
+  position: relative;
+  width: min(100cqw, 133.333cqh);
+  aspect-ratio: 4 / 3;
+}
+
+.frame {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius);
+  background: #020109;
+  overflow: hidden;
+  box-shadow:
+    0 30px 80px -30px rgba(122, 108, 255, 0.55),
+    0 10px 40px -20px rgba(79, 214, 255, 0.35);
+}
+
+.frame::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  padding: 1.5px;
+  border-radius: inherit;
+  background: var(--spectrum);
+  opacity: 0.75;
+  pointer-events: none;
+  mask:
+    linear-gradient(#000 0 0) content-box exclude,
+    linear-gradient(#000 0 0);
+}
+
+.video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.frame-note {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  margin: 0;
+  padding: 1.5em;
+  font-size: clamp(16px, 1.2vw, 24px);
+  text-align: center;
+  color: var(--haze);
+}
+
+/*
+ * "In diretta dalla telecamera": a tab hung on the top edge of the screen,
+ * half over the ring, so it covers as little of the board's box labels as
+ * possible.
+ */
+.frame-title {
+  position: absolute;
+  top: 0;
+  left: clamp(18px, 1.8vw, 36px);
+  z-index: 4;
+  margin: 0;
+  padding: 0.5em 1.05em 0.55em;
+  border-radius: 999px;
+  background: var(--void-raised);
+  box-shadow:
+    inset 0 0 0 1px var(--rim-strong),
+    0 10px 30px -12px rgba(0, 0, 0, 0.9);
+  font-family: var(--display);
+  font-size: clamp(14px, 1.1vw, 23px);
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  line-height: 1.1;
+  color: var(--starlight);
+  white-space: nowrap;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.live-dot {
+  display: inline-block;
+  width: 0.5em;
+  height: 0.5em;
+  margin-right: 0.55em;
+  border-radius: 50%;
+  background: var(--plasma);
+  box-shadow: 0 0 0 0.18em rgba(255, 79, 216, 0.22);
+  vertical-align: 0.12em;
+}
+
+.frame-badge {
+  position: absolute;
+  top: clamp(14px, 1.4vw, 28px);
+  right: clamp(14px, 1.4vw, 28px);
+  z-index: 2;
+  padding: 0.15em 0.55em;
+  border: 1px solid var(--rim);
+  border-radius: 6px;
+  background: rgba(7, 6, 26, 0.7);
+  font-family: var(--mono);
+  font-size: 0.78em;
+  color: var(--haze);
+}
+
+/* --- ARI's panel -------------------------------------------------------- */
+
+.pane-showcase {
+  align-self: center;
   display: flex;
   flex-direction: column;
-  gap: clamp(10px, 0.8vw, 16px);
+  height: min(100%, var(--frame-height));
   min-height: 0;
+  padding: clamp(10px, 1.4vh, 24px) clamp(14px, 1.4vw, 30px) clamp(14px, 2vh, 30px);
+  border: 1px solid var(--rim);
+  border-radius: var(--radius);
+  background:
+    radial-gradient(70% 55% at 50% 40%, rgba(122, 108, 255, 0.2), transparent 72%),
+    radial-gradient(60% 40% at 50% 100%, rgba(255, 79, 216, 0.08), transparent 70%),
+    linear-gradient(180deg, rgba(150, 140, 255, 0.07), rgba(16, 12, 43, 0.5));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 30px 80px -40px rgba(0, 0, 0, 0.8);
+  overflow: hidden;
 }
 
-.side .live-panel {
-  flex: none;
-}
-
-.side .episode-panel {
-  flex: 1;
-  min-height: 0;
-}
-
-.feed-side .feed-panel,
-.feed-side .log-panel {
+/*
+ * The three subtrees of ARI's panel never size each other: the stage takes
+ * what is left, the subtitles and the objects panel have fixed heights, and
+ * each is contained so a change inside cannot relayout or repaint the others
+ * (the sphere's canvas is never resized by a chip coming or going).
+ */
+.hologram {
+  position: relative;
+  display: flex;
+  flex-direction: column;
   flex: 1 1 0;
   min-height: 0;
+  contain: size layout paint;
 }
 
-.panel {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  padding: clamp(10px, 0.9vw, 16px);
-  overflow: hidden;
-  background: linear-gradient(180deg, var(--panel-raised), var(--panel));
-  border: 1px solid var(--line);
-  border-radius: 16px;
-}
-
-.panel-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.75rem;
-  margin-bottom: 0.6rem;
-}
-
-.panel-head h2 {
-  margin: 0;
-  font-size: clamp(1rem, 0.5vw + 0.62rem, 1.35rem);
-  letter-spacing: 0.01em;
-}
-
-.hint {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.7rem;
-  text-align: right;
-}
-
-/* --- Live status --------------------------------------------------------- */
-
-.tiles {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-.tile {
-  display: grid;
-  grid-template-columns: minmax(88px, auto) minmax(0, 1fr);
-  align-items: center;
-  gap: 0.12rem 0.65rem;
-  padding: 0.5rem 0.7rem;
-  background: rgb(10 15 26 / 55%);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-}
-
-.tile-label {
-  color: var(--muted);
-  font-size: 0.7rem;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.tile-value-wrap {
-  justify-self: start;
-  min-width: 0;
-}
-
-.tile-value {
-  font-size: clamp(1.05rem, 0.7vw + 0.65rem, 1.55rem);
-  font-weight: 800;
-  line-height: 1.12;
-}
-
-/* Longer copy as a tile value (the unused-IMU note with the camera-only
-   trigger) stays readable without pushing the live panel taller. */
-.tile-value-long {
-  font-size: clamp(0.95rem, 0.55vw + 0.6rem, 1.3rem);
-  font-weight: 700;
-}
-
-.tile-note {
-  grid-column: 2;
-  color: var(--muted);
-  font-size: 0.68rem;
-}
-
-.episode-active {
-  color: var(--ok);
-}
-
-/* --- Chips and verdicts -------------------------------------------------- */
-
-.chip {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.12em 0.5em;
-  border-radius: 999px;
-  font-size: 0.78rem;
-  font-weight: 800;
-  line-height: 1.35;
-  letter-spacing: 0.015em;
-}
-
-.chip-small {
-  padding: 0.04em 0.4em;
-  font-size: 0.68rem;
-}
-
-.tag-no-class {
-  color: #0a0f1a;
-  background: #c8d4e6;
-}
-
-.tag-non-dangerous {
-  color: #04150b;
-  background: #8ce3b0;
-}
-
-.tag-dangerous {
-  color: #2b0505;
-  background: #ff9a9a;
-}
-
-.tag-non-stereotypy {
-  color: #06122b;
-  background: #a9c7ff;
-}
-
-.tag-none {
-  color: var(--text);
-  background: #3a4a63;
-}
-
-.verdict {
-  font-size: 0.72rem;
-  font-weight: 700;
-}
-
-.verdict-confirmed {
-  color: var(--ok);
-}
-
-.verdict-rejected {
-  color: var(--muted-strong);
-}
-
-.verdict-undecided {
-  color: var(--warn);
-}
-
-.verdict-none {
-  color: var(--muted);
-}
-
-/* --- Episode summary ----------------------------------------------------- */
-
-.episode-badge {
-  flex: none;
-}
-
-.badge-active,
-.badge-ended {
-  display: inline-block;
-  padding: 0.1rem 0.5rem;
-  border-radius: 999px;
-  font-size: 0.68rem;
-  font-weight: 800;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-
-.badge-active {
-  color: var(--accent-ink);
-  background: var(--accent);
-}
-
-.badge-ended {
-  color: var(--text);
-  background: #3a4a63;
-}
-
-.episode-body {
-  min-height: 0;
-  overflow-y: auto;
-  padding-right: 0.2rem;
-}
-
-.metrics {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.45rem;
-}
-
-.metric {
-  display: flex;
-  flex-direction: column;
-  gap: 0.12rem;
-  padding: 0.42rem 0.55rem;
-  background: rgb(10 15 26 / 50%);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-}
-
-.metric-label {
-  color: var(--muted);
-  font-size: 0.68rem;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-
-.metric-value {
-  font-size: 1rem;
-  font-weight: 700;
-}
-
-.episode-id {
-  margin: 0.5rem 0;
-  color: var(--muted);
-  font-size: 0.74rem;
-}
-
-.episode-running {
-  margin: 0.3rem 0;
-  color: var(--muted-strong);
-}
-
-.empty {
-  margin: 0.4rem 0;
-  color: var(--muted);
-  font-style: italic;
-}
-
-.contacts {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.78rem;
-}
-
-.contacts caption {
-  padding-bottom: 0.3rem;
-  color: var(--muted);
-  font-size: 0.7rem;
-  letter-spacing: 0.06em;
-  text-align: left;
-  text-transform: uppercase;
-}
-
-.contacts th,
-.contacts td {
-  padding: 0.28rem 0.32rem;
-  text-align: left;
-  border-bottom: 1px solid var(--line);
-}
-
-.contacts th {
-  color: var(--muted);
-  font-size: 0.7rem;
-  font-weight: 600;
-}
-
-/* --- Decision feed ------------------------------------------------------- */
-
-.feed {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 0.42rem;
-  min-height: 0;
-  margin: 0;
-  padding: 0;
-  overflow-y: auto;
-  list-style: none;
-}
-
-.feed-item {
-  padding: 0.42rem 0.6rem;
-  background: rgb(10 15 26 / 38%);
-  border: 1px solid var(--line);
-  border-left: 4px solid transparent;
-  border-radius: 10px;
-}
-
-.feed-item.newest {
-  background: rgb(143 208 255 / 8%);
-  border-left-color: var(--accent);
-}
-
-.feed-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.3rem 0.5rem;
-}
-
-.feed-time {
-  color: var(--muted-strong);
-  font-size: 0.76rem;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-.newest-flag {
-  margin-left: auto;
-  color: var(--accent);
-  font-size: 0.62rem;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.mini-flag {
-  padding: 0.04rem 0.35rem;
-  color: var(--muted);
-  font-size: 0.62rem;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-}
-
-.feed-detail {
-  margin: 0.28rem 0 0;
-  color: var(--muted);
-  font-size: 0.74rem;
-  line-height: 1.4;
-}
-
-.feed-empty {
-  padding: 0.5rem;
-  color: var(--muted);
-  font-style: italic;
-}
-
-/* --- Connection log ------------------------------------------------------ */
-
-.log {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 0.15rem;
-  min-height: 0;
-  margin: 0;
-  padding: 0;
-  overflow-y: auto;
-  list-style: none;
-  font-size: 0.76rem;
-}
-
-.log-item {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.1rem 0.45rem;
-  padding: 0.22rem 0.35rem;
-  border-bottom: 1px solid var(--line);
-}
-
-.log-item:last-child {
-  border-bottom: 0;
-}
-
-.log-time {
-  color: var(--muted-strong);
-  font-size: 0.72rem;
-  font-variant-numeric: tabular-nums;
-}
-
-.log-level {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.24rem;
-  font-size: 0.66rem;
-  font-weight: 800;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-
-.log-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.05em;
-  height: 1.05em;
-  font-size: 0.78em;
-  line-height: 1;
-  border: 1px solid currentColor;
-  border-radius: 50%;
-}
-
-.log-level-info {
-  color: var(--accent);
-}
-
-.log-level-warning {
-  color: var(--warn);
-}
-
-.log-level-error {
-  color: var(--danger);
-}
-
-.log-source {
-  font-size: 0.72rem;
-}
-
-.log-message {
-  flex-basis: 100%;
-  min-width: 0;
-  color: var(--muted-strong);
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
-.log-empty {
-  padding: 0.5rem;
-  color: var(--muted);
-  font-style: italic;
-}
-
-/* --- Skeleton ------------------------------------------------------------ */
-
-.canvas-wrap {
+.hologram-avatar {
   position: relative;
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
-  overflow: hidden;
-  background: #070d17;
-  border: 1px solid #1c2740;
-  border-radius: 12px;
+  transition: opacity 320ms ease;
 }
 
-.canvas-wrap canvas {
-  /* Positioned and stacked so it paints over the absolutely placed video. */
-  position: relative;
-  z-index: 1;
+.avatar-canvas {
   display: block;
   width: 100%;
   height: 100%;
 }
 
-/*
- * F14 camera stream, under the transparent canvas. Sizing and mirroring are
- * written inline by `SkeletonView`, reusing the skeleton's letterbox and
- * mirror math, so the bones land on the person in the image.
- */
-.video {
-  position: absolute;
-  top: 0;
-  left: 0;
-  max-width: none;
-  max-height: none;
-  object-fit: fill;
-  pointer-events: none;
-  user-select: none;
-  transform: scaleX(-1);
-  transform-origin: center;
-}
-
-.video[hidden] {
-  display: none;
-}
-
-.video-note {
-  position: absolute;
-  bottom: 0.5rem;
-  left: 0.55rem;
-  margin: 0;
-  padding: 0.12rem 0.45rem;
-  color: var(--muted-strong);
-  font-size: 0.7rem;
-  font-weight: 600;
-  background: rgb(7 13 23 / 75%);
-  border-radius: 6px;
-  pointer-events: none;
-}
-
-.video-note[hidden] {
-  display: none;
-}
-
-/* With the stream visible the empty-state scrim would dim the camera frame. */
-.canvas-wrap.has-video .canvas-empty {
-  background: transparent;
-  text-shadow: 0 1px 4px rgb(0 0 0 / 85%);
-}
-
-.canvas-empty {
+.hologram-avatar[data-status="nogl"]::after {
+  content: "Sfera non disponibile";
   position: absolute;
   inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--dusk);
+}
+
+/* Under the sphere, never over it: only the voice gate shows here. */
+.hologram-info {
+  z-index: 1;
   display: flex;
+  flex: none;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
+  gap: 0.4em;
+  padding-top: clamp(6px, 1vh, 14px);
+}
+
+.hologram-id {
   margin: 0;
-  padding: 1rem;
-  color: var(--muted);
-  font-size: clamp(0.95rem, 0.5vw + 0.6rem, 1.25rem);
+  font-family: var(--display);
+  font-size: clamp(14px, 0.95vw, 19px);
   font-weight: 600;
-  text-align: center;
-  background: rgb(7 13 23 / 55%);
+  letter-spacing: 0.08em;
+  color: var(--ion);
+}
+
+.voice-badge {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.8em;
+  color: var(--haze);
+}
+
+.voice-badge[data-status="no-voice"],
+.voice-badge[data-status="unsupported"] {
+  color: var(--warn);
+}
+
+/* The one call to action of the page: before the first click ARI is silent. */
+.voice-gate {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6em;
+  padding: 0.75em 1.6em;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(120deg, rgba(79, 214, 255, 0.22), rgba(122, 108, 255, 0.3));
+  color: var(--starlight);
+  font-size: clamp(16px, 1.2vw, 24px);
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow:
+    inset 0 0 0 1px rgba(214, 208, 255, 0.45),
+    0 12px 34px -12px rgba(122, 108, 255, 0.9);
+  transition: background 200ms ease;
+}
+
+.voice-gate::before {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border: 1px solid rgba(79, 214, 255, 0.5);
+  border-radius: inherit;
+  opacity: 0;
+  animation: gate-ring 2.6s var(--ease-out) infinite;
   pointer-events: none;
 }
 
-.canvas-empty[hidden] {
-  display: none;
+.voice-gate:hover {
+  background: linear-gradient(120deg, rgba(79, 214, 255, 0.32), rgba(122, 108, 255, 0.42));
 }
 
-.skeleton-footer {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.35rem 0.8rem;
-  margin-top: 0.55rem;
+@keyframes gate-ring {
+  0% {
+    opacity: 0.9;
+    transform: scale(0.96);
+  }
+
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(1.08);
+  }
 }
 
-.legend {
-  display: flex;
-  gap: 0.75rem;
-  margin: 0;
-  padding: 0;
-  color: var(--muted);
-  font-size: 0.7rem;
-  list-style: none;
-}
-
-.legend li {
-  display: flex;
-  align-items: center;
-  gap: 0.3rem;
-}
-
-.legend-swatch {
-  display: inline-block;
-  width: 0.68rem;
-  height: 0.68rem;
-  border-radius: 50%;
-}
-
-.legend-body {
-  background: #8fd0ff;
-}
-
-.legend-face {
-  background: #ffd479;
-}
-
-.legend-hands {
-  background: #8ce3b0;
-}
-
-/* --- Shared -------------------------------------------------------------- */
-
-/* A hidden view must win over `.panel { display: flex }` (the UA rule loses). */
-.panel[hidden] {
-  display: none;
-}
-
-/* --- Hologram and Sasso-carta-forbice views (T5) ------------------------- */
-
-.hologram-panel .canvas-wrap {
-  background: #050b14;
-}
-
-.legend-joint {
-  background: #bff4ff;
-  box-shadow: 0 0 6px rgb(56 214 255 / 85%);
-}
-
-.legend-bone {
-  background: rgb(126 232 255 / 55%);
-}
-
-.legend-grid {
-  background: rgb(90 200 255 / 35%);
-}
-
-.rps-panel {
-  gap: 0.55rem;
-}
-
-.rps-count {
-  min-height: 1.2em;
-  margin: 0;
-  color: var(--accent);
-  font-size: clamp(1.5rem, 1.5vw + 0.95rem, 2.9rem);
-  font-weight: 800;
-  text-align: center;
-}
-
-.rps-duel {
+/* ARI's sentence, as subtitles: the line people read from the back. */
+.subtitles {
+  flex: none;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  align-items: center;
-  gap: clamp(0.5rem, 1vw, 1.4rem);
+  place-items: center;
+  height: 3.9em;
+  margin-top: clamp(4px, 0.8vh, 12px);
+  font-size: clamp(20px, 1.75vw, 38px);
+  contain: size layout paint;
 }
 
-.rps-side {
+.bubble {
+  margin: 0;
+  max-width: 30ch;
+  font-size: 1em;
+  font-weight: 600;
+  line-height: 1.28;
+  letter-spacing: -0.005em;
+  text-align: center;
+  text-wrap: balance;
+  color: var(--starlight);
+  text-shadow: 0 2px 18px rgba(7, 6, 26, 0.9);
+  transition:
+    opacity 420ms var(--ease-out),
+    transform 420ms var(--ease-out),
+    filter 420ms var(--ease-out);
+}
+
+.bubble[data-length="medium"] {
+  max-width: 36ch;
+  font-size: 0.86em;
+}
+
+.bubble[data-length="long"] {
+  max-width: 48ch;
+  font-size: 0.72em;
+}
+
+.bubble-empty {
+  opacity: 0;
+  transform: translateY(6px);
+  filter: blur(4px);
+}
+
+/* --- what ARI sees: chips in presentation, lists in debug --------------- */
+
+/* Two rows of chips and the invitation, at a fixed height. */
+.showcase {
+  flex: none;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 0.1rem;
-  padding: 0.5rem 0.4rem;
-  background: rgb(10 15 26 / 55%);
-  border: 1px solid var(--line);
-  border-radius: 14px;
+  gap: 0.35em;
+  height: 6.6em;
+  min-height: 0;
+  padding-top: 0.5em;
+  font-size: clamp(17px, 1.4vw, 30px);
+  overflow: hidden;
+  contain: size layout paint;
 }
 
-.rps-icon {
-  font-size: clamp(2.2rem, 2.6vw + 1.3rem, 4rem);
-  line-height: 1.05;
-}
-
-.rps-side-label {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.72rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.rps-gesture {
-  margin: 0;
-  font-size: clamp(1rem, 0.6vw + 0.7rem, 1.4rem);
-  font-weight: 700;
-}
-
-.rps-versus {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.8rem;
-  text-align: center;
-}
-
-.rps-count[data-outcome="win"] {
-  color: var(--ok);
-}
-
-.rps-count[data-outcome="lose"] {
-  color: var(--danger);
-}
-
-.rps-count[data-outcome="draw"] {
-  color: var(--warn);
-}
-
-.rps-count[data-outcome="unclear"] {
-  color: var(--muted-strong);
-}
-
-.rps-score {
+.showcase-chips {
   display: flex;
+  flex-wrap: wrap;
   justify-content: center;
-  gap: 0.9rem;
+  gap: clamp(8px, 0.7vw, 14px);
   margin: 0;
   padding: 0;
-  color: var(--muted);
-  font-size: 0.78rem;
   list-style: none;
 }
 
-.rps-score-item {
+.showcase-chips:empty {
+  display: none;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0.42em 1em;
+  border: 1px solid var(--rim-strong);
+  border-radius: 999px;
+  background: var(--glass-strong);
+  font-size: 1em;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--starlight);
+  transition:
+    opacity 360ms var(--ease-out),
+    transform 360ms var(--ease-out);
+}
+
+.chip-entering {
+  opacity: 0;
+  transform: translateY(6px) scale(0.96);
+}
+
+.chip-count {
+  padding: 0.1em 0.45em;
+  border-radius: 999px;
+  background: linear-gradient(120deg, var(--ion), var(--violet));
+  font-size: 0.72em;
+  font-weight: 700;
+  color: var(--void);
+}
+
+.view-note {
+  margin: 0;
+  font-size: 0.86em;
+  text-align: center;
+  color: var(--haze);
+}
+
+/* Skeleton view: ARI steps back and the room takes the panel. */
+.pane-showcase:has(#room:not([hidden])) .hologram {
+  flex: 0 0 34%;
+}
+
+.room-view {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: clamp(8px, 1.2vh, 18px);
+  border: 1px solid var(--rim);
+  border-radius: calc(var(--radius) * 0.7);
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse at 50% 120%, rgba(122, 108, 255, 0.2), transparent 62%),
+    rgba(7, 6, 26, 0.45);
+}
+
+.room-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* The ~0.5 s single-model swap: a pill over the panel. */
+.view-switching {
+  position: absolute;
+  bottom: clamp(18px, 4vh, 48px);
+  left: 50%;
+  z-index: 2;
+  margin: 0;
+  padding: 0.5em 1.2em;
+  border: 1px solid rgba(79, 214, 255, 0.4);
+  border-radius: 999px;
+  background: rgba(7, 6, 26, 0.9);
+  color: var(--ion);
+  font-size: 0.95em;
+  white-space: nowrap;
+  transform: translateX(-50%);
+  pointer-events: none;
+  animation: switching-pulse 900ms ease-in-out infinite;
+}
+
+@keyframes switching-pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* --- debug mode --------------------------------------------------------- */
+
+/* The operator needs room for the lists more than a tidy diptych. */
+[data-ui="debug"] .pane-showcase {
+  height: 100%;
+}
+
+/* Debug: the voice readouts to the left of a smaller sphere. */
+[data-ui="debug"] .hologram {
+  flex: 0 0 clamp(150px, 30%, 320px);
+  flex-direction: row-reverse;
+  gap: clamp(10px, 1vw, 20px);
+}
+
+[data-ui="debug"] .hologram-info {
+  justify-content: center;
+  align-items: flex-start;
+  max-width: 48%;
+  padding-top: 0;
+}
+
+[data-ui="debug"] .hologram-info .voice-gate {
+  font-size: 0.9em;
+}
+
+[data-ui="debug"] .subtitles {
+  font-size: clamp(16px, 1.15vw, 23px);
+}
+
+[data-ui="debug"] .bubble {
+  max-width: none;
+}
+
+[data-ui="debug"] .showcase {
+  flex: 1 1 0;
+  gap: clamp(10px, 1.6vh, 22px);
+  height: auto;
+  font-size: 1em;
+}
+
+[data-ui="debug"] .view-note {
+  flex: 1;
+  display: grid;
+  place-content: center;
+}
+
+.showcase-group {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(4px, 0.8vh, 10px);
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+.showcase-group:last-of-type {
+  flex: 0 1 auto;
+}
+
+.showcase-heading {
+  margin: 0;
+  font-size: 0.82em;
+  font-weight: 600;
+  color: var(--dusk);
+}
+
+.showcase-counts,
+.showcase-objects {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  list-style: none;
+}
+
+.showcase-counts {
+  gap: clamp(2px, 0.4vh, 6px);
+}
+
+.showcase-count {
   display: flex;
   align-items: baseline;
-  gap: 0.3rem;
+  gap: 0.3em;
+  min-width: 0;
+  font-size: clamp(1.25rem, 1.7vw, 2.1rem);
+  font-weight: 500;
+  line-height: 1.2;
 }
 
-.rps-score-value {
-  color: var(--text);
-  font-size: 1rem;
-  font-weight: 800;
+.showcase-count-n {
+  font-family: var(--mono);
+  color: var(--ion);
 }
 
-.rps-preview {
-  flex: 1;
-  min-height: 6rem;
+.showcase-count-x {
+  font-size: 0.6em;
+  color: var(--dusk);
 }
 
-.code {
-  padding: 0.05em 0.3em;
-  color: var(--muted-strong);
-  font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace;
-  font-size: 0.82em;
-  background: rgb(10 15 26 / 70%);
-  border-radius: 4px;
-}
-
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
+.showcase-count-label,
+.showcase-object-label {
+  min-width: 0;
   overflow: hidden;
-  clip: rect(0, 0, 0, 0);
+  text-overflow: ellipsis;
   white-space: nowrap;
-  border: 0;
 }
 
-noscript {
-  color: var(--warn);
+.showcase-objects {
+  gap: clamp(6px, 0.9vh, 11px);
+  padding-top: clamp(8px, 1.2vh, 16px);
+  border-top: 1px solid var(--rim);
 }
 
-/* A 1080p booth screen is watched from a few metres: scale the whole UI up. */
-@media (min-width: 1600px) {
-  body {
-    font-size: 22px;
-  }
+.showcase-object {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 0.3em 0.8em;
+  font-size: clamp(0.95rem, 1.05vw, 1.2rem);
+  transition:
+    opacity 300ms ease,
+    transform 300ms ease;
 }
 
-/* Narrow laptop or a windowed browser: two columns, status stacked left. */
-@media (max-width: 1180px) {
-  .layout {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
-    grid-template-rows: auto minmax(0, 1fr);
-  }
-
-  .side-left {
-    grid-row: 1 / span 2;
-  }
-
-  .skeleton-panel {
-    min-height: 18rem;
-  }
+.showcase-object-head {
+  display: contents;
 }
 
-@media (max-width: 780px) {
-  /* Phones stack the panels: let the page scroll instead of fitting it. */
-  .app {
-    height: auto;
-    min-height: 100vh;
+.showcase-object-score {
+  font-family: var(--mono);
+  font-size: 0.92em;
+  color: var(--haze);
+}
+
+.showcase-bar {
+  grid-column: 1 / -1;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(190, 182, 255, 0.12);
+  overflow: hidden;
+}
+
+.showcase-bar-fill {
+  display: block;
+  width: calc(var(--score, 0) * 100%);
+  height: 100%;
+  border-radius: inherit;
+  background: var(--spectrum);
+  transition: width 300ms ease;
+}
+
+.showcase-object-entering {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+.showcase-object-leaving {
+  opacity: 0;
+}
+
+.showcase-more {
+  font-size: 0.85em;
+  color: var(--dusk);
+}
+
+.mente {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3em 1.2em;
+  margin: clamp(6px, 1vh, 12px) 0 0;
+  padding-top: clamp(6px, 0.8vh, 10px);
+  border-top: 1px solid var(--rim);
+  font-family: var(--mono);
+  font-size: 0.78em;
+  color: var(--haze);
+}
+
+.mente-key {
+  color: var(--ion);
+}
+
+/* C3 presence readout: one dot per source, lit while it sees somebody. */
+.presence-debug {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.presence-dot {
+  margin-left: 0.5em;
+}
+
+.presence-dot::before {
+  content: "";
+  display: inline-block;
+  width: 0.6em;
+  height: 0.6em;
+  margin-right: 0.3em;
+  border-radius: 50%;
+  border: 1px solid var(--haze);
+  vertical-align: baseline;
+}
+
+.presence-dot[data-state="on"]::before {
+  background: var(--ion);
+  border-color: var(--ion);
+}
+
+.view-meta {
+  margin: 0.4em 0 0;
+  font-family: var(--mono);
+  font-size: 0.75em;
+  text-align: center;
+  color: var(--dusk);
+}
+
+/* --- narrow screens ----------------------------------------------------- */
+
+@media (max-width: 900px) {
+  .topbar {
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 
-  .masthead {
-    grid-template-columns: 1fr;
+  .modes {
+    grid-row: 2;
+    grid-column: 1 / -1;
+    justify-self: center;
   }
 
-  .identity {
-    border-right: 0;
+  .brand-line {
+    display: none;
   }
 
-  .connection {
-    min-width: 0;
-  }
-
-  .layout {
+  .stage {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: none;
+    grid-template-rows: minmax(0, 4fr) minmax(0, 5fr);
   }
 
-  .side-left {
-    grid-row: auto;
+  .pane-showcase {
+    height: auto;
+    align-self: stretch;
   }
 
-  .skeleton-panel {
-    min-height: 18rem;
+  .notice {
+    left: 50%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dot-connecting,
+  .dot-reconnecting,
+  .view-switching,
+  .voice-gate::before {
+    animation: none;
   }
 
-  .feed-panel {
-    max-height: 24rem;
-  }
-
-  .log-panel {
-    max-height: 24rem;
+  .modes-thumb,
+  .bubble,
+  .chip,
+  .showcase-object,
+  .showcase-bar-fill {
+    transition: none;
   }
 }

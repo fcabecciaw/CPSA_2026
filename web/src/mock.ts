@@ -1,132 +1,209 @@
 /**
  * Dev-only WebSocket stand-in (`/?mock=1`).
  *
- * It replays the protocol v1 examples from `docs/protocol/v1/examples` and
- * animates a plausible HALFBUST_62 pose so the views can be built before the
- * server exists. The module is imported with a dynamic `import()` behind
- * `import.meta.env.DEV`, so Vite removes it from the production bundle.
+ * It speaks the F-K1 protocol and nothing else: `hello` on connect, `status`
+ * at 1 Hz, `showcase.state` at 10 Hz and a `pong` for every `ping`; any other
+ * command gets `error` `bad_command`, exactly as the server does. It also
+ * synthesises the RGB picture the detections name, so the dashboard can be
+ * built and reviewed without the board. The module is imported with a dynamic
+ * `import()` behind `import.meta.env.DEV`, so Vite removes it from the
+ * production bundle.
  *
- * Both activation sources of the medical mode are available: `?mock=1` replays
- * the `imu` variant, `?mock=1&trigger=vision` the camera-only one, whose
- * `medical.state` reports `trigger: "vision"` and `imu: "n/a"` (F11) and whose
- * connection log has no BlueCoin lines, because no IMU is scanned (FR-026).
+ * F-E1 `model.set` is accepted and pins the published model (`yolox` or
+ * `movenet`); without it the scripted timeline alternates the two.
+ *
+ * Query parameters, used for deterministic screenshots:
+ *   `at=<s>`     fast-forwards the scripted scenario by that many seconds;
+ *   `objects=0`  leaves the showcase pane on its invitation (nothing in view);
+ *   `video=0`    leaves the camera pane on its placeholder.
  */
 
 import type { SocketLike } from "./client";
+import type { FaceCue } from "./cognitive/facecues";
 import {
-  MODES,
-  type Decision,
-  type EpisodePayload,
-  type HandsPayload,
-  type HologramHandsPayload,
-  type ImuState,
-  type Keypoint,
-  type LogPayload,
-  type MedicalStatePayload,
-  type Mode,
-  type PerceptionTiming,
-  type Point3D,
-  type RpsGesture,
-  type RpsMove,
-  type RpsOutcome,
-  type RpsPhase,
-  type RpsStatePayload,
+  type CalibrationValues,
+  type ModelName,
+  type PoseStatePayload,
   type ServerMessage,
+  type ShowcaseObject,
+  type ShowcaseStatePayload,
   type StatusPayload,
-  type Tag,
-  type TriggerSource,
 } from "./protocol";
+import type { VideoSource } from "./video";
 
-/** IF-451 revision: `?mock=1&trigger=vision` selects the camera-only variant. */
-function requestedTrigger(): TriggerSource {
-  const requested = new URLSearchParams(window.location.search).get("trigger");
-  return requested === "vision" ? "vision" : "imu";
-}
-
-const TRIGGER: TriggerSource = requestedTrigger();
-
-/**
- * `?mock=1&mode=hologram` (or `rps`) starts directly in a hand-demo mode, so a
- * screenshot does not have to click through the switch.
- */
-function requestedMode(): Mode {
-  const requested = new URLSearchParams(window.location.search).get("mode");
-  return (MODES as readonly string[]).includes(requested ?? "")
-    ? (requested as Mode)
-    : "medical";
-}
-
-const INITIAL_MODE: Mode = requestedMode();
-
-export const MOCK_BADGE =
-  "Dati di esempio (mock): replay di docs/protocol/v1/examples, nessun server connesso." +
-  (TRIGGER === "vision"
-    ? " Variante solo telecamera (variante IMU: ?mock=1)."
-    : " Variante IMU (variante solo telecamera: ?mock=1&trigger=vision).");
-
-const FIXTURES = import.meta.glob("../../docs/protocol/v1/examples/*.json", {
-  eager: true,
-  import: "default",
-}) as Record<string, unknown>;
-
-type MessageOf<T extends ServerMessage["type"]> = Extract<ServerMessage, { type: T }>;
-
-function fixture<T extends ServerMessage["type"]>(type: T): MessageOf<T> {
-  const path = `../../docs/protocol/v1/examples/${type}.json`;
-  const raw = FIXTURES[path];
-  if (raw === undefined) {
-    throw new Error(`Fixture mock mancante: ${path}`);
-  }
-  return structuredClone(raw) as MessageOf<T>;
-}
+const PARAMS = new URLSearchParams(window.location.search);
 
 const WIDTH = 640;
 const HEIGHT = 480;
-const POSE_PERIOD_HZ = 1.4;
-const EPISODE_DURATION_MS = 22_000;
-const EPISODE_PAUSE_MS = 5_000;
 
-/** Sasso-carta-forbice timings, the same shape as the real state machine. */
-const RPS_READY_MS = 600;
-const RPS_STEP_MS = 700;
-const RPS_SHOOT_MS = 400;
-const RPS_RESULT_MS = 3_000;
+/**
+ * One clock for the scripted scenario, shared by the socket and the fake
+ * picture. `?at=<seconds>` fast-forwards it, for deterministic screenshots.
+ */
+const AT_SECONDS = Number(PARAMS.get("at") ?? "0");
+const STARTED_AT = Date.now() - (Number.isFinite(AT_SECONDS) ? AT_SECONDS : 0) * 1_000;
 
-/** IR camera guess, used only to draw the mock hands' 2D points. */
-const MOCK_FOCAL_PX = 500;
+/** F-E1 `model.set`: when the dashboard asks, the mock stops alternating. */
+let requestedModel: ModelName | null = PARAMS.get("model") === "movenet"
+  ? "movenet"
+  : PARAMS.get("model") === "yolox"
+    ? "yolox"
+    : null;
 
-const IMU_LOG_LINES: readonly LogPayload[] = [
-  { level: "info", source: "supervisor", message: "Modalità medical avviata" },
-  { level: "info", source: "camera", message: "telecamera aperta" },
-  { level: "info", source: "bluecoin:CPSA_L2", message: "[left:CPSA_L2] Connected successfully" },
-  { level: "info", source: "bluecoin:CPSA_R2", message: "[right:CPSA_R2] Connected successfully" },
-  { level: "info", source: "metamotion", message: "[MetaMotion AA:BB:CC:DD:EE:FF] Connected successfully" },
-  { level: "warning", source: "bluecoin:CPSA_R2", message: "[right:CPSA_R2] Connection failed, retrying..." },
-  { level: "info", source: "bluecoin:CPSA_R2", message: "[right:CPSA_R2] Reconnected successfully" },
-  { level: "error", source: "camera", message: "camera frame callback failed" },
-  { level: "info", source: "camera", message: "telecamera riaperta" },
-];
+/**
+ * The board runs one model at a time: a swap reports `switching`, publishes no
+ * frames while it unloads and loads, and takes about half a second.
+ */
+let switchingModel: ModelName | null = null;
 
-/** Camera-only variant: no IMU is scanned, so there are no BlueCoin lines (FR-026). */
-const VISION_LOG_LINES: readonly LogPayload[] = [
-  { level: "info", source: "supervisor", message: "Modalità medical avviata, attivazione da telecamera" },
-  { level: "info", source: "camera", message: "telecamera aperta" },
-  { level: "info", source: "vision", message: "analisi continua, 10 fps" },
-  { level: "info", source: "vision", message: "nessun contatto negli ultimi 10 s" },
-  { level: "warning", source: "camera", message: "frame scartato: coda di analisi piena" },
-  { level: "error", source: "camera", message: "camera frame callback failed" },
-  { level: "info", source: "camera", message: "telecamera riaperta" },
-];
+export function scenarioSeconds(now = Date.now()): number {
+  return (now - STARTED_AT) / 1_000;
+}
 
-const LOG_LINES = TRIGGER === "vision" ? VISION_LOG_LINES : IMU_LOG_LINES;
+export const MOCK_BADGE = "Dati di esempio (mock): nessun server connesso.";
+
+/** F-S2: `showcase.state` is published at most at 10 Hz. */
+const SHOWCASE_TICK_MS = 100;
+/** F-E1: `pose.state` is published at most at 30 Hz. */
+const POSE_TICK_MS = 33;
+/** F-K1: `status` at 1 Hz. */
+const STATUS_TICK_MS = 1_000;
+
+/** Scripted scenario (seconds), used by the screenshots and the demo. */
+export const SCRIPT = {
+  personAt: 5,
+  phoneAt: 12,
+  cupAt: 19,
+  groupAt: 25,
+  leaveAt: 34,
+  returnAt: 68,
+  movenetAt: 76,
+  armsUpAt: 80,
+  waveAt: 84,
+  endAt: 92,
+  loopAt: 96,
+} as const;
+
+/** One object of the mock showcase scene: where it stands and how sure it is. */
+interface SceneObject {
+  label: string;
+  classId: number;
+  box: readonly [number, number, number, number];
+  score: number;
+  /** The picture of this object, so boxes and pixels stay together. */
+  draw: (context: CanvasRenderingContext2D) => void;
+}
+
+function sceneObject(
+  label: string,
+  classId: number,
+  box: readonly [number, number, number, number],
+  score: number,
+  draw: (context: CanvasRenderingContext2D) => void,
+): SceneObject {
+  return { label, classId, box, score, draw };
+}
+
+const PERSON = sceneObject("persona", 0, [48, 30, 236, 424], 0.94, (context) => {
+  drawPerson(context, 140, 82, 34, "#6c7883");
+});
+const PERSON_2 = sceneObject("persona", 0, [252, 116, 372, 424], 0.88, (context) => {
+  drawPerson(context, 310, 166, 26, "#5f6a74");
+});
+const PERSON_3 = sceneObject("persona", 0, [408, 156, 516, 424], 0.9, (context) => {
+  drawPerson(context, 460, 200, 22, "#57626c");
+});
+const PHONE = sceneObject("cellulare", 67, [330, 384, 372, 418], 0.82, drawPhone);
+const CUP = sceneObject("tazza", 41, [428, 344, 502, 412], 0.78, drawCup);
+const BOTTLE = sceneObject("bottiglia", 39, [520, 256, 582, 404], 0.8, drawBottle);
+
+/**
+ * The scripted scenario: empty → one person → phone → cup → three people →
+ * leave → idle → return → MoveNet arms up and wave. The same timeline drives
+ * the detections, the fake picture and `pose.state`.
+ */
+export function scriptedObjects(seconds: number): SceneObject[] {
+  const t = ((seconds % SCRIPT.loopAt) + SCRIPT.loopAt) % SCRIPT.loopAt;
+  if (PARAMS.get("objects") === "0") {
+    return [];
+  }
+  if (t < SCRIPT.personAt || t >= SCRIPT.leaveAt) {
+    return t >= SCRIPT.returnAt && t < SCRIPT.movenetAt ? [PERSON] : [];
+  }
+  if (t >= SCRIPT.groupAt) {
+    return [PERSON, PERSON_2, PERSON_3, PHONE, CUP, BOTTLE];
+  }
+  const objects: SceneObject[] = [PERSON];
+  if (t >= SCRIPT.phoneAt) {
+    objects.push(PHONE);
+  }
+  if (t >= SCRIPT.cupAt) {
+    objects.push(CUP, BOTTLE);
+  }
+  return objects;
+}
+
+/** Is the mock streaming the MoveNet segment? */
+export function scriptedMovenet(seconds: number): boolean {
+  const t = ((seconds % SCRIPT.loopAt) + SCRIPT.loopAt) % SCRIPT.loopAt;
+  return t >= SCRIPT.movenetAt && t < SCRIPT.endAt;
+}
+
+/**
+ * Frames of the MoveNet segment: arms up for four seconds, then the wave.
+ * COCO-17 order, source pixels of the 640×480 picture.
+ */
+export function scriptedKeypoints(seconds: number): Array<[number, number, number]> {
+  const t = ((seconds % SCRIPT.loopAt) + SCRIPT.loopAt) % SCRIPT.loopAt;
+  const waving = t >= SCRIPT.waveAt;
+  const waveX = 424 + Math.sin((t - SCRIPT.waveAt) * 7) * 26;
+  const wristY = waving ? 44 : 58;
+  const points: Array<[number, number, number]> = [
+    [320, 82, 0.94], // nose
+    [308, 76, 0.92],
+    [332, 76, 0.92],
+    [292, 84, 0.85],
+    [348, 84, 0.85],
+    [278, 142, 0.93], // shoulders
+    [362, 142, 0.93],
+    [252, 108, 0.9], // elbows: up, above the shoulders
+    [388, 108, 0.9],
+    [238, wristY, 0.88], // wrists: up
+    [waving ? waveX : 402, wristY, 0.88],
+    [286, 292, 0.9], // hips
+    [354, 292, 0.9],
+    [290, 372, 0.86],
+    [350, 372, 0.86],
+    [292, 442, 0.82],
+    [348, 442, 0.82],
+  ];
+  return points.map(([x, y, score]) => [round(x, 1), round(y, 1), score]);
+}
+
+function poseState(seconds: number): PoseStatePayload {
+  const keypoints = scriptedKeypoints(seconds);
+  const score = keypoints.reduce((sum, point) => sum + point[2], 0) / keypoints.length;
+  const drift = Math.sin(Date.now() / 900);
+  return {
+    model: "movenet",
+    width: WIDTH,
+    height: HEIGHT,
+    fps: round(29.8 + drift * 0.3, 1),
+    dpu_ms: round(7.4 + drift * 0.3, 1),
+    total_ms: round(24.6 + drift * 0.9, 1),
+    score: round(score, 2),
+    keypoints,
+  };
+}
+
+
 
 let sequence = 0;
 let monotonic = 2000;
-let frameSeq = 0;
 
 function message<T extends ServerMessage["type"]>(
   type: T,
-  data: MessageOf<T>["data"],
+  data: Extract<ServerMessage, { type: T }>["data"],
 ): ServerMessage {
   sequence += 1;
   monotonic += 0.05;
@@ -145,30 +222,20 @@ export function createMockSocket(_url: string): SocketLike {
   const intervals = new Set<ReturnType<typeof setInterval>>();
 
   let closed = false;
-  let mode: Mode = INITIAL_MODE;
-  let switching = false;
-  let episodeNumber = 0;
-  let episodeId = "";
-  let episodeActive = false;
-  let episodeStart = 0;
-  let tag: Tag = "DANGEROUS";
-  let lastDecision: Decision = fixture("medical.decision").data;
-  let decisionIndex = 0;
-  let logIndex = 0;
-  let startedAt = Date.now();
-  let hologramSeq = 0;
-
-  // Sasso-carta-forbice state (T5): the same shape the real state machine has,
-  // replayed so the view can be built without the board.
-  let rpsPhase: RpsPhase = "waiting";
-  let rpsSince = Date.now();
-  let rpsCount = 3;
-  let rpsRound = 0;
-  let rpsPlayer: RpsGesture | null = null;
-  let rpsPlayerP: number | null = null;
-  let rpsBoard: RpsMove | null = null;
-  let rpsOutcome: RpsOutcome | null = null;
-  const rpsScore = { player: 0, board: 0, draws: 0 };
+  const startedAt = STARTED_AT;
+  /** The debug panel's calibration, as `config/showcase.yaml` ships it. */
+  const yamlCalibration: CalibrationValues = {
+    detector: "yolov5",
+    zoom: 1.3,
+    zoom_center: [0.5, 0.5],
+    gain: 200,
+    exposure: 100,
+    saturation: 110,
+    person_conf: 0.4,
+    held_conf: 0.3,
+    object_conf: 0.45,
+  };
+  let calibration: CalibrationValues = { ...yamlCalibration };
 
   const socket: SocketLike = {
     onopen: null,
@@ -216,675 +283,466 @@ export function createMockSocket(_url: string): SocketLike {
     intervals.clear();
   }
 
-  function sendError(
-    code: "busy" | "bad_command",
-    text: string,
-    refSeq: number | null = null,
-  ): void {
-    emit(message("error", { code, message: text, ref_seq: refSeq }));
+  function activeMovenet(): boolean {
+    return requestedModel === null ? scriptedMovenet(scenarioSeconds()) : requestedModel === "movenet";
   }
 
-  function sendStatus(): void {
-    const status: StatusPayload = fixture("status").data;
-    status.mode = mode;
-    // Idle and lab run nothing; the three demo modes run a camera pipeline.
-    const vision = mode === "medical" || mode === "hologram" || mode === "rps";
-    status.mode_state = switching ? "starting" : vision ? "running" : "stopped";
-    const fps = vision ? 29.6 + Math.sin(Date.now() / 900) * 0.8 : null;
-    status.perception.fps = fps;
-    status.perception.dpu_ms = vision ? 17.8 : null;
-    status.perception.camera = "ok";
-    status.perception.model = vision
-      ? mode === "medical"
-        ? "pose_halfbust62"
-        : "pose_hand21_int8"
-      : null;
-    // F13: plausible rolling-window numbers, so the "Tempi" line and the FPS
-    // caption can be built before the server reports them.
-    status.perception.timing = vision && fps !== null ? mockTiming(fps) : null;
-    status.imu = mode === "medical" && TRIGGER === "imu" ? imuState() : "n/a";
-    status.errors = [];
-    status.uptime_s = 125.4 + (Date.now() - startedAt) / 1000;
-    emit(message("status", status));
-  }
-
-  function mockTiming(fps: number): PerceptionTiming {
-    const drift = Math.sin(Date.now() / 1300);
-    const round = (value: number): number => Math.round(value * 10) / 10;
+  function status(): StatusPayload {
+    const drift = Math.sin(Date.now() / 900);
+    const movenet = activeMovenet();
     return {
-      analyzed_fps: round(fps),
-      camera_fps: 30,
-      decode_ms: round(3.1 + drift * 0.3),
-      preprocess_ms: round(2.2 + drift * 0.2),
-      dpu_ms: round(17.8 + drift * 0.4),
-      postprocess_ms: round(4.4 + drift * 0.3),
-      pose_ms: round(25.4 + drift * 0.6),
-      track_ms: round(1.1 + drift * 0.1),
-      latency_ms: round(61.2 + drift * 2.5),
-      dropped: 0,
+      state: switchingModel === null ? "running" : "switching",
+      camera: "ok",
+      model: movenet ? "movenet" : calibration.detector === "yolov5" ? "yolov5_nano" : "yolox_nano",
+      fps: round((movenet ? 29.8 : 59.6) + drift * 0.5, 1),
+      dpu_ms: round((movenet ? 7.4 : 4.1) + drift * 0.2, 1),
+      errors: [],
+      uptime_s: round(125.4 + (Date.now() - startedAt) / 1000, 1),
+      calibration: {
+        ...calibration,
+        zoom_center: [...calibration.zoom_center],
+        detectors: ["yolox", "yolov5"],
+      },
     };
   }
 
-  function imuState(): ImuState {
-    const elapsed = (Date.now() - startedAt) / 1000;
-    if (elapsed > 40 && elapsed < 46) {
-      return "lost";
+  function showcaseState(now: number): ShowcaseStatePayload {
+    const objects = showcaseObjects(scenarioSeconds(), now);
+    const grouped = new Map<string, number>();
+    for (const object of objects) {
+      grouped.set(object.label, (grouped.get(object.label) ?? 0) + 1);
     }
-    if (elapsed >= 46 && elapsed < 52) {
-      return "searching";
-    }
-    return "connected";
-  }
-
-  function episodeRef(): MedicalStatePayload["episode"] {
-    return episodeActive
-      ? { episode_id: episodeId, t_start: 1234.5 + episodeNumber, active: true }
-      : null;
-  }
-
-  function sendMedicalState(): void {
-    if (mode !== "medical") {
-      return;
-    }
-    const state: MedicalStatePayload = {
-      imu: TRIGGER === "vision" ? "n/a" : imuState(),
-      tag,
-      episode: episodeRef(),
-      last_decision: lastDecision,
-      trigger: TRIGGER,
+    const counts = [...grouped.entries()]
+      .map(([label, count]) => ({ label, count }))
+      .sort((a, b) => b.count - a.count || compareText(a.label, b.label));
+    const drift = Math.sin(now / 900);
+    return {
+      model: "yolox_nano",
+      width: WIDTH,
+      height: HEIGHT,
+      fps: round(59.6 + drift * 0.5, 1),
+      dpu_ms: round(4.1 + drift * 0.2, 1),
+      total_ms: round(15.8 + drift * 0.7, 1),
+      objects,
+      counts,
     };
-    emit(message("medical.state", state));
-  }
-
-  function startEpisode(): void {
-    episodeNumber += 1;
-    episodeId = `ep-20261112-${String(episodeNumber).padStart(4, "0")}`;
-    episodeActive = true;
-    episodeStart = Date.now();
-    tag = "DANGEROUS";
-
-    const episode: EpisodePayload = {
-      episode_id: episodeId,
-      active: true,
-      contact_count: 0,
-      repetition_hz: POSE_PERIOD_HZ,
-      peak_severity: null,
-      labels: ["hand_to_face"],
-      contacts: [],
-    };
-    emit(message("medical.episode", episode));
-    sendMedicalState();
-    later(EPISODE_DURATION_MS, endEpisode);
-  }
-
-  function endEpisode(): void {
-    if (!episodeActive) {
-      return;
-    }
-    episodeActive = false;
-    if (mode !== "medical") {
-      // Leaving medical mode: the server drops the medical states instead of
-      // replaying a final summary (V-04), so the dashboard resets its tiles.
-      return;
-    }
-    const summary: EpisodePayload = fixture("medical.episode").data;
-    summary.episode_id = episodeId;
-    summary.active = false;
-    emit(message("medical.episode", summary));
-    sendMedicalState();
-    later(EPISODE_PAUSE_MS, () => {
-      if (mode === "medical" && !episodeActive) {
-        startEpisode();
-      }
-    });
-  }
-
-  function sendHands(): void {
-    if (mode !== "medical" || !episodeActive) {
-      return;
-    }
-    emit(message("medical.hands", pose(Date.now() - episodeStart)));
-  }
-
-  // --- Hologram (T5): an animated hand at the camera rate -------------------
-
-  function sendHologram(): void {
-    if (mode !== "hologram") {
-      return;
-    }
-    hologramSeq += 1;
-    emit(message("hologram.hands", hologramFrame(hologramSeq)));
-  }
-
-  // --- Sasso-carta-forbice (T5): the round loop ----------------------------
-
-  function startRpsRound(): void {
-    rpsPhase = "ready";
-    rpsSince = Date.now();
-    rpsCount = 3;
-    rpsPlayer = null;
-    rpsPlayerP = null;
-    rpsBoard = null;
-    rpsOutcome = null;
-  }
-
-  function resetRpsGame(): void {
-    rpsRound = 0;
-    rpsScore.player = 0;
-    rpsScore.board = 0;
-    rpsScore.draws = 0;
-    startRpsRound();
-  }
-
-  function tickRps(): void {
-    if (mode !== "rps") {
-      return;
-    }
-    advanceRps(Date.now());
-    emitRps();
-  }
-
-  function advanceRps(now: number): void {
-    const elapsed = now - rpsSince;
-    if (rpsPhase === "ready" && elapsed >= RPS_READY_MS) {
-      rpsPhase = "countdown";
-      rpsCount = 3;
-      rpsSince = now;
-      return;
-    }
-    if (rpsPhase === "countdown" && elapsed >= RPS_STEP_MS) {
-      if (rpsCount > 1) {
-        rpsCount -= 1;
-        rpsSince = now;
-        return;
-      }
-      rpsPhase = "shoot";
-      rpsSince = now;
-      return;
-    }
-    if (rpsPhase === "shoot" && elapsed >= RPS_SHOOT_MS) {
-      settleRound();
-      rpsPhase = "result";
-      rpsSince = now;
-      return;
-    }
-    if (rpsPhase === "result" && elapsed >= RPS_RESULT_MS) {
-      startRpsRound();
-    }
-  }
-
-  function settleRound(): void {
-    rpsRound += 1;
-    const gestures: readonly RpsMove[] = ["rock", "paper", "scissors"];
-    // Every fifth round the classifier recognises nothing, so the "unclear"
-    // branch is visible in the mock too and the score stays put.
-    const gesture: RpsGesture =
-      rpsRound % 5 === 0 ? "none" : (gestures[(rpsRound - 1) % gestures.length] ?? "rock");
-    rpsPlayer = gesture;
-    if (gesture === "none") {
-      rpsPlayerP = 0.38;
-      rpsBoard = null;
-      rpsOutcome = "unclear";
-      return;
-    }
-    rpsPlayerP = 0.92 - (rpsRound % 3) * 0.05;
-    const board = gestures[Math.floor(Math.random() * gestures.length)] ?? "rock";
-    rpsBoard = board;
-    rpsOutcome = rpsResult(gesture, board);
-    if (rpsOutcome === "win") {
-      rpsScore.player += 1;
-    } else if (rpsOutcome === "lose") {
-      rpsScore.board += 1;
-    } else {
-      rpsScore.draws += 1;
-    }
-  }
-
-  function emitRps(): void {
-    const shown: RpsGesture | null =
-      rpsPhase === "ready" || rpsPhase === "countdown" || rpsPhase === "shoot"
-        ? "paper"
-        : rpsPhase === "result" && rpsPlayer !== null && rpsPlayer !== "none"
-          ? rpsPlayer
-          : null;
-    const state: RpsStatePayload = {
-      phase: rpsPhase,
-      count: rpsPhase === "countdown" ? rpsCount : null,
-      player: rpsPhase === "result" ? rpsPlayer : null,
-      player_p: rpsPhase === "result" ? rpsPlayerP : null,
-      board: rpsPhase === "result" ? rpsBoard : null,
-      outcome: rpsPhase === "result" ? rpsOutcome : null,
-      score: { ...rpsScore },
-      hand: shown === null ? null : { kpts2d: rpsKeypoints(shown, Date.now()) },
-    };
-    emit(message("rps.state", state));
-  }
-
-  function sendDecision(): void {
-    if (mode !== "medical") {
-      return;
-    }
-    const decisions = decisionVariants();
-    const decision = structuredClone(decisions[decisionIndex % decisions.length]);
-    decisionIndex += 1;
-    tag = decision.tag;
-    lastDecision = decision;
-    emit(message("medical.decision", decision));
-    sendMedicalState();
-  }
-
-  function sendLog(): void {
-    const line = LOG_LINES[logIndex % LOG_LINES.length];
-    logIndex += 1;
-    emit(message("log", line));
   }
 
   function handleClient(raw: string): void {
-    let value: unknown;
+    let command: unknown;
     try {
-      value = JSON.parse(raw);
+      command = JSON.parse(raw);
     } catch {
-      sendError("bad_command", "JSON non valido");
+      emit(message("error", { code: "bad_command", message: "comando non JSON", ref_seq: null }));
       return;
     }
-    if (typeof value !== "object" || value === null) {
-      sendError("bad_command", "comando non valido");
+    const envelope = command as {
+      type?: unknown;
+      seq?: unknown;
+      data?: { id?: unknown; model?: unknown } & Partial<CalibrationValues>;
+    };
+    const refSeq = typeof envelope.seq === "number" ? envelope.seq : null;
+
+    if (envelope.type === "ping") {
+      emit(message("pong", { id: envelope.data?.id ?? null }));
       return;
     }
-    const command = value as { type?: unknown; data?: unknown; seq?: unknown };
-    const refSeq = typeof command.seq === "number" ? command.seq : null;
-    if (command.type === "ping") {
-      const data = (command.data ?? {}) as { id?: unknown };
-      emit(message("pong", { id: data.id }));
-      return;
-    }
-    if (command.type === "mode.set") {
-      const data = (command.data ?? {}) as { mode?: unknown };
-      const requested = data.mode;
-      if (typeof requested !== "string" || !(MODES as readonly string[]).includes(requested)) {
-        sendError("bad_command", `modalità sconosciuta: ${String(requested)}`, refSeq);
+    if (envelope.type === "model.set") {
+      const model = envelope.data?.model;
+      if (model !== "yolox" && model !== "movenet") {
+        emit(
+          message("error", {
+            code: "bad_command",
+            message: `modello sconosciuto: ${String(model)}`,
+            ref_seq: refSeq,
+          }),
+        );
         return;
       }
-      if (switching) {
-        sendError("busy", "a mode switch is already in progress", refSeq);
-        return;
-      }
-      switchMode(requested as Mode);
-      return;
-    }
-    sendError("bad_command", `comando sconosciuto: ${String(command.type)}`, refSeq);
-  }
-
-  function switchMode(next: Mode): void {
-    if (next === mode && !switching) {
-      emit(message("mode.progress", { mode: next, step: "ready", error: null }));
-      return;
-    }
-    switching = true;
-    emit(message("mode.progress", { mode: next, step: "stopping", error: null }));
-    sendStatus();
-
-    later(350, () => {
-      emit(message("mode.progress", { mode: next, step: "releasing", error: null }));
-    });
-
-    later(700, () => {
-      switching = false;
-      mode = next;
-      emit(message("mode.progress", { mode: next, step: "ready", error: null }));
-      sendStatus();
-      if (next === "medical") {
-        if (!episodeActive) {
-          startEpisode();
+      // The board swaps its single model: no frames for ~0.5 s, then the new
+      // view starts. Emitting `switching` lets the dashboard say so.
+      switchingModel = model;
+      emit(message("status", status()));
+      later(500, () => {
+        if (closed) {
+          return;
         }
-      } else if (episodeActive) {
-        endEpisode();
-      }
-      if (next === "rps") {
-        resetRpsGame();
-      }
-    });
-  }
-
-  function snapshot(): void {
-    emit(fixture("hello"));
-    sendStatus();
-    const progress = fixture("mode.progress");
-    progress.data = { mode, step: "ready", error: null };
-    emit(progress);
-    // Recent history, as the server replays it after the state snapshot.
-    for (const line of LOG_LINES.slice(0, 5)) {
-      emit(message("log", line));
+        requestedModel = model;
+        switchingModel = null;
+        emit(message("status", status()));
+      });
+      return;
     }
-    logIndex = 5;
-    if (mode === "medical") {
-      startEpisode();
-      // `medical.state` seeds the feed with its last decision; start the cycle
-      // after it so the first visible rows differ.
-      decisionIndex = 1;
+    if (envelope.type === "calibration.set") {
+      // Trusts the dashboard's ranges: the board validates for real.
+      calibration = { ...calibration, ...(envelope.data ?? {}) } as CalibrationValues;
+      emit(message("status", status()));
+      return;
     }
-    if (mode === "rps") {
-      resetRpsGame();
+    if (envelope.type === "calibration.reset") {
+      calibration = { ...yamlCalibration };
+      emit(message("status", status()));
+      return;
     }
+    // Anything else is answered as the board does.
+    emit(
+      message("error", {
+        code: "bad_command",
+        message: `comando non supportato: ${String(envelope.type)}`,
+        ref_seq: refSeq,
+      }),
+    );
   }
 
   later(10, () => {
     socket.onopen?.();
-    snapshot();
-    every(50, sendHands);
-    every(33, sendHologram);
-    every(100, tickRps);
-    every(1000, sendMedicalState);
-    every(2000, sendStatus);
-    every(5000, sendDecision);
-    every(9000, sendLog);
+    emit(message("hello", { server_version: "mock", protocol_version: 1 }));
+    emit(message("status", status()));
+    // One clock: `pose.state` at 30 Hz during the MoveNet segment, otherwise
+    // `showcase.state` at 10 Hz, as the board does.
+    let lastShowcase = Number.NEGATIVE_INFINITY;
+    let lastPose = Number.NEGATIVE_INFINITY;
+    every(POSE_TICK_MS, () => {
+      if (switchingModel !== null) {
+        return;
+      }
+      const now = Date.now();
+      const seconds = scenarioSeconds();
+      if (activeMovenet()) {
+        if (now - lastPose >= POSE_TICK_MS) {
+          lastPose = now;
+          emit(message("pose.state", poseState(seconds)));
+        }
+        return;
+      }
+      if (now - lastShowcase >= SHOWCASE_TICK_MS) {
+        lastShowcase = now;
+        emit(message("showcase.state", showcaseState(now)));
+      }
+    });
+    every(STATUS_TICK_MS, () => emit(message("status", status())));
   });
 
   return socket;
 }
 
-function decisionVariants(): Decision[] {
-  const base = fixture("medical.decision").data;
-  return [
-    base,
-    {
-      tag: "NON_STEREOTIPY",
-      tag_changed: true,
-      verdict: "REJECTED",
-      reason: "REJECTED",
-      severity: "NON_STEREOTIPY",
-      vision: {
-        verdict: "REJECTED",
-        severity: "NON_STEREOTIPY",
-        episode_id: null,
-        features: { contact_count: 0, repetition_hz: null },
-      },
-      actuations: [],
-    },
-    {
-      tag: "NON_DANGEROUS",
-      tag_changed: true,
-      verdict: "UNDECIDED",
-      reason: "UNDECIDED",
-      severity: "NON_DANGEROUS",
-      vision: {
-        verdict: "UNDECIDED",
-        severity: "NON_DANGEROUS",
-        episode_id: null,
-        features: { contact_count: 1, repetition_hz: 0.4 },
-      },
-      actuations: [],
-    },
-    {
-      tag: "DANGEROUS",
-      tag_changed: true,
-      verdict: "CONFIRMED",
-      reason: "CONFIRMED",
-      severity: "DANGEROUS",
-      vision: {
-        verdict: "CONFIRMED",
-        severity: "DANGEROUS",
-        episode_id: null,
-        features: { contact_count: 3, repetition_hz: 1.6 },
-      },
-      actuations: base.actuations,
-    },
-    {
-      tag: "NO_CLASS",
-      tag_changed: true,
-      verdict: null,
-      reason: "TIMEOUT",
-      severity: null,
-      vision: null,
-      actuations: [],
-    },
-  ];
+/** Detections of the scripted scene, score-descending as the server sends them. */
+function showcaseObjects(seconds: number, now: number): ShowcaseObject[] {
+  return scriptedObjects(seconds)
+    .map((scene, index) => {
+      const sway = Math.sin(now / 1_100 + index * 0.9) * 1.5;
+      const breath = Math.sin(now / 830 + index * 1.7) * 0.02;
+      const [x1, y1, x2, y2] = scene.box;
+      const score = Math.min(0.99, Math.max(0.35, scene.score + breath));
+      return {
+        label: scene.label,
+        class_id: scene.classId,
+        score: round(score, 2),
+        box: [x1 + sway, y1, x2 + sway, y2] as [number, number, number, number],
+      };
+    })
+    .sort((a, b) => b.score - a.score);
 }
 
-function pose(elapsedMs: number): HandsPayload {
-  const points: Keypoint[] = Array.from({ length: 62 }, () => [0, 0, 0]);
-  const set = (index: number, x: number, y: number, conf = 0.97): void => {
-    points[index] = [x, y, conf];
-  };
-
-  // Body (COCO-17 points 0..10) and face anchors (11..19).
-  set(0, 320, 140);
-  set(1, 306, 130);
-  set(2, 334, 130);
-  set(3, 282, 142, 0.42);
-  set(4, 358, 142);
-  set(5, 238, 330);
-  set(6, 402, 330);
-  set(7, 210, 408);
-  set(8, 430, 408);
-  set(9, 252, 300);
-  set(10, 388, 300);
-
-  set(11, 288, 172);
-  set(12, 352, 172);
-  set(13, 320, 198);
-  set(14, 296, 116);
-  set(15, 344, 116);
-  set(16, 304, 176);
-  set(17, 336, 176);
-  set(18, 320, 170);
-  set(19, 320, 183);
-
-  const phase = (elapsedMs / 1000) * 2 * Math.PI * POSE_PERIOD_HZ;
-  const rightWave = 0.5 + 0.5 * Math.sin(phase);
-  const leftWave = 0.5 + 0.5 * Math.sin(phase + Math.PI);
-
-  // The right hand rises to the mouth; the left hand reaches the cheek.
-  writeHand(points, 41, 410 - 74 * rightWave, 318 - 122 * rightWave, -0.45, 0.97);
-  writeHand(points, 20, 230 + 68 * leftWave, 318 - 112 * leftWave, 0.45, 0.97);
-
-  return {
-    layout: "HALFBUST_62",
-    w: WIDTH,
-    h: HEIGHT,
-    keypoints: points,
-    subject_box: [150, 60, 490, 470],
-    // F14: stands in for the analyzed frame counter the real stream reports.
-    seq: frameSeq++,
-  };
+function round(value: number, digits: number): number {
+  const scale = 10 ** digits;
+  return Math.round(value * scale) / scale;
 }
 
-const HAND_LOCAL: readonly (readonly [number, number])[] = [
-  [0, 18],
-  [-10, 10],
-  [-16, 4],
-  [-19, -2],
-  [-20, -8],
-  [-8, 2],
-  [-9, -8],
-  [-10, -15],
-  [-11, -21],
-  [-2, 0],
-  [-2, -11],
-  [-2, -19],
-  [-2, -26],
-  [5, 1],
-  [7, -9],
-  [8, -16],
-  [9, -22],
-  [11, 4],
-  [14, -4],
-  [16, -10],
-  [17, -15],
-];
-
-const LOW_CONFIDENCE = new Set([3, 8, 14, 19]);
-
-function writeHand(
-  points: Keypoint[],
-  offset: number,
-  centerX: number,
-  centerY: number,
-  angle: number,
-  baseConfidence: number,
-): void {
-  const cos = Math.cos(angle);
-  const sin = Math.sin(angle);
-  HAND_LOCAL.forEach(([x, y], index) => {
-    const rotatedX = x * cos - y * sin;
-    const rotatedY = x * sin + y * cos;
-    const confidence = LOW_CONFIDENCE.has(index) ? 0.3 : baseConfidence;
-    points[offset + index] = [centerX + rotatedX, centerY + rotatedY, confidence];
-  });
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 /**
- * hand21 in "hand units": wrist at the origin, fingers towards -v, thumb on the
- * left. Shared by the two hand demos, which need a plausible 21-joint shape
- * without a board.
+ * Dev-only stand-in for `/video.mjpeg`: the RGB room of the showcase, with the
+ * boxes and Italian labels the board draws on the stream. Clearly a mock: the
+ * dashboard shows the mock badge while it runs.
  */
-const HAND21_LOCAL: readonly (readonly [number, number])[] = [
-  [0, 0],
-  // thumb: cmc, mcp, ip, tip
-  [-12, -6],
-  [-20, -18],
-  [-26, -30],
-  [-30, -40],
-  // index: mcp, pip, dip, tip
-  [-16, -44],
-  [-18, -60],
-  [-19, -72],
-  [-19, -83],
-  // middle
-  [-5, -48],
-  [-6, -66],
-  [-6, -79],
-  [-6, -91],
-  // ring
-  [6, -46],
-  [7, -64],
-  [7, -76],
-  [7, -87],
-  // pinky
-  [16, -40],
-  [18, -54],
-  [18, -66],
-  [19, -75],
-];
-
-/** Finger chains after the wrist: thumb, index, middle, ring, pinky. */
-const HAND21_FINGERS: readonly (readonly number[])[] = [
-  [1, 2, 3, 4],
-  [5, 6, 7, 8],
-  [9, 10, 11, 12],
-  [13, 14, 15, 16],
-  [17, 18, 19, 20],
-];
-
-/** Per-finger extension: 0 curled into the palm, 1 fully stretched. */
-const GESTURE_EXTENSION: Record<RpsGesture, readonly number[]> = {
-  rock: [0.1, 0.05, 0, 0, 0],
-  paper: [0.9, 1, 1, 1, 1],
-  scissors: [0.2, 1, 1, 0.05, 0],
-  none: [0.4, 0.55, 0.3, 0.45, 0.65],
-};
-
-/** Who beats whom: the board plays the same three gestures. */
-const BEATS: Record<RpsMove, RpsMove> = {
-  rock: "scissors",
-  paper: "rock",
-  scissors: "paper",
-};
-
-function rpsResult(player: RpsMove, board: RpsMove): RpsOutcome {
-  if (player === board) {
-    return "draw";
-  }
-  return BEATS[player] === board ? "win" : "lose";
-}
-
-/** Curled fingers stay near their knuckle and fold towards the palm. */
-function localHand(extension: readonly number[]): Array<readonly [number, number]> {
-  const points: Array<readonly [number, number]> = HAND21_LOCAL.map(([x, y]) => [x, y]);
-  HAND21_FINGERS.forEach((chain, finger) => {
-    const knuckle = chain[0] === undefined ? undefined : points[chain[0]];
-    if (knuckle === undefined) {
-      return;
+/**
+ * Scripted face cues for the mock (the drawn room has no real faces): the
+ * MediaPipe tracker cannot detect anything in the fake picture, so the mock
+ * plays the same smiles and nods a person would show.
+ */
+export function createMockFaceCues(onCue: (cue: FaceCue) => void): VideoSource {
+  const schedule: Array<{ at: number; kind: FaceCue["kind"] }> = [
+    { at: SCRIPT.personAt + 1.5, kind: "looking_at_me" },
+    { at: SCRIPT.phoneAt + 1, kind: "mouth_open" },
+    { at: SCRIPT.cupAt + 1, kind: "smile" },
+    { at: SCRIPT.groupAt + 1, kind: "smile" },
+    { at: SCRIPT.movenetAt + 1.5, kind: "nod" },
+    { at: SCRIPT.waveAt + 2, kind: "head_shake" },
+  ];
+  let timer: number | null = null;
+  const fired = new Set<string>();
+  const tick = (): void => {
+    const raw = scenarioSeconds() % SCRIPT.loopAt;
+    const loop = Math.floor(scenarioSeconds() / SCRIPT.loopAt);
+    for (const cue of schedule) {
+      const key = `${loop}:${cue.at}`;
+      if (raw >= cue.at && !fired.has(key)) {
+        fired.add(key);
+        onCue({
+          kind: cue.kind,
+          score: 0.8,
+          faces: 1,
+          at: Date.now(),
+        });
+      }
     }
-    const amount = extension[finger] ?? 0;
-    chain.forEach((index, step) => {
-      const target = HAND21_LOCAL[index];
-      if (step === 0 || target === undefined) {
+    if (fired.size > 64) {
+      fired.clear();
+    }
+  };
+  return {
+    start(): void {
+      if (timer !== null) {
         return;
       }
-      const reach = 0.15 + 0.85 * amount;
-      const fold = 1 - amount;
-      points[index] = [
-        knuckle[0] + (target[0] - knuckle[0]) * reach,
-        knuckle[1] + (target[1] - knuckle[1]) * reach + (fold * 9 * step) / 3,
-      ];
-    });
-  });
-  return points;
+      tick();
+      timer = window.setInterval(tick, 200);
+    },
+    stop(): void {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    },
+  };
 }
 
-/** IR pixels of the mock hand, as the classifier would see it. */
-function rpsKeypoints(gesture: RpsGesture, nowMs: number): Keypoint[] {
-  const sway = Math.sin(nowMs / 380) * 2.5;
-  return localHand(GESTURE_EXTENSION[gesture]).map(([x, y]) => [
-    WIDTH / 2 + x * 1.9 + sway,
-    HEIGHT * 0.62 + y * 1.9,
-    0.96,
-  ]);
+export function createMockVideo(image: HTMLImageElement, note: HTMLElement): VideoSource {  if (PARAMS.get("video") === "0") {
+    // Same pane, no picture: the placeholder stays, for comparing the layout.
+    return { start: () => undefined, stop: () => undefined };
+  }
+
+  const canvas = document.createElement("canvas");
+  canvas.width = WIDTH;
+  canvas.height = HEIGHT;
+  const context = canvas.getContext("2d");
+  let timer: number | null = null;
+  let encoding = false;
+  let lastUrl: string | null = null;
+
+  // The picture is handed to the <img> as a blob URL: `toBlob` encodes off the
+  // main thread, while `toDataURL` would stall the dashboard's frame for tens
+  // of milliseconds every time the fake camera produces a frame.
+  const draw = (): void => {
+    if (context === null || encoding) {
+      return;
+    }
+    drawShowcaseFrame(context, scenarioSeconds());
+    image.hidden = false;
+    note.hidden = true;
+    encoding = true;
+    canvas.toBlob(
+      (blob) => {
+        encoding = false;
+        if (blob === null) {
+          return;
+        }
+        const url = URL.createObjectURL(blob);
+        image.src = url;
+        if (lastUrl !== null) {
+          URL.revokeObjectURL(lastUrl);
+        }
+        lastUrl = url;
+      },
+      "image/jpeg",
+      0.7,
+    );
+  };
+
+  return {
+    start(): void {
+      if (timer !== null) {
+        return;
+      }
+      draw();
+      timer = window.setInterval(draw, 125);
+    },
+    stop(): void {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+      image.removeAttribute("src");
+      image.hidden = true;
+      note.hidden = false;
+      if (lastUrl !== null) {
+        URL.revokeObjectURL(lastUrl);
+        lastUrl = null;
+      }
+    },
+  };
 }
 
 /**
- * One `hologram.hands` frame: the hand opens and closes over seven seconds, so
- * the 3D view has something to follow. The pinky tip loses its depth every
- * fifth frame, which is what the view must survive with the median-depth rule.
+ * The RGB room of the showcase mock: the scene the detections name, with the
+ * same boxes and Italian labels the board draws on the stream.
  */
-function hologramFrame(seq: number): HologramHandsPayload {
-  const now = Date.now();
-  // The hand opens and half-closes over seven seconds: a moving 3D hand whose
-  // fingers stay readable, which a full fist would not.
-  const wave = 0.5 + 0.5 * Math.cos(((now % 7_000) / 7_000) * Math.PI * 2);
-  const extension = 0.55 + 0.45 * wave;
-  const curl = 1 - wave;
-  const points = localHand([0.55 + 0.35 * extension, extension, extension, extension, extension]);
-  const sway = Math.sin(now / 1_500) * 0.006;
+function drawShowcaseFrame(context: CanvasRenderingContext2D, seconds: number): void {
+  const background = context.createLinearGradient(0, 0, 0, HEIGHT);
+  background.addColorStop(0, "#242b31");
+  background.addColorStop(0.62, "#171c20");
+  background.addColorStop(1, "#0c0f11");
+  context.fillStyle = background;
+  context.fillRect(0, 0, WIDTH, HEIGHT);
 
-  const metres = points.map(([x, y]) => ({
-    x: x * 0.0016 + sway,
-    y: y * 0.0016,
-    // The palm plane is turned a little towards the camera, and a half-closed
-    // hand brings the fingertips closer, so the projection has real depth.
-    z: 0.45 - x * 0.0007 - Math.max(0, -y) * 0.00025 - curl * 0.012,
-  }));
+  if (scriptedMovenet(seconds)) {
+    drawTable(context);
+    drawPoseFigure(context, scriptedKeypoints(seconds));
+    return;
+  }
 
-  const kpts2d: Keypoint[] = metres.map((point) => [
-    WIDTH / 2 + (point.x / point.z) * MOCK_FOCAL_PX,
-    HEIGHT / 2 + (point.y / point.z) * MOCK_FOCAL_PX,
-    0.96,
-  ]);
-  const kpts3d = metres.map((point, index) =>
-    index === 20 && seq % 5 === 0 ? null : ([point.x, point.y, point.z] as Point3D),
-  );
+  const objects = scriptedObjects(seconds);
+  for (const object of objects) {
+    if (object.label === "persona") {
+      object.draw(context);
+    }
+  }
 
-  const us = kpts2d.map((point) => point[0]);
-  const vs = kpts2d.map((point) => point[1]);
-  const drift = Math.sin(now / 1_300);
+  drawTable(context);
+  for (const object of objects) {
+    if (object.label !== "persona") {
+      object.draw(context);
+    }
+  }
+  drawShowcaseOverlay(context, showcaseObjects(seconds, Date.now()));
+}
 
-  return {
-    seq,
-    t: now / 1000,
-    width: WIDTH,
-    height: HEIGHT,
-    hands: [
-      {
-        score: 0.94,
-        box: [Math.min(...us), Math.min(...vs), Math.max(...us), Math.max(...vs)],
-        kpts2d,
-        kpts3d,
-      },
-    ],
-    timing: {
-      dpu_ms: Math.round((17.8 + drift * 0.4) * 10) / 10,
-      total_ms: Math.round((61.2 + drift * 2.5) * 10) / 10,
-    },
-  };
+function drawTable(context: CanvasRenderingContext2D): void {
+  // The table: a lit top surface and a darker front face.
+  context.fillStyle = "#35312c";
+  context.fillRect(0, 352, WIDTH, 68);
+  context.fillStyle = "#211d19";
+  context.fillRect(0, 420, WIDTH, 60);
+  context.fillStyle = "rgba(255, 255, 255, 0.07)";
+  context.fillRect(0, 352, WIDTH, 2);
+}
+
+/** The MoveNet segment: the skeleton the board would draw over the person. */
+function drawPoseFigure(
+  context: CanvasRenderingContext2D,
+  keypoints: ReadonlyArray<readonly [number, number, number]>,
+): void {
+  const edges: ReadonlyArray<readonly [number, number]> = [
+    [5, 7],
+    [7, 9],
+    [6, 8],
+    [8, 10],
+    [5, 6],
+    [5, 11],
+    [6, 12],
+    [11, 12],
+    [11, 13],
+    [13, 15],
+    [12, 14],
+    [14, 16],
+    [0, 5],
+    [0, 6],
+  ];
+  context.lineWidth = 5;
+  context.lineCap = "round";
+  context.strokeStyle = "rgba(79, 214, 255, 0.85)";
+  for (const [a, b] of edges) {
+    const from = keypoints[a];
+    const to = keypoints[b];
+    if (from === undefined || to === undefined || from[2] < 0.3 || to[2] < 0.3) {
+      continue;
+    }
+    context.beginPath();
+    context.moveTo(from[0], from[1]);
+    context.lineTo(to[0], to[1]);
+    context.stroke();
+  }
+  context.fillStyle = "#dff6ff";
+  for (const [x, y, score] of keypoints) {
+    if (score < 0.3) {
+      continue;
+    }
+    context.beginPath();
+    context.arc(x, y, 4.5, 0, Math.PI * 2);
+    context.fill();
+  }
+  context.font = "600 15px 'Ubuntu Mono', ui-monospace, 'DejaVu Sans Mono', monospace";
+  context.fillStyle = "rgba(79, 214, 255, 0.9)";
+  context.fillText("movenet · postura", 20, 34);
+}
+
+function drawPerson(
+  context: CanvasRenderingContext2D,
+  x: number,
+  headY: number,
+  headRadius: number,
+  color: string,
+): void {
+  context.fillStyle = color;
+  context.beginPath();
+  context.arc(x, headY, headRadius, 0, Math.PI * 2);
+  context.fill();
+
+  const shoulderY = headY + headRadius + 6;
+  const halfWidth = headRadius * 2.2;
+  context.beginPath();
+  context.moveTo(x - halfWidth * 0.55, shoulderY);
+  context.quadraticCurveTo(x - halfWidth, shoulderY + 34, x - halfWidth, HEIGHT);
+  context.lineTo(x + halfWidth, HEIGHT);
+  context.quadraticCurveTo(x + halfWidth, shoulderY + 34, x + halfWidth * 0.55, shoulderY);
+  context.closePath();
+  context.fill();
+}
+
+function drawBottle(context: CanvasRenderingContext2D): void {
+  // Box [520, 256, 582, 404]: neck above the body, cap on top.
+  context.fillStyle = "#5b7d6a";
+  context.fillRect(528, 296, 46, 108);
+  context.fillStyle = "#4b6a59";
+  context.fillRect(539, 256, 25, 40);
+  context.fillStyle = "#2f3b34";
+  context.fillRect(537, 252, 29, 8);
+}
+
+function drawCup(context: CanvasRenderingContext2D): void {
+  // Box [428, 344, 502, 412]: a mug with its handle on the right.
+  context.fillStyle = "#cfd6da";
+  context.fillRect(434, 348, 56, 60);
+  context.beginPath();
+  context.strokeStyle = "#cfd6da";
+  context.lineWidth = 6;
+  context.arc(496, 378, 14, -Math.PI / 2, Math.PI / 2);
+  context.stroke();
+  context.fillStyle = "#e6ebee";
+  context.fillRect(434, 348, 56, 6);
+}
+
+function drawPhone(context: CanvasRenderingContext2D): void {
+  // Box [330, 384, 372, 418]: a phone on the table, screen up.
+  context.fillStyle = "#1b1f24";
+  context.fillRect(333, 388, 36, 26);
+  context.fillStyle = "#3b6a86";
+  context.fillRect(336, 391, 30, 20);
+}
+
+/** The board's overlay: a 2 px box and a label chip for each detection. */
+function drawShowcaseOverlay(
+  context: CanvasRenderingContext2D,
+  objects: readonly ShowcaseObject[],
+): void {
+  context.lineWidth = 2;
+  context.strokeStyle = "rgba(79, 214, 255, 0.92)";
+  context.font = "600 13px 'Ubuntu Mono', ui-monospace, 'DejaVu Sans Mono', monospace";
+  context.textBaseline = "alphabetic";
+  for (const object of objects) {
+    const [x1, y1, x2, y2] = object.box;
+    context.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+    const text = `${object.label} ${Math.round(object.score * 100)}%`;
+    const chipWidth = context.measureText(text).width + 10;
+    const chipHeight = 19;
+    const chipY = y1 >= chipHeight + 6 ? y1 - chipHeight - 4 : y1 + 4;
+    context.fillStyle = "rgba(4, 8, 15, 0.74)";
+    context.fillRect(x1 - 1, chipY, chipWidth, chipHeight);
+    context.fillStyle = "#dff6ff";
+    context.fillText(text, x1 + 4, chipY + 14);
+  }
 }

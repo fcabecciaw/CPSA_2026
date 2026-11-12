@@ -1,183 +1,178 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "status.schema.json",
-  "title": "status data (server to client)",
+  "title": "status data (server to client), 1 Hz and on change",
   "type": "object",
   "properties": {
-    "mode": {
+    "state": {
       "enum": [
-        "idle",
-        "lab",
-        "hologram",
-        "medical",
-        "rps"
-      ]
-    },
-    "mode_state": {
-      "enum": [
-        "stopped",
         "starting",
         "running",
-        "stopping",
-        "failed"
+        "error"
       ]
     },
-    "perception": {
-      "type": "object",
-      "properties": {
-        "fps": {
-          "type": [
-            "number",
-            "null"
-          ]
-        },
-        "dpu_ms": {
-          "type": [
-            "number",
-            "null"
-          ]
-        },
-        "camera": {
-          "enum": [
-            "ok",
-            "missing",
-            "error",
-            null
-          ]
-        },
-        "model": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "timing": {
-          "oneOf": [
-            {
-              "type": "null"
-            },
-            {
-              "type": "object",
-              "properties": {
-                "analyzed_fps": {
-                  "type": [
-                    "number",
-                    "null"
-                  ]
-                },
-                "camera_fps": {
-                  "type": [
-                    "number",
-                    "null"
-                  ]
-                },
-                "decode_ms": {
-                  "type": [
-                    "number",
-                    "null"
-                  ]
-                },
-                "preprocess_ms": {
-                  "type": [
-                    "number",
-                    "null"
-                  ]
-                },
-                "dpu_ms": {
-                  "type": [
-                    "number",
-                    "null"
-                  ]
-                },
-                "postprocess_ms": {
-                  "type": [
-                    "number",
-                    "null"
-                  ]
-                },
-                "pose_ms": {
-                  "type": [
-                    "number",
-                    "null"
-                  ]
-                },
-                "track_ms": {
-                  "type": [
-                    "number",
-                    "null"
-                  ]
-                },
-                "latency_ms": {
-                  "type": [
-                    "number",
-                    "null"
-                  ]
-                },
-                "dropped": {
-                  "type": "integer",
-                  "minimum": 0
-                }
-              },
-              "required": [
-                "analyzed_fps",
-                "camera_fps",
-                "decode_ms",
-                "preprocess_ms",
-                "dpu_ms",
-                "postprocess_ms",
-                "pose_ms",
-                "track_ms",
-                "latency_ms",
-                "dropped"
-              ],
-              "additionalProperties": false
-            }
-          ]
-        }
-      },
-      "required": [
-        "fps",
-        "dpu_ms",
-        "camera",
-        "model"
-      ],
-      "additionalProperties": true
-    },
-    "imu": {
+    "camera": {
       "enum": [
-        "n/a",
-        "searching",
-        "connected",
-        "lost"
+        "ok",
+        "missing",
+        "error"
       ]
+    },
+    "model": {
+      "type": "string",
+      "description": "Stem of the loaded .xmodel."
+    },
+    "active_model": {
+      "enum": [
+        "yolox",
+        "movenet"
+      ],
+      "description": "The model loaded on the DPU (R2-G); model.set releases it and loads the other one."
+    },
+    "switching": {
+      "type": "boolean",
+      "description": "True while model.set waits for the frame in flight, releases the old runner and loads the new one."
+    },
+    "swap_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Duration of the last model swap in milliseconds, or null before the first one."
+    },
+    "fps": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Processed frames per second, or null."
+    },
+    "dpu_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Last inference time, or null."
     },
     "errors": {
       "type": "array",
       "items": {
         "enum": [
-          "camera_missing",
-          "camera_error",
           "model_missing",
           "dpu_error",
-          "imu_not_found",
-          "asset_invalid",
-          "busy",
-          "bad_command",
+          "camera_missing",
+          "camera_error",
           "internal"
         ]
-      }
+      },
+      "description": "Codes of the conditions the process reports."
     },
     "uptime_s": {
-      "type": "number"
+      "type": "number",
+      "minimum": 0
+    },
+    "calibration": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "detector": {
+          "enum": [
+            "yolox",
+            "yolov5"
+          ],
+          "description": "Object detector of the objects view: YOLOX-nano (416x416, zoomable) or YOLOv5-nano (640x640, whole frame, zoom ignored)."
+        },
+        "detectors": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "yolox",
+              "yolov5"
+            ]
+          },
+          "description": "Detectors installed on this board; yolov5 is missing when its .xmodel was not deployed."
+        },
+        "zoom": {
+          "type": "number",
+          "minimum": 1.0,
+          "maximum": 2.0,
+          "description": "YOLOX centre-crop magnification before the letterbox (1.0 = whole frame)."
+        },
+        "zoom_center": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "minItems": 2,
+          "maxItems": 2,
+          "description": "Crop centre [x, y] as fractions of the (mirrored) frame."
+        },
+        "gain": {
+          "type": "integer",
+          "minimum": 64,
+          "maximum": 2540,
+          "description": "Manual V4L2 gain of the RGB camera."
+        },
+        "exposure": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "exposure_time_absolute in 100 us units; calibration.set accepts 100 (1/100 s) or 200 (1/50 s)."
+        },
+        "saturation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255,
+          "description": "V4L2 saturation of the RGB camera."
+        },
+        "person_conf": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Detection threshold of the person class (objectness * class score)."
+        },
+        "held_conf": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Threshold of the loosest held-object class (bottle, cup, cell phone, book); the others keep their config/showcase.yaml offset above it."
+        },
+        "object_conf": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Threshold of every other class (model.object_conf)."
+        }
+      },
+      "required": [
+        "zoom",
+        "zoom_center",
+        "gain",
+        "exposure",
+        "saturation"
+      ],
+      "additionalProperties": true,
+      "description": "Live calibration applied now (debug panel): object detector, YOLOX zoom/centre and the camera gain, exposure and saturation; null before the pipeline knows it."
     }
   },
   "required": [
-    "mode",
-    "mode_state",
-    "perception",
-    "imu",
+    "state",
+    "camera",
+    "model",
+    "active_model",
+    "switching",
+    "swap_ms",
+    "fps",
+    "dpu_ms",
     "errors",
-    "uptime_s"
+    "uptime_s",
+    "calibration"
   ],
   "additionalProperties": true
 }

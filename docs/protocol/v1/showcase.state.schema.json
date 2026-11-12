@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "showcase.state.schema.json",
+  "title": "showcase.state data (server to client), at most 10 Hz",
+  "type": "object",
+  "properties": {
+    "model": {
+      "type": "string",
+      "description": "Name of the detector that produced the objects."
+    },
+    "width": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Width of the frame the boxes refer to, in pixels."
+    },
+    "height": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "fps": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Processed frames per second, or null."
+    },
+    "dpu_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Last inference time on the DPU, or null."
+    },
+    "total_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Last whole-chain time of the frame, or null."
+    },
+    "objects": {
+      "type": "array",
+      "maxItems": 20,
+      "description": "The best detections of the frame, by descending score.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "Class name in the configured language (ASCII, Italian by default)."
+          },
+          "class_id": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "COCO-80 class index; 0 is person."
+          },
+          "score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "box": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "minItems": 4,
+            "maxItems": 4,
+            "description": "[x1, y1, x2, y2] in source-image pixels, clipped to the frame."
+          }
+        },
+        "required": [
+          "label",
+          "class_id",
+          "score",
+          "box"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "counts": {
+      "type": "array",
+      "description": "One entry per label seen in the frame, by descending count and then label.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "label",
+          "count"
+        ],
+        "additionalProperties": true
+      }
+    }
+  },
+  "required": [
+    "model",
+    "width",
+    "height",
+    "fps",
+    "dpu_ms",
+    "total_ms",
+    "objects",
+    "counts"
+  ],
+  "additionalProperties": true
+}

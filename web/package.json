@@ -1,17 +1,29 @@
 {
-  "name": "cpsa-medical-dashboard",
+  "name": "cpsa-showcase-dashboard",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Dashboard web della demo medica CPSA (Vite + TypeScript, nessuna dipendenza a runtime).",
+  "description": "Dashboard web dell'unica demo CPSA: cosa vede l'IA (Vite + TypeScript, nessuna dipendenza a runtime).",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "shots": "node scripts/shots.mjs"
   },
   "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/three": "^0.187.0",
+    "happy-dom": "21.0.4",
     "typescript": "7.0.2",
-    "vite": "8.3.8"
+    "vite": "8.3.8",
+    "vitest": "5.1.0"
+  },
+  "dependencies": {
+    "@fontsource-variable/atkinson-hyperlegible-mono": "^5.3.0",
+    "@fontsource-variable/atkinson-hyperlegible-next": "^5.3.0",
+    "@fontsource-variable/unbounded": "^5.3.0",
+    "three": "^0.187.0"
   }
 }
