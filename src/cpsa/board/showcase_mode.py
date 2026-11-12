@@ -30,7 +30,6 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
-from importlib import import_module
 from typing import Any, Protocol
 
 import cv2
@@ -46,6 +45,7 @@ from cpsa.application.config import (
 from cpsa.application.slot import LatestSlot
 from cpsa.protocol.showcase import ShowcaseObject, showcase_state
 from cpsa.supervisor.contract import ModeContext, ModeStartError
+from cpsa.vision.coco import COCO80_EN, COCO80_IT
 from cpsa.vision.types import VideoFrame
 
 logger = logging.getLogger("cpsa.board.showcase")
@@ -157,18 +157,14 @@ def _default_detector(model: ShowcaseModelConfig) -> ShowcaseDetector:
     The import is deferred to the first start so that booting the supervisor,
     listing the modes or running a different mode never loads the VART bindings.
     """
-    adapter = import_module("cpsa.adapters.detect.yolox_dpu")
-    detector: ShowcaseDetector = adapter.DpuYoloxDetector(
-        model.path, conf_thr=model.conf_thr, iou_thr=model.iou_thr
-    )
-    return detector
+    from cpsa.adapters.detect.yolox_dpu import DpuYoloxDetector
+
+    return DpuYoloxDetector(model.path, conf_thr=model.conf_thr, iou_thr=model.iou_thr)
 
 
 def _default_labels(language: str) -> tuple[str, ...]:
     """Return the COCO-80 label table of the configured language."""
-    coco = import_module("cpsa.vision.coco")
-    labels: tuple[str, ...] = coco.COCO80_EN if language == "en" else coco.COCO80_IT
-    return labels
+    return COCO80_EN if language == "en" else COCO80_IT
 
 
 def _require_showcase(config: Config) -> ShowcaseConfig:
