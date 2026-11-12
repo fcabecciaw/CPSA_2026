@@ -61,6 +61,8 @@ export class RoomView {
   private readonly jointColors = new Float32Array(17 * 3);
   private intensity = 0;
   private visible = false;
+  /** Covered by the attract loop: no frames, even when visible. */
+  private paused = false;
   private disposed = false;
   private frameHandle = 0;
   private lastAt: number | null = null;
@@ -149,6 +151,21 @@ export class RoomView {
     } else {
       window.cancelAnimationFrame(this.frameHandle);
       this.frameHandle = 0;
+    }
+  }
+
+  /** Stop drawing while something opaque covers the room. */
+  setPaused(paused: boolean): void {
+    if (paused === this.paused) {
+      return;
+    }
+    this.paused = paused;
+    if (paused) {
+      window.cancelAnimationFrame(this.frameHandle);
+      this.frameHandle = 0;
+    } else if (this.visible) {
+      this.lastAt = null;
+      this.start();
     }
   }
 
@@ -346,7 +363,7 @@ export class RoomView {
       return;
     }
     const loop = (): void => {
-      if (!this.visible || this.disposed) {
+      if (!this.visible || this.paused || this.disposed) {
         this.frameHandle = 0;
         return;
       }

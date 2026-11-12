@@ -65,10 +65,19 @@ export interface ShortcutEvent {
 
 /** `d` alone, never while typing in a field or with a modifier held. */
 export function isToggleShortcut(event: ShortcutEvent): boolean {
+  return isBareKey(event, "d");
+}
+
+/**
+ * One of `keys` pressed alone (letters match either case), not auto-repeated
+ * and not while typing in a field.
+ */
+export function isBareKey(event: ShortcutEvent, ...keys: string[]): boolean {
   if (event.ctrlKey || event.metaKey || event.altKey || event.repeat) {
     return false;
   }
-  if (event.key !== "d" && event.key !== "D") {
+  const pressed = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+  if (!keys.includes(pressed)) {
     return false;
   }
   return !isTypingTarget(event.target);

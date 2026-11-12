@@ -64,6 +64,33 @@ particle sphere: cyan, violet and magenta over a violet-black background.
    subtitle, moves it or resizes the sphere's canvas
    (`src/subtitles.test.ts` checks it over 100 panel updates).
 
+### "Come funziona": the attract loop
+
+The page opens on a full-screen loop for high-school students (`src/attract/`):
+seven scenes of 10 s each, a headline, one or two lines and an animated SVG
+diagram, with the live camera small in a corner and a progress bar at the top.
+
+1. the camera: 640 × 480 at 60 frames per second, about 18 million pixels a
+   second, three numbers per pixel;
+2. preparing the image: 416 × 416 with grey letterbox bands, int8 values
+   (`round(pixel ÷ 4)`, as `src/cpsa/yolox.py` does);
+3. the chip: the KV260's FPGA and its DPU, up to about 1.2 TOPS int8, with the
+   live DPU time and frame rate;
+4. the neural network: edges, shapes, objects on the 52/26/13 grids; 80 COCO
+   categories with box and confidence; MoveNet's 17 keypoints; what the board
+   sees right now;
+5. tracking: a jittery box against a stable one;
+6. ARI's mind: perception, short memory, rules and voice, all on the laptop;
+7. privacy: nothing is recorded or sent to the internet.
+
+Live numbers come from the WebSocket; offline the scenes say “misurato” and
+use the board measurements (60 fps, 4.7 ms). **One action starts the demo**:
+the “Avvia la demo” button, Space or Enter. The same gesture unlocks the audio,
+so it replaces the “Attiva la voce” click. `i` (or the loop button of debug
+mode) brings the loop back and silences ARI; ←/→ step through the scenes.
+While the loop is open the sphere and the room stop drawing. `?attract=0`
+skips the loop and `?scene=N` pins one scene (screenshots).
+
 ### Presentation and debug modes
 
 The page opens in **presentation mode**: no scores, no percentages, no
@@ -104,7 +131,7 @@ placeholder; `view=skeleton` opens the skeleton room; `debug=1` opens debug
 mode.
 
 `npm run shots` drives headless Chrome over the mock and writes screenshots to
-`build/web-shots/` (`--width 1920 --height 1080`, `--only demo-present-objects`,
+`build/web-shots/` (`--width 1920 --height 1080`, `--only attract-3,demo-present-objects`,
 `--suffix` for the viewport in the name, `--port` when 5173 is taken, `--gpu`
 with `bench=1` for a real frame-rate reading).
 
@@ -113,6 +140,7 @@ with `bench=1` for a real frame-rate reading).
 - `src/main.ts` — boot, stream routing, region updates;
 - `src/views.ts` — top bar and notice toast;
 - `src/uimode.ts` — presentation/debug mode, its button and the `d` key;
+- `src/attract/` — the “Come funziona” loop: state machine, scenes, view;
 - `src/metrics.ts` — the fps and latency readout;
 - `src/video.ts` — the MJPEG pane with its retry;
 - `src/showcase.ts` — the object chips and the debug lists;

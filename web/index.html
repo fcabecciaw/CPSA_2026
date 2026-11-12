@@ -84,6 +84,17 @@
             <span class="mute-label" id="mute-label">Voce</span>
           </button>
           <button
+            class="icon-button debug-only"
+            id="attract-return"
+            type="button"
+            aria-label="Torna a Come funziona (I)"
+            title="Torna a Come funziona (I)"
+          >
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3M4.5 4.5v4h4" />
+            </svg>
+          </button>
+          <button
             class="icon-button debug-toggle"
             id="debug-toggle"
             type="button"
@@ -204,6 +215,9 @@
 
       <noscript>Questa dashboard richiede JavaScript.</noscript>
     </div>
+
+    <!-- "Come funziona": built by src/attract/view.ts, open until the demo starts. -->
+    <section id="attract" class="attract" data-open></section>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

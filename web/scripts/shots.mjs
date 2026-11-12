@@ -13,7 +13,8 @@
  *
  * The URL parameters are the dev-only hooks of `main.ts` and `avatar/view.ts`:
  * `?mock=1`, `expression`, `mouth`, `gaze=left|right|up`, `presence`,
- * `view=skeleton`, `debug=1|0` (presentation or debug mode for that load) and
+ * `view=skeleton`, `attract=0` (skip "Come funziona"), `scene=N` (pin one of its
+ * scenes), `debug=1|0` (presentation or debug mode for that load) and
  * `bench=1`. `--suffix` appends the viewport (`-1280x720`) to the file names.
  */
 
@@ -33,40 +34,46 @@ const BASE = `http://127.0.0.1:${PORT}/`;
 
 /** One shot: URL suffix, how long to let the scene settle, and the file name. */
 const SHOTS = [
+  // "Come funziona", the attract loop, one shot per scene (pinned).
+  ...[1, 2, 3, 4, 5, 6, 7].map((scene) => ({
+    name: `attract-${scene}`,
+    query: `mock=1&scene=${scene}`,
+    settleMs: 3200,
+  })),
   // The demo itself, presentation (default) and debug modes, both views.
-  { name: "demo-present-objects", query: "mock=1&debug=0", settleMs: 7000 },
+  { name: "demo-present-objects", query: "mock=1&attract=0&debug=0", settleMs: 7000 },
   {
     name: "demo-present-voice",
-    query: "mock=1&debug=0",
+    query: "mock=1&attract=0&debug=0",
     click: "#voice-gate",
     settleMs: 9000,
   },
-  { name: "demo-present-skeleton", query: "mock=1&debug=0&view=skeleton", settleMs: 7000 },
-  { name: "demo-debug-objects", query: "mock=1&debug=1", settleMs: 7000 },
-  { name: "demo-debug-skeleton", query: "mock=1&debug=1&view=skeleton", settleMs: 7000 },
+  { name: "demo-present-skeleton", query: "mock=1&attract=0&debug=0&view=skeleton", settleMs: 7000 },
+  { name: "demo-debug-objects", query: "mock=1&attract=0&debug=1", settleMs: 7000 },
+  { name: "demo-debug-skeleton", query: "mock=1&attract=0&debug=1&view=skeleton", settleMs: 7000 },
   // The seven moods of the sphere, each pinned through the dev-only hook.
-  { name: "mood-neutral", query: "mock=1&expression=neutral&presence=1", settleMs: 2000 },
-  { name: "mood-happy", query: "mock=1&expression=happy&presence=1", settleMs: 2000 },
-  { name: "mood-surprised", query: "mock=1&expression=surprised&presence=1", settleMs: 2000 },
-  { name: "mood-curious", query: "mock=1&expression=curious&presence=1", settleMs: 2000 },
-  { name: "mood-thinking", query: "mock=1&expression=thinking&presence=1", settleMs: 2000 },
-  { name: "mood-sleepy", query: "mock=1&expression=sleepy&presence=1", settleMs: 2000 },
-  { name: "mood-worried", query: "mock=1&expression=worried&presence=1", settleMs: 2000 },
+  { name: "mood-neutral", query: "mock=1&attract=0&expression=neutral&presence=1", settleMs: 2000 },
+  { name: "mood-happy", query: "mock=1&attract=0&expression=happy&presence=1", settleMs: 2000 },
+  { name: "mood-surprised", query: "mock=1&attract=0&expression=surprised&presence=1", settleMs: 2000 },
+  { name: "mood-curious", query: "mock=1&attract=0&expression=curious&presence=1", settleMs: 2000 },
+  { name: "mood-thinking", query: "mock=1&attract=0&expression=thinking&presence=1", settleMs: 2000 },
+  { name: "mood-sleepy", query: "mock=1&attract=0&expression=sleepy&presence=1", settleMs: 2000 },
+  { name: "mood-worried", query: "mock=1&attract=0&expression=worried&presence=1", settleMs: 2000 },
   // The voice: the surface swells on a syllable as the analyser reports it.
-  { name: "speaking", query: "mock=1&expression=happy&mouth=0.9&presence=1", settleMs: 2200 },
+  { name: "speaking", query: "mock=1&attract=0&expression=happy&mouth=0.9&presence=1", settleMs: 2200 },
   // Attention: the cloud leans, bulges and brightens toward the person.
-  { name: "gaze-left", query: "mock=1&expression=curious&gaze=left&presence=1", settleMs: 2200 },
-  { name: "gaze-right", query: "mock=1&expression=curious&gaze=right&presence=1", settleMs: 2200 },
+  { name: "gaze-left", query: "mock=1&attract=0&expression=curious&gaze=left&presence=1", settleMs: 2200 },
+  { name: "gaze-right", query: "mock=1&attract=0&expression=curious&gaze=right&presence=1", settleMs: 2200 },
   {
     // The ~0.5 s single-model swap: the note that replaces the empty pane.
     name: "switching-note",
-    query: "mock=1",
+    query: "mock=1&attract=0",
     click: "#mode-skeleton",
     settleMs: 60,
   },
   {
     name: "room-skeleton",
-    query: "mock=1&view=skeleton",
+    query: "mock=1&attract=0&view=skeleton",
     settleMs: 6000,
   },
 ];

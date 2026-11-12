@@ -76,6 +76,8 @@ export class AvatarView {
   private lastPresentAt = 0;
   private attachedAudio: AudioNode | null = null;
   private frameHandle = 0;
+  /** Covered by the attract loop: skip the GPU work, keep the state. */
+  private paused = false;
   private lastFrameAt: number | null = null;
   private lastClock = 0;
   private pixelRatio = 1;
@@ -274,8 +276,15 @@ export class AvatarView {
     this.frameHandle = window.requestAnimationFrame(loop);
   }
 
+  /** Stop drawing while something opaque covers the sphere. */
+  setPaused(paused: boolean): void {
+    this.paused = paused;
+    // The first frame after a pause must not integrate the whole gap.
+    this.lastFrameAt = null;
+  }
+
   private frame(): void {
-    if (this.disposed || document.hidden || this.renderer === null) {
+    if (this.disposed || this.paused || document.hidden || this.renderer === null) {
       return;
     }
     const now = performance.now();

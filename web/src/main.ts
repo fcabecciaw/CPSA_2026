@@ -11,6 +11,7 @@ import { CognitiveMemory } from "./cognitive/memory";
 import { Perception } from "./cognitive/perception";
 import { RULEBOOK } from "./cognitive/rulebook";
 import { CognitiveEngine, type Expression } from "./cognitive/rules";
+import { AttractView, type LiveNumbers } from "./attract";
 import { AvatarView } from "./avatar";
 import { byId } from "./dom";
 import { FaceCueTracker } from "./facepipeline";
@@ -510,12 +511,63 @@ async function boot(): Promise<void> {
     }
   });
 
+  /*
+   * "Come funziona" runs from load until the operator starts the demo: that
+   * one gesture also unlocks the audio (it is the voice gate). `i` or the
+   * debug button bring the loop back and silence ARI.
+   */
+  const attract = new AttractView({
+    root: byId("attract"),
+    video: videoImage,
+    live: liveNumbers,
+    params,
+    returnButton: byId<HTMLButtonElement>("attract-return"),
+    onActivate: () => {
+      voice.activate();
+      renderVoice();
+      avatar.setPaused(false);
+      room.setPaused(false);
+    },
+    onReturn: () => {
+      avatar.setPaused(true);
+      room.setPaused(true);
+      voice.disable();
+      mind.interrupt();
+      subtitles.clear();
+      renderVoice();
+    },
+  });
+  attract.start();
+  // The loop covers the whole page: the sphere and the room need no frames.
+  avatar.setPaused(attract.phase === "loop");
+  room.setPaused(attract.phase === "loop");
+
   renderAll(elements, input());
   renderVoice();
   renderMind();
   renderMode();
   refreshVideo();
   startBench();
+}
+
+/** The numbers the attract loop shows live; null when not connected. */
+function liveNumbers(): LiveNumbers {
+  if (connection.phase !== "open") {
+    return { fps: null, dpuMs: null, labels: [] };
+  }
+  const showcaseState = store.state.showcase;
+  const counts = new Map<string, number>();
+  for (const object of showcaseState?.objects ?? []) {
+    counts.set(object.label, (counts.get(object.label) ?? 0) + 1);
+  }
+  const labels = [...counts.entries()]
+    .sort((left, right) => right[1] - left[1])
+    .map(([name]) => name);
+  return {
+    fps: metrics.read().fps,
+    dpuMs: showcaseState?.dpu_ms ?? store.state.status?.dpu_ms ?? null,
+    labels,
+  };
 }
 
 /**

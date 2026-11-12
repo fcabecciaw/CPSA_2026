@@ -1,0 +1,783 @@
+/*
+ * "Come funziona": the full-screen loop before the demo starts.
+ *
+ * Same night and same three lights as the dashboard. Text on the left, read
+ * from three metres; the diagram on the right; the one action at the bottom.
+ * Scenes cross-fade; each diagram's animation runs only while its scene is
+ * on screen (the rules match `.scene[data-active]`).
+ */
+
+.attract {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: clamp(14px, 3vh, 44px);
+  padding: clamp(20px, 4.5vh, 64px) clamp(24px, 5vw, 104px);
+  background:
+    radial-gradient(55vw 60vh at 80% 45%, rgba(122, 108, 255, 0.2), transparent 70%),
+    radial-gradient(45vw 50vh at 5% 100%, rgba(79, 214, 255, 0.09), transparent 70%),
+    radial-gradient(35vw 40vh at 100% 100%, rgba(255, 79, 216, 0.08), transparent 70%),
+    var(--void);
+  color: var(--starlight);
+  font-family: var(--font);
+  opacity: 1;
+  transition:
+    opacity 700ms var(--ease-out),
+    visibility 0s linear 0s;
+}
+
+.attract:not([data-open]) {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 700ms var(--ease-out),
+    visibility 0s linear 700ms;
+}
+
+/* --- top: the title and the progress through the scenes ----------------- */
+
+.attract-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 2rem;
+}
+
+.attract-title {
+  margin: 0;
+  font-family: var(--display);
+  font-size: clamp(20px, 1.7vw, 34px);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.attract-tagline {
+  margin: 0.2em 0 0;
+  font-size: clamp(15px, 1.05vw, 21px);
+  color: var(--haze);
+}
+
+.attract-progress {
+  display: flex;
+  gap: clamp(6px, 0.5vw, 10px);
+  margin: 0;
+  padding: 0.7em 0 0;
+  list-style: none;
+}
+
+.seg {
+  width: clamp(28px, 2.6vw, 56px);
+  height: 4px;
+  border-radius: 999px;
+  background: var(--rim);
+  overflow: hidden;
+}
+
+.seg-fill {
+  display: block;
+  height: 100%;
+  background: var(--spectrum);
+  transform: scaleX(0);
+  transform-origin: left center;
+}
+
+.seg-done .seg-fill {
+  transform: scaleX(1);
+}
+
+.seg-active .seg-fill {
+  animation: seg-fill var(--seg-ms, 10s) linear forwards;
+}
+
+@keyframes seg-fill {
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* --- the scenes ---------------------------------------------------------- */
+
+.attract-scenes {
+  position: relative;
+  min-height: 0;
+}
+
+.scene {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.08fr);
+  align-items: center;
+  gap: clamp(24px, 4.5vw, 96px);
+  opacity: 0;
+  transform: translateY(14px);
+  transition:
+    opacity 900ms var(--ease-out),
+    transform 900ms var(--ease-out);
+  pointer-events: none;
+}
+
+.scene[data-active] {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+.scene-text {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(10px, 1.8vh, 26px);
+  min-width: 0;
+}
+
+.scene-headline {
+  max-width: 20ch;
+  margin: 0 0 0.2em;
+  font-family: var(--display);
+  font-size: clamp(30px, 3.2vw, 66px);
+  font-weight: 600;
+  line-height: 1.08;
+  letter-spacing: -0.025em;
+  text-wrap: balance;
+}
+
+.scene-line {
+  max-width: 38ch;
+  margin: 0;
+  font-size: clamp(18px, 1.5vw, 31px);
+  line-height: 1.42;
+  color: var(--haze);
+  text-wrap: pretty;
+}
+
+.scene-live {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 0.6em;
+  margin: 0.4em 0 0;
+  padding: 0.5em 1em;
+  border-radius: 999px;
+  background: rgba(79, 214, 255, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(79, 214, 255, 0.4);
+  font-size: clamp(17px, 1.3vw, 27px);
+  font-weight: 600;
+  color: var(--ion);
+}
+
+.scene-live::before {
+  content: "";
+  width: 0.5em;
+  height: 0.5em;
+  border-radius: 50%;
+  background: var(--ion);
+  box-shadow: 0 0 0 0.2em rgba(79, 214, 255, 0.2);
+}
+
+.scene-art {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+}
+
+.diagram {
+  width: 100%;
+  height: 100%;
+  max-height: 94%;
+  overflow: visible;
+}
+
+/* --- the bottom: the one action and the live camera ---------------------- */
+
+.attract-bottom {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 2rem;
+}
+
+.attract-cta {
+  display: flex;
+  align-items: center;
+  gap: clamp(14px, 1.4vw, 28px);
+}
+
+.attract-start {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6em;
+  padding: 0.85em 1.9em 0.85em 1.6em;
+  border: 0;
+  border-radius: 999px;
+  background: linear-gradient(120deg, var(--ion), var(--violet));
+  color: var(--void);
+  font-size: clamp(18px, 1.45vw, 30px);
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 16px 44px -14px rgba(122, 108, 255, 0.95);
+}
+
+.attract-start .icon {
+  fill: currentColor;
+  stroke: none;
+}
+
+.attract-start::before {
+  content: "";
+  position: absolute;
+  inset: -7px;
+  border: 2px solid rgba(79, 214, 255, 0.55);
+  border-radius: inherit;
+  opacity: 0;
+  animation: gate-ring 2.6s var(--ease-out) infinite;
+  pointer-events: none;
+}
+
+.attract-hint {
+  margin: 0;
+  font-size: clamp(14px, 1vw, 20px);
+  color: var(--dusk);
+}
+
+.attract-hint kbd {
+  padding: 0.15em 0.5em;
+  border-radius: 6px;
+  background: var(--glass-strong);
+  box-shadow: inset 0 0 0 1px var(--rim-strong);
+  font-family: var(--font);
+  font-size: 0.92em;
+  color: var(--haze);
+}
+
+.attract-cam {
+  position: relative;
+  width: clamp(190px, 16vw, 330px);
+  aspect-ratio: 4 / 3;
+  margin: 0;
+  border-radius: 14px;
+  background: #020109;
+  overflow: hidden;
+  box-shadow:
+    inset 0 0 0 1px var(--rim-strong),
+    0 18px 40px -18px rgba(122, 108, 255, 0.7);
+}
+
+.attract-cam-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.attract-cam-note {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  margin: 0;
+  padding: 1em;
+  font-size: 0.85em;
+  text-align: center;
+  color: var(--dusk);
+}
+
+.attract-cam-caption {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25em 0.7em;
+  border-radius: 999px;
+  background: rgba(7, 6, 26, 0.8);
+  font-size: clamp(12px, 0.8vw, 16px);
+  font-weight: 600;
+}
+
+/* --- diagram vocabulary -------------------------------------------------- */
+
+.diagram text {
+  font-family: var(--font);
+}
+
+.d-label {
+  fill: var(--starlight);
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.d-small {
+  fill: var(--haze);
+  font-size: 17px;
+  font-weight: 500;
+}
+
+.d-big {
+  font-size: 40px;
+  font-weight: 700;
+}
+
+.d-mono {
+  font-family: var(--mono);
+  font-size: 19px;
+}
+
+.stop-ion {
+  stop-color: var(--ion);
+}
+
+.stop-violet {
+  stop-color: var(--violet);
+}
+
+.stop-plasma {
+  stop-color: var(--plasma);
+}
+
+.d-image {
+  opacity: 0.55;
+}
+
+.d-grid {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.13);
+  stroke-width: 1;
+}
+
+.d-outline {
+  fill: none;
+  stroke: var(--rim-strong);
+  stroke-width: 1.5;
+}
+
+.d-panel {
+  fill: var(--glass);
+  stroke: var(--rim);
+  stroke-width: 1.5;
+}
+
+.d-arrow {
+  fill: none;
+  stroke: var(--ion);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.d-box {
+  fill: none;
+  stroke: var(--ion);
+  stroke-width: 3;
+}
+
+/* 1 · the camera */
+.d-ghost {
+  fill: none;
+  stroke: var(--rim-strong);
+  stroke-width: 1.5;
+}
+
+.d-ghost-2 {
+  opacity: 0.35;
+}
+
+.d-ghost-1 {
+  opacity: 0.6;
+}
+
+.d-scan {
+  fill: var(--ion);
+  opacity: 0.85;
+}
+
+.scene[data-active] .d-scan {
+  animation: d-scan 1s linear infinite;
+}
+
+@keyframes d-scan {
+  to {
+    transform: translateY(296px);
+  }
+}
+
+.d-lead {
+  fill: none;
+  stroke: var(--haze);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 6;
+}
+
+.d-pick {
+  fill: none;
+  stroke: var(--starlight);
+  stroke-width: 2;
+}
+
+.d-px-ion {
+  fill: var(--ion);
+}
+
+.d-px-pick {
+  stroke: var(--starlight);
+  stroke-width: 3;
+}
+
+.d-px-violet {
+  fill: var(--violet);
+}
+
+.d-px-plasma {
+  fill: var(--plasma);
+}
+
+/* 2 · preparing the image */
+.d-pad {
+  fill: #727272;
+  opacity: 0.6;
+}
+
+.d-shrink {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.scene[data-active] .d-shrink {
+  animation: d-shrink 5s var(--ease-out) infinite;
+}
+
+@keyframes d-shrink {
+  0% {
+    opacity: 0;
+    transform: translateX(-200px) scale(0.97);
+  }
+
+  30%,
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.d-tile {
+  fill: var(--glass-strong);
+  stroke: var(--rim-strong);
+  stroke-width: 1.5;
+}
+
+.d-tile-int {
+  stroke: var(--ion);
+}
+
+.d-int {
+  fill: var(--ion);
+}
+
+.scene[data-active] .d-tile-int,
+.scene[data-active] .d-int {
+  animation: d-appear 5s var(--ease-out) infinite;
+}
+
+@keyframes d-appear {
+  0%,
+  35% {
+    opacity: 0;
+  }
+
+  55%,
+  100% {
+    opacity: 1;
+  }
+}
+
+/* 3 · the chip */
+.d-chip {
+  fill: var(--void-raised);
+  stroke: var(--rim-strong);
+  stroke-width: 2;
+}
+
+.d-pin {
+  fill: none;
+  stroke: var(--dusk);
+  stroke-width: 4;
+  stroke-linecap: round;
+}
+
+.d-mac {
+  fill: var(--violet);
+  opacity: 0.3;
+}
+
+.scene[data-active] .d-mac {
+  animation: d-mac 1.6s ease-in-out infinite;
+}
+
+@keyframes d-mac {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+
+  40% {
+    opacity: 1;
+    fill: var(--ion);
+  }
+}
+
+/* 4 · the neural network */
+.d-layer {
+  fill: var(--void-raised);
+  stroke: var(--violet);
+  stroke-width: 1.5;
+}
+
+.d-layer-front {
+  stroke: var(--ion);
+}
+
+.d-stage {
+  opacity: 0.45;
+}
+
+.scene[data-active] .d-stage {
+  animation: d-stage 1.8s ease-in-out infinite;
+}
+
+@keyframes d-stage {
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+
+  30% {
+    opacity: 1;
+  }
+}
+
+.d-flow {
+  fill: none;
+  stroke: var(--ion);
+  stroke-width: 3;
+  stroke-dasharray: 6 8;
+}
+
+.scene[data-active] .d-flow {
+  animation: d-flow 0.9s linear infinite;
+}
+
+@keyframes d-flow {
+  to {
+    stroke-dashoffset: -28;
+  }
+}
+
+.d-tag {
+  fill: var(--ion);
+}
+
+.d-tag-text {
+  fill: var(--void);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.d-bone {
+  fill: none;
+  stroke: var(--plasma);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+
+.d-joint {
+  fill: var(--ion);
+}
+
+/* 5 · tracking */
+.d-cup-body {
+  fill: var(--haze);
+  opacity: 0.85;
+}
+
+.d-cup-handle {
+  fill: none;
+  stroke: var(--haze);
+  stroke-width: 8;
+  opacity: 0.85;
+}
+
+.scene[data-active] .d-move {
+  animation: d-move 4s ease-in-out infinite alternate;
+}
+
+@keyframes d-move {
+  to {
+    transform: translateX(110px);
+  }
+}
+
+.d-jitter {
+  stroke: var(--plasma);
+}
+
+.scene[data-active] .d-jitter {
+  animation: d-jitter 0.6s steps(1) infinite;
+}
+
+@keyframes d-jitter {
+  0% {
+    transform: translate(7px, -5px);
+  }
+
+  20% {
+    transform: translate(-6px, 4px);
+  }
+
+  40% {
+    transform: translate(4px, 7px);
+  }
+
+  60% {
+    transform: translate(-7px, -3px);
+  }
+
+  80% {
+    transform: translate(5px, 2px);
+  }
+}
+
+/* 6 · ARI's mind */
+.d-wire {
+  fill: none;
+  stroke: var(--rim-strong);
+  stroke-width: 3;
+}
+
+.d-loop {
+  fill: none;
+  stroke: var(--dusk);
+  stroke-width: 2;
+  stroke-dasharray: 6 8;
+}
+
+.d-node-ring {
+  fill: var(--void-raised);
+  stroke: var(--violet);
+  stroke-width: 2.5;
+}
+
+.d-node-icon {
+  fill: none;
+  stroke: var(--starlight);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.d-node {
+  opacity: 0.6;
+}
+
+.scene[data-active] .d-node {
+  animation: d-node 3s ease-in-out infinite;
+}
+
+@keyframes d-node {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+
+  12% {
+    opacity: 1;
+  }
+}
+
+.d-pulse {
+  fill: var(--ion);
+}
+
+.scene[data-active] .d-pulse {
+  animation: d-pulse 3s linear infinite;
+}
+
+@keyframes d-pulse {
+  to {
+    transform: translateX(480px);
+  }
+}
+
+/* 7 · privacy */
+.d-forget {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.scene[data-active] .d-forget {
+  animation: d-forget 3.2s ease-in infinite;
+}
+
+@keyframes d-forget {
+  0% {
+    opacity: 0;
+    transform: none;
+  }
+
+  15% {
+    opacity: 1;
+  }
+
+  70%,
+  100% {
+    opacity: 0;
+    transform: translateX(230px) scale(0.25);
+  }
+}
+
+.d-icon {
+  fill: none;
+  stroke: var(--haze);
+  stroke-width: 3;
+  stroke-linejoin: round;
+}
+
+.d-cross {
+  fill: none;
+  stroke: var(--plasma);
+  stroke-width: 4;
+  stroke-linecap: round;
+}
+
+/* --- smaller screens and reduced motion ---------------------------------- */
+
+@media (max-width: 900px) {
+  .scene {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    align-content: start;
+  }
+
+  .attract-cam {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scene,
+  .attract {
+    transition: none;
+  }
+
+  .attract *,
+  .attract *::before {
+    animation: none !important;
+  }
+
+  .seg-active .seg-fill {
+    transform: scaleX(1);
+  }
+}
