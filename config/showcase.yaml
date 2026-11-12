@@ -16,6 +16,7 @@ camera:                       # Intel RealSense F200 RGB node over V4L2
   backlight_compensation: 0   # 0..4: the ISP backlight compensation also drifts the image
   saturation: 110             # V4L2 saturation 0..255 (camera default 128): calms the colour noise
   power_line_hz: 50           # anti-flicker: 0 (off), 50 or 60
+  mirror: true                # flip left-right like a mirror before detection (labels stay readable)
 
 tracker:                      # detector boxes, stabilized so they stand still on screen
   enabled: true               # false: publish the raw detector boxes

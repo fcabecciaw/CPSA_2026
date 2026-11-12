@@ -118,6 +118,7 @@ class CameraConfig:
     backlight_compensation: int
     saturation: int
     power_line_hz: int
+    mirror: bool = True
 
 
 @dataclass(frozen=True)
@@ -292,6 +293,7 @@ def _camera_config(camera: _Section) -> CameraConfig:
         ),
         saturation=camera.integer("saturation", *SATURATION_RANGE),
         power_line_hz=camera.power_line_hz("power_line_hz"),
+        mirror=camera.optional_boolean("mirror", True),
     )
     camera.reject_unknown()
     return config
@@ -441,6 +443,11 @@ class _Section:
         if not isinstance(value, bool):
             raise ConfigError(self._key(name), "expected true or false")
         return value
+
+    def optional_boolean(self, name: str, default: bool) -> bool:
+        if name not in self._data:
+            return default
+        return self.boolean(name)
 
     def white_balance(self, name: str) -> int | str:
         """A Kelvin integer in 100 K steps, or :data:`WHITE_BALANCE_AUTO`."""

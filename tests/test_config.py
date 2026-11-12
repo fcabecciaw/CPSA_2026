@@ -69,6 +69,16 @@ def document() -> dict[str, object]:
     return copy.deepcopy(DOCUMENT)
 
 
+def test_the_camera_mirrors_by_default_and_can_be_turned_off(tmp_path: Path) -> None:
+    shipped = load(SHIPPED)
+    assert shipped.camera.mirror is True
+
+    text = SHIPPED.read_text(encoding="utf-8").replace("mirror: true ", "mirror: false", 1)
+    custom = tmp_path / "showcase.yaml"
+    custom.write_text(text, encoding="utf-8")
+    assert load(custom).camera.mirror is False
+
+
 def test_the_shipped_configuration_parses_and_names_the_machine() -> None:
     config = load(SHIPPED)
 

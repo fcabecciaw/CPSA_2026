@@ -214,7 +214,7 @@ def resolve_device(
     return node.path
 
 
-def yuyv_to_rgb(data: bytes, width: int, height: int) -> NDArray[np.uint8]:
+def yuyv_to_rgb(data: bytes, width: int, height: int, *, mirror: bool = False) -> NDArray[np.uint8]:
     """Convert one packed YUYV frame to an ``(height, width, 3)`` RGB uint8 array.
 
     ``cv2.cvtColor`` is the conversion the showcase uses: about an order of
@@ -232,6 +232,11 @@ def yuyv_to_rgb(data: bytes, width: int, height: int) -> NDArray[np.uint8]:
     if width <= 0 or height <= 0 or width % 2 or pairs.size != expected:
         raise ValueError(f"expected {expected} YUYV bytes for {width}x{height}, got {pairs.size}")
     converted = cv2.cvtColor(pairs.reshape(height, width, 2), cv2.COLOR_YUV2RGB_YUYV)
+    if mirror:
+        # A mirror is what people expect when they face a screen: flipping the
+        # frame before detection keeps the drawn labels readable and makes
+        # every coordinate (boxes, keypoints, gaze) match what the screen shows.
+        converted = cv2.flip(converted, 1)
     return np.asarray(converted, dtype=np.uint8)
 
 
@@ -501,12 +506,13 @@ class UvcCamera:
         data = captured.data
         width = self._config.width
         height = self._config.height
+        mirror = self._config.mirror
         return VideoFrame(
             seq=seq,
             t=timestamp,
             width=width,
             height=height,
-            decode=lambda: yuyv_to_rgb(data, width, height),
+            decode=lambda: yuyv_to_rgb(data, width, height, mirror=mirror),
         )
 
     def _fallback_timestamp(self) -> float:

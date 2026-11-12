@@ -390,6 +390,16 @@ def test_yuyv_to_rgb_decodes_one_frame() -> None:
     assert rgb.dtype == np.uint8
 
 
+def test_yuyv_to_rgb_can_mirror_the_frame_left_to_right() -> None:
+    width, height = 64, 48
+    raw = np.random.default_rng(7).integers(0, 256, size=width * height * 2, dtype=np.uint8)
+
+    plain = yuyv_to_rgb(raw.tobytes(), width, height)
+    mirrored = yuyv_to_rgb(raw.tobytes(), width, height, mirror=True)
+
+    np.testing.assert_array_equal(mirrored, plain[:, ::-1, :])
+
+
 def test_yuyv_to_rgb_rejects_a_truncated_buffer() -> None:
     with pytest.raises(ValueError):
         yuyv_to_rgb(b"\x80\x80", 8, 4)
