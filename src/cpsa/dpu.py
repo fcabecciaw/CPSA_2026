@@ -14,6 +14,7 @@ The quantization convention of the Vitis AI DPU is a signed ``fix_point``:
 from __future__ import annotations
 
 import gc
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -183,6 +184,14 @@ class DpuRunner:
             )
         self._outputs = tuple(output_tensors)
         self._executions = 0
+        # VART's Python execute_async blocks for the whole DPU job on the KV260
+        # (measured 8.9 ms for YOLOv5-nano, wait() then returns in 0.04 ms) but
+        # releases the GIL while it does. One worker thread runs execute_async +
+        # wait, so the caller's preprocessing/decoding of another frame really
+        # overlaps the DPU instead of adding to it.
+        self._worker: ThreadPoolExecutor | None = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="cpsa-dpu"
+        )
 
     def close(self) -> None:
         """Release the VART runner and the xir graph (R2-G model swap).
@@ -192,6 +201,11 @@ class DpuRunner:
         the release path of the Python bindings.
         """
 
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            # Finish the jobs in flight before VART frees the graph's memory.
+            worker.shutdown(wait=True)
         self._runner = None
         self._graph = None
         gc.collect()
@@ -216,18 +230,30 @@ class DpuRunner:
         return [np.zeros([1, *tensor.shape], dtype=np.int8) for tensor in self._outputs]
 
     def execute(self, inputs: list[NDArray[np.int8]], outputs: list[NDArray[np.int8]]) -> Any:
-        """Start one asynchronous DPU job and return its opaque job handle.
+        """Start one DPU job on the runner's worker thread and return its handle.
 
-        The VART Python binding returns a ``(job_id, status)`` tuple; it is passed
-        back to :meth:`wait` unchanged, exactly as VART expects.
+        The job runs VART's ``execute_async`` and ``wait`` (whose ``(job_id,
+        status)`` tuple stays inside the thread); the returned handle is a
+        :class:`~concurrent.futures.Future` that :meth:`wait` resolves. The
+        caller keeps ``inputs``/``outputs`` untouched until then, as before.
         """
-        self._executions += 1
-        if self._runner is None:
+        runner = self._runner
+        worker = self._worker
+        if runner is None or worker is None:
             raise RuntimeError("the DPU runner is closed")
-        return self._runner.execute_async(inputs, outputs)
+        self._executions += 1
+
+        def job() -> None:
+            handle = runner.execute_async(inputs, outputs)
+            runner.wait(handle)
+
+        return worker.submit(job)
 
     def wait(self, job: Any) -> None:
-        """Wait for a job started by :meth:`execute`."""
+        """Wait for a job started by :meth:`execute` (re-raises its error)."""
+        if isinstance(job, Future):
+            job.result()
+            return
         if self._runner is None:
             raise RuntimeError("the DPU runner is closed")
         self._runner.wait(job)
