@@ -11,7 +11,9 @@
  *
  * It keeps the API the dashboard already speaks: `setExpression`, `hold`,
  * `beginUtterance`/`endUtterance`, `setSpeaking`, `setGaze`/`updateGaze`,
- * `tick` and the speech bubble. Three.js lives here and in `particles.ts`.
+ * `tick`. The subtitles are not its business (`subtitles.ts`): the canvas
+ * subtree is never written by anything else. Three.js lives here and in
+ * `particles.ts`.
  */
 
 import * as THREE from "three";
@@ -39,7 +41,6 @@ export interface AvatarDebug {
 }
 
 export interface AvatarOptions {
-  bubble?: HTMLElement | null;
   debug?: AvatarDebug;
   /**
    * The analyser of the sentence being spoken (`voiceAudioNode()` of
@@ -54,7 +55,6 @@ export class AvatarView {
   readonly expressions = new ExpressionController();
 
   private readonly root: HTMLElement;
-  private readonly bubble: HTMLElement | null;
   private readonly renderer: THREE.WebGLRenderer | null;
   private readonly scene = new THREE.Scene();
   private readonly camera = new THREE.PerspectiveCamera(30, 1, 0.1, 40);
@@ -84,7 +84,6 @@ export class AvatarView {
 
   constructor(root: HTMLElement, options: AvatarOptions = {}) {
     this.root = root;
-    this.bubble = options.bubble ?? null;
     this.audio = options.audio ?? null;
     this.reducedMotion =
       typeof window.matchMedia === "function" &&
@@ -230,18 +229,6 @@ export class AvatarView {
     if (this.pinnedExpression === null) {
       this.setExpression(expression);
     }
-  }
-
-  setBubble(text: string | null): void {
-    if (this.bubble === null) {
-      return;
-    }
-    this.bubble.textContent = text ?? "";
-    this.bubble.classList.toggle("bubble-empty", text === null || text === "");
-  }
-
-  clearBubble(): void {
-    this.setBubble(null);
   }
 
   // --- voice ---------------------------------------------------------------

@@ -11,7 +11,7 @@ sphere says with colour, motion and shape.
 | File | What it owns |
 |---|---|
 | `index.ts` | Public surface: `AvatarView`, `VoiceEnergy`, the mood presets and animator. |
-| `view.ts` | The three.js scene, camera, frame loop, `voiceAudioNode()` voice hook, presence and the face API used by `main.ts` (`tick`, `setExpression`, `setGaze`, `setSpeaking`, `beginUtterance`, `hold`, bubble). |
+| `view.ts` | The three.js scene, camera, frame loop, `voiceAudioNode()` voice hook, presence and the face API used by `main.ts` (`tick`, `setExpression`, `setGaze`, `setSpeaking`, `beginUtterance`, `hold`); the subtitles live in `src/subtitles.ts`. |
 | `particles.ts` | The point cloud: Fibonacci sphere, palette, wave/speaking/gaze shaders, sprite size, uniforms. |
 | `moods.ts` | The seven moods as surface parameters, `MoodAnimator` (smooth blending, surprised impulse, reduced-motion damping). |
 | `audio.ts` | `VoiceEnergy`: analyser RMS with fast attack and slower release, plus a procedural syllable envelope for Web Speech. |

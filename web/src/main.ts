@@ -19,6 +19,8 @@ import { MetricsTracker } from "./metrics";
 import { ShowcaseView } from "./showcase";
 import { RoomView } from "./room";
 import { DashboardStore } from "./state";
+import { Subtitles } from "./subtitles";
+import { SHOW_BRAND_LINE } from "./uiconfig";
 import { UiModeController } from "./uimode";
 import { FIXED_VOICE, VoiceEngine, voiceAudioNode } from "./voice";
 import { attachVoicePicker } from "./voicepicker";
@@ -68,7 +70,6 @@ const avatarDebug = import.meta.env.DEV
     }
   : undefined;
 const avatar = new AvatarView(byId("avatar"), {
-  bubble: byId("bubble"),
   debug: avatarDebug,
   // The sphere speaks with the amplitude of the local voice (R2-V); Web Speech
   // has no audio graph and falls back to the voice driver's own envelope.
@@ -79,6 +80,9 @@ if (import.meta.env.DEV) {
   (window as unknown as { __cpsaAvatar?: AvatarView }).__cpsaAvatar = avatar;
 }
 const room = new RoomView(byId("room"));
+/** ARI's line: its own node, written only when the spoken line changes. */
+const subtitles = new Subtitles(byId("bubble"));
+byId("brand-line").hidden = !SHOW_BRAND_LINE;
 
 /**
  * Presentation mode by default; the top-right button and `d` show the debug
@@ -121,7 +125,7 @@ const mind = new CognitiveAgent({
       clearTimeout(bubbleTimer);
       bubbleTimer = null;
     }
-    avatar.setBubble(text);
+    subtitles.show(text);
     avatar.beginUtterance(expression, Date.now());
     voice.speak(text, {
       onStart: () => {
@@ -137,7 +141,7 @@ const mind = new CognitiveAgent({
         }
         bubbleTimer = window.setTimeout(() => {
           bubbleTimer = null;
-          avatar.clearBubble();
+          subtitles.clear();
         }, 4_500);
       },
     });

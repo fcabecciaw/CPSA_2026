@@ -160,22 +160,25 @@ button {
   min-height: clamp(44px, 5.4vh, 64px);
 }
 
+/* The title of the demo and one line on what it is: no project acronym. */
 .brand {
   display: flex;
-  align-items: baseline;
-  gap: 0.9em;
+  flex-direction: column;
+  gap: 0.15em;
   min-width: 0;
 }
 
 .wordmark {
   margin: 0;
   font-family: var(--display);
-  font-size: clamp(17px, 1.25vw, 26px);
+  font-size: clamp(18px, 1.45vw, 30px);
   font-weight: 600;
-  letter-spacing: 0.06em;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
   color: var(--starlight);
 }
 
+.tagline,
 .brand-line {
   margin: 0;
   overflow: hidden;
@@ -183,6 +186,10 @@ button {
   color: var(--haze);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.brand-line {
+  color: var(--dusk);
 }
 
 /* Oggetti | Scheletro: one track, one luminous thumb that slides. */
@@ -460,8 +467,9 @@ button {
 }
 
 /*
- * "Cosa vede l'IA": a tab hung on the top edge of the screen, half over the
- * ring, so it covers as little of the board's own box labels as possible.
+ * "In diretta dalla telecamera": a tab hung on the top edge of the screen,
+ * half over the ring, so it covers as little of the board's box labels as
+ * possible.
  */
 .frame-title {
   position: absolute;
@@ -484,6 +492,17 @@ button {
   white-space: nowrap;
   transform: translateY(-50%);
   pointer-events: none;
+}
+
+.live-dot {
+  display: inline-block;
+  width: 0.5em;
+  height: 0.5em;
+  margin-right: 0.55em;
+  border-radius: 50%;
+  background: var(--plasma);
+  box-shadow: 0 0 0 0.18em rgba(255, 79, 216, 0.22);
+  vertical-align: 0.12em;
 }
 
 .frame-badge {
@@ -521,12 +540,19 @@ button {
   overflow: hidden;
 }
 
+/*
+ * The three subtrees of ARI's panel never size each other: the stage takes
+ * what is left, the subtitles and the objects panel have fixed heights, and
+ * each is contained so a change inside cannot relayout or repaint the others
+ * (the sphere's canvas is never resized by a chip coming or going).
+ */
 .hologram {
   position: relative;
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
+  contain: size layout paint;
 }
 
 .hologram-avatar {
@@ -632,14 +658,20 @@ button {
 }
 
 /* ARI's sentence, as subtitles: the line people read from the back. */
-.bubble {
+.subtitles {
   flex: none;
   display: grid;
-  place-content: center;
-  min-height: 2.7em;
-  margin: clamp(4px, 0.8vh, 12px) auto 0;
-  max-width: 30ch;
+  place-items: center;
+  height: 3.9em;
+  margin-top: clamp(4px, 0.8vh, 12px);
   font-size: clamp(20px, 1.75vw, 38px);
+  contain: size layout paint;
+}
+
+.bubble {
+  margin: 0;
+  max-width: 30ch;
+  font-size: 1em;
   font-weight: 600;
   line-height: 1.28;
   letter-spacing: -0.005em;
@@ -653,6 +685,16 @@ button {
     filter 420ms var(--ease-out);
 }
 
+.bubble[data-length="medium"] {
+  max-width: 36ch;
+  font-size: 0.86em;
+}
+
+.bubble[data-length="long"] {
+  max-width: 48ch;
+  font-size: 0.72em;
+}
+
 .bubble-empty {
   opacity: 0;
   transform: translateY(6px);
@@ -661,12 +703,18 @@ button {
 
 /* --- what ARI sees: chips in presentation, lists in debug --------------- */
 
+/* Two rows of chips and the invitation, at a fixed height. */
 .showcase {
   flex: none;
   display: flex;
   flex-direction: column;
+  gap: 0.35em;
+  height: 6.6em;
   min-height: 0;
-  padding-top: clamp(10px, 1.8vh, 26px);
+  padding-top: 0.5em;
+  font-size: clamp(17px, 1.4vw, 30px);
+  overflow: hidden;
+  contain: size layout paint;
 }
 
 .showcase-chips {
@@ -691,7 +739,7 @@ button {
   border: 1px solid var(--rim-strong);
   border-radius: 999px;
   background: var(--glass-strong);
-  font-size: clamp(17px, 1.4vw, 30px);
+  font-size: 1em;
   font-weight: 600;
   line-height: 1.2;
   color: var(--starlight);
@@ -716,7 +764,7 @@ button {
 
 .view-note {
   margin: 0;
-  font-size: clamp(16px, 1.25vw, 26px);
+  font-size: 0.86em;
   text-align: center;
   color: var(--haze);
 }
@@ -795,16 +843,19 @@ button {
   font-size: 0.9em;
 }
 
-[data-ui="debug"] .bubble {
-  max-width: none;
-  min-height: 2.6em;
+[data-ui="debug"] .subtitles {
   font-size: clamp(16px, 1.15vw, 23px);
 }
 
+[data-ui="debug"] .bubble {
+  max-width: none;
+}
+
 [data-ui="debug"] .showcase {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   gap: clamp(10px, 1.6vh, 22px);
-  overflow: hidden;
+  height: auto;
+  font-size: 1em;
 }
 
 [data-ui="debug"] .view-note {

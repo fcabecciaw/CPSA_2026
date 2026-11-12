@@ -5,7 +5,9 @@
  * `protocol.ts` (PRODUCT.md: the booth UI is Italian).
  */
 
-export const APP_LABEL = "CPSA";
+/** The page's title and its one-line subtitle (no project acronym). */
+export const APP_TITLE = "Cosa vede l'IA";
+export const APP_TAGLINE = "Visione artificiale in tempo reale, su un chip";
 
 export const CONNECTION_LABEL = {
   connecting: "Connessione…",

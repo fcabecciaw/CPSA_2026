@@ -39,11 +39,14 @@ A top bar over a diptych: the camera on the left, ARI on the right, both the
 height of the 4:3 frame and centred. One visual language follows ARI's
 particle sphere: cyan, violet and magenta over a violet-black background.
 
-1. **Top bar** — the `CPSA` wordmark with `EOLAB, Università di Cagliari`, the
-   `Oggetti | Scheletro` segmented control, the connection dot, the mute
-   button and the debug toggle.
+1. **Top bar** — the title “Cosa vede l'IA” with its line “Visione artificiale
+   in tempo reale, su un chip”, the `Oggetti | Scheletro` segmented control,
+   the connection dot, the mute button and the debug toggle. “EOLAB,
+   Università di Cagliari” is built in but hidden until its wording is
+   confirmed: `VITE_SHOW_BRAND_LINE=1 npm run build` shows it
+   (`src/uiconfig.ts`).
 2. **Left pane** — `/video.mjpeg` (F-K2) in a rounded 4:3 frame with a thin
-   gradient ring and the “Cosa vede l'IA” tab on its top edge. With no frames
+   gradient ring and the “In diretta dalla telecamera” tab on its top edge. With no frames
    it shows “In attesa della telecamera…”; a broken stream shows “Video non
    disponibile” and retries after 1 s, doubling up to 10 s. While the socket is
    not open, the placeholder is back instead of a frozen last frame.
@@ -51,6 +54,15 @@ particle sphere: cyan, violet and magenta over a violet-black background.
    the objects view, one chip per kind of object (`persona`, with a small `2×`
    badge from two up) plus “Mostra un oggetto alla telecamera”. In the
    skeleton view the sphere shrinks and the MoveNet room fills the pane.
+
+   The pane holds three independent subtrees with one writer each: ARI's
+   stage (`#hologram`, `AvatarView` and the voice gate), the subtitles
+   (`#subtitles`, `Subtitles`, written only when the spoken line changes) and
+   the objects panel (`#showcase-panel`, `ShowcaseView`, refreshed every
+   500 ms). The subtitles and the objects panel have fixed heights and all
+   three use CSS containment, so a chip coming or going never rewrites the
+   subtitle, moves it or resizes the sphere's canvas
+   (`src/subtitles.test.ts` checks it over 100 panel updates).
 
 ### Presentation and debug modes
 
@@ -104,6 +116,8 @@ with `bench=1` for a real frame-rate reading).
 - `src/metrics.ts` — the fps and latency readout;
 - `src/video.ts` — the MJPEG pane with its retry;
 - `src/showcase.ts` — the object chips and the debug lists;
+- `src/subtitles.ts` — ARI's current line under the sphere;
+- `src/uiconfig.ts` — build-time switches (`VITE_SHOW_BRAND_LINE`);
 - `src/state.ts` — the last snapshot of each topic;
 - `src/protocol.ts` — protocol v1 types and validation (F-K1);
 - `src/labels.ts` — Italian copy and number formatting;

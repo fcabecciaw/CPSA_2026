@@ -5,15 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#07061a" />
-    <meta name="description" content="CPSA: cosa vede l'IA sulla Kria KV260." />
-    <title>CPSA · Cosa vede l'IA</title>
+    <meta
+      name="description"
+      content="Cosa vede l'IA: visione artificiale in tempo reale sulla Kria KV260."
+    />
+    <title>Cosa vede l'IA</title>
   </head>
   <body>
     <div class="app">
       <header class="topbar">
         <div class="brand">
-          <p class="wordmark">CPSA</p>
-          <p class="brand-line">EOLAB, Università di Cagliari</p>
+          <h1 class="wordmark">Cosa vede l'IA</h1>
+          <p class="tagline">Visione artificiale in tempo reale, su un chip</p>
+          <!-- Shown only with VITE_SHOW_BRAND_LINE=1 (src/uiconfig.ts). -->
+          <p class="brand-line" id="brand-line" hidden>EOLAB, Università di Cagliari</p>
         </div>
 
         <div class="modes" role="group" aria-label="Vista del modello">
@@ -105,7 +110,9 @@
               <p id="video-note" class="frame-note">In attesa della telecamera…</p>
               <span class="frame-badge debug-only" aria-hidden="true">RGB</span>
             </div>
-            <h2 id="camera-title" class="frame-title">Cosa vede l'IA</h2>
+            <h2 id="camera-title" class="frame-title">
+              <span class="live-dot" aria-hidden="true"></span>In diretta dalla telecamera
+            </h2>
           </div>
         </section>
 
@@ -116,6 +123,12 @@
         >
           <h2 id="showcase-title" class="sr-only">ARI, l'assistente che guarda</h2>
 
+          <!--
+            Three independent subtrees, each with its own writer and a fixed
+            size: ARI (avatar canvas + voice gate), the subtitles (Subtitles,
+            only on a new line) and the objects panel (ShowcaseView, 2 Hz).
+            Nothing the objects panel does can resize or rewrite the others.
+          -->
           <div class="hologram" id="hologram">
             <div class="hologram-avatar" id="avatar" aria-hidden="true"></div>
             <div class="hologram-info">
@@ -131,7 +144,9 @@
             </div>
           </div>
 
-          <p class="bubble bubble-empty" id="bubble" role="status" aria-live="polite"></p>
+          <div class="subtitles" id="subtitles">
+            <p class="bubble bubble-empty" id="bubble" role="status" aria-live="polite"></p>
+          </div>
 
           <div class="showcase" id="showcase-panel">
             <ul
@@ -148,6 +163,7 @@
               <ul class="showcase-objects" id="showcase-objects"></ul>
             </section>
             <p class="view-note" id="showcase-empty">Mostra un oggetto alla telecamera</p>
+            <p class="view-meta debug-only" id="showcase-meta"></p>
           </div>
 
           <div class="room-view" id="room" hidden></div>
@@ -183,7 +199,6 @@
             >
           </p>
 
-          <p class="view-meta debug-only" id="showcase-meta"></p>
         </section>
       </main>
 
