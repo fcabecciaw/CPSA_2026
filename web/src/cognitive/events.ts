@@ -75,7 +75,6 @@ export type CognitiveEvent =
       /** Absence before a return with >= 1 person, `null` otherwise. */
       returnAfterS: number | null;
     })
-  | (EventBase & { type: "first_seen"; label: string; count: number })
   | (EventBase & { type: "return"; label: string; absenceS: number; count: number })
   | (EventBase & { type: "dwell"; label: string; seconds: number; count: number })
   | (EventBase & {
@@ -122,7 +121,6 @@ export function objectKeyOf(event: CognitiveEvent): string | null {
   switch (event.type) {
     case "appear":
     case "disappear":
-    case "first_seen":
     case "return":
     case "dwell":
       return event.label;
@@ -158,8 +156,6 @@ export function describeEvent(event: CognitiveEvent): string {
       return `sparisce ${event.label}`;
     case "count":
       return `persone ${event.from} → ${event.to}`;
-    case "first_seen":
-      return `prima volta: ${event.label}`;
     case "return":
       return `ritorna ${event.label}`;
     case "dwell":

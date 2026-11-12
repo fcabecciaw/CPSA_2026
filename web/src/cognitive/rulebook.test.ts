@@ -61,7 +61,8 @@ describe("F-E4 #8 — Italian grammar for all 80 COCO classes", () => {
   });
 
   it("keeps the phrase slots renderable and short", () => {
-    const allowed = /^\{(oggetto|oggetto2|n|n2|ora|minuti|secondi|fps|dpu|totale|altro)\}$/;
+    const allowed =
+      /^\{(oggetto|oggetto2|n|n2|ora|minuti|secondi|fps|dpu|totale|altro|Ordinale|singolare|conteggio|plurale|oggettoNumero|numero|volte)\}$/;
     for (const phrase of allPhrases()) {
       expect(wordCount(phrase)).toBeLessThanOrEqual(12);
       for (const slot of phrase.matchAll(/\{[^}]+\}/g)) {

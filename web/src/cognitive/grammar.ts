@@ -217,6 +217,49 @@ export function numberWord(count: number): string {
   return String(count);
 }
 
+const ORDINALS: Record<Gender, readonly string[]> = {
+  m: [
+    "",
+    "primo",
+    "secondo",
+    "terzo",
+    "quarto",
+    "quinto",
+    "sesto",
+    "settimo",
+    "ottavo",
+    "nono",
+    "decimo",
+  ],
+  f: [
+    "",
+    "prima",
+    "seconda",
+    "terza",
+    "quarta",
+    "quinta",
+    "sesta",
+    "settima",
+    "ottava",
+    "nona",
+    "decima",
+  ],
+};
+
+/** Ordinal word agreed with the noun: "terzo cellulare", "terza tazza". */
+export function ordinalWord(count: number, gender: Gender): string {
+  if (Number.isInteger(count) && count >= 1 && count <= 10) {
+    return ORDINALS[gender][count];
+  }
+  // From 11 on the spoken form is unusual: the digit plus the ordinal mark.
+  return `${count}${gender === "f" ? "ª" : "°"}`;
+}
+
+/** Upper-case the first letter, for a sentence that starts with a slot. */
+export function capitalizeFirst(text: string): string {
+  return text.length === 0 ? text : text[0].toUpperCase() + text.slice(1);
+}
+
 /** Grammar of a label; unknown labels fall back to a neutral masculine noun. */
 export function nounGrammar(label: string): NounGrammar {
   return (
@@ -301,6 +344,41 @@ export interface PhraseSlots {
   altro?: string;
   /** A whole sentence a scene already rendered (`scene.ts`). */
   testo?: string;
+  /** Counting lines: capitalised ordinal, bare noun and agreed totals. */
+  Ordinale?: string;
+  singolare?: string;
+  conteggio?: string;
+  plurale?: string;
+  oggettoNumero?: string;
+  numero?: string;
+  volte?: string;
+}
+
+/**
+ * Slots of the `memory.object_count` family: the day's stable appearance count
+ * rendered with the class gender and number ("Terzo cellulare", "Terza tazza",
+ * "Terzo paio di forbici", "tre tazze"). Plural-only nouns take "paio di" in
+ * the ordinal forms, so no sentence ever says "terze forbici".
+ */
+export function objectCountSlots(label: string, count: number): PhraseSlots {
+  const noun = nounGrammar(label);
+  const singular = noun.singular;
+  const ordinal =
+    singular === null
+      ? `${ordinalWord(count, "m")} paio di`
+      : ordinalWord(count, noun.gender);
+  return {
+    Ordinale: capitalizeFirst(ordinal),
+    singolare: singular ?? noun.plural,
+    conteggio: numberWord(count),
+    plurale: noun.plural,
+    oggettoNumero:
+      singular === null
+        ? joinArticle("il", `paio di ${noun.plural}`)
+        : joinArticle(noun.article, singular),
+    numero: numberWord(count),
+    volte: numberWord(count),
+  };
 }
 
 /** Fill `{slot}` placeholders; unknown slots stay visible for the test suite. */

@@ -200,7 +200,10 @@ function classRules(): Rule[] {
           !event.scenery &&
           !event.doubtful &&
           !memory.working.focus.crowd &&
-          memory.working.focus.mode === "yolox",
+          memory.working.focus.mode === "yolox" &&
+          // The first stable sighting of the day belongs to the class rule;
+          // from the second on, `memory.object_count` counts it.
+          (memory.day.classes[event.label]?.times ?? 0) <= 1,
       };
     });
 }
@@ -394,25 +397,33 @@ const objectFamilyRules: Rule[] = [
       !memory.working.focus.crowd,
   },
   {
-    id: "memory.first_object",
-    category: "memory",
-    priority: 62,
-    cooldown_s: 30,
-    per_object_cooldown_s: 120,
+    id: "memory.object_count",
+    category: "object",
+    // Just below the ordinary class rules (the lowest starts at 52), so the
+    // class-specific line keeps the first sighting and this line counts the
+    // stable re-appearances ("terzo cellulare di oggi").
+    priority: 51,
+    cooldown_s: 0,
+    per_object_cooldown_s: 60,
     expression: "happy",
     gaze: "object",
     model: "yolox",
     phrases: [
-      "Prima volta oggi per {oggetto}: benvenuto.",
-      "Novità di oggi: {oggetto}.",
-      "Oggi è la prima volta che vedo {oggetto}.",
+      "{Ordinale} {singolare} di oggi.",
+      "{Ordinale} {singolare} della giornata.",
+      "E siamo a ben {conteggio} {plurale}!",
+      "Già {conteggio} {plurale} oggi!",
+      "Ecco {oggettoNumero} numero {numero}.",
+      "Ancora {plurale}: siamo a {volte} volte.",
     ],
-    // `first_seen` is synthesised only when the day memory has no class yet.
     when: (event, memory) =>
-      event.type === "first_seen" &&
+      event.type === "appear" &&
       event.label !== "persona" &&
+      !event.scenery &&
+      !event.doubtful &&
       !memory.working.focus.crowd &&
-      memory.working.focus.mode === "yolox",
+      memory.working.focus.mode === "yolox" &&
+      (memory.day.classes[event.label]?.times ?? 0) >= 2,
   },
   {
     id: "memory.people_total",

@@ -11,7 +11,12 @@
 
 import type { CognitiveEvent, SceneLineKind, SceneName } from "./events";
 import { objectKeyOf } from "./events";
-import { nounPhrase, renderPhrase, type PhraseSlots } from "./grammar";
+import {
+  nounPhrase,
+  objectCountSlots,
+  renderPhrase,
+  type PhraseSlots,
+} from "./grammar";
 import type { CognitiveMemory } from "./memory";
 import type { WorldModelName } from "./events";
 
@@ -157,7 +162,6 @@ function two(value: number): string {
 export function slotsFor(event: CognitiveEvent): PhraseSlots {
   switch (event.type) {
     case "appear":
-    case "first_seen":
     case "return":
       return {
         oggetto: nounPhrase(event.label, event.count),
@@ -223,6 +227,12 @@ export function renderRulePhrase(
   const slots: PhraseSlots = {
     ...slotsFor(event),
     totale: it(memory.day.totals.peopleSeen),
+    ...(event.type === "appear"
+      ? objectCountSlots(
+          event.label,
+          memory.day.classes[event.label]?.times ?? 0,
+        )
+      : {}),
   };
   const rendered = rule.phrases.map((phrase) => renderPhrase(phrase, slots));
   const fresh = rendered.filter((text) => text !== previous);

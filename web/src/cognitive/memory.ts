@@ -188,16 +188,18 @@ export class CognitiveMemory {
     switch (event.type) {
       case "appear": {
         const cls = this.class(event.label, now);
+        // One stable appearance per `appear`: `perception.ts` already ignores
+        // flicker (6 of 10 frames) and only re-emits after a real absence.
         cls.times += 1;
+        cls.lastSeenAt = now;
         if (!event.scenery && event.label !== "persona") {
           totals.objectsSeen += event.count;
         }
         return;
       }
       case "return": {
-        const cls = this.class(event.label, now);
-        cls.times += 1;
-        cls.lastSeenAt = now;
+        // Same appearance as the `appear` above, so it must not double count.
+        this.class(event.label, now).lastSeenAt = now;
         return;
       }
       case "count": {

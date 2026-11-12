@@ -122,9 +122,8 @@ export class CognitiveAgent {
     }
 
     const events = this.perception.update(state, now);
-    const extended = this.withFirstSeen(events, now);
     this.prepare(events, now);
-    this.emit([...modeEvents, ...extended], now);
+    this.emit([...modeEvents, ...events], now);
     return events;
   }
 
@@ -277,29 +276,6 @@ export class CognitiveAgent {
       crowd: world.crowd,
       present: this.perception.presentLabels(),
     });
-  }
-
-  /** `first_seen` is a memory fact, so it is synthesised here, before observe. */
-  private withFirstSeen(
-    events: readonly CognitiveEvent[],
-    now: number,
-  ): CognitiveEvent[] {
-    const extended: CognitiveEvent[] = [];
-    for (const event of events) {
-      if (event.type === "appear" && event.label !== "persona") {
-        const known = this.memory.day.classes[event.label];
-        if (known === undefined || known.times === 0) {
-          extended.push({
-            type: "first_seen",
-            label: event.label,
-            count: event.count,
-            now,
-          });
-        }
-      }
-      extended.push(event);
-    }
-    return extended;
   }
 
   private emit(events: readonly CognitiveEvent[], now: number): void {
