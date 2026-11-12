@@ -61,7 +61,7 @@ def test_the_shipped_configuration_parses_and_names_the_machine() -> None:
     assert config.model.path == Path("models/yolox_nano.xmodel")
     assert config.movenet.name == "movenet"
     assert config.movenet.path == Path("models/movenet.xmodel")
-    assert config.movenet.enabled is True
+    assert config.movenet.enabled is False
     assert config.movenet.publish_hz == 30.0
     assert config.camera.device == "auto"
     assert config.camera.width == 640 and config.camera.height == 480

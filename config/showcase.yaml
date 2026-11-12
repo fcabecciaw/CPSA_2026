@@ -33,7 +33,7 @@ model:                        # YOLOX-nano from the Vitis AI model zoo, COCO-80
 
 movenet:                      # single-pose skeleton, runs alongside YOLOX (R2-G)
   path: models/movenet.xmodel # compiled KV260 xmodel (deploy.sh --movenet-model)
-  enabled: true               # false: YOLOX only, no pose.state
+  enabled: false              # false: YOLOX only, no pose.state (off until the exclusive swap lands)
   publish_hz: 30              # cap of pose.state, below the 60 fps frame rate
 
 labels: it                    # it | en: language of the boxes and of the panel
