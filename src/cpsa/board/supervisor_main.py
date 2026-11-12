@@ -81,6 +81,24 @@ def _load_hand_modes(config: Config) -> dict[str, Mode]:
     return {"hologram": HologramMode(config), "rps": RpsMode(config)}
 
 
+def _load_showcase_mode(config: Config) -> dict[str, Mode]:
+    """Build the ``showcase`` mode when the config has a ``showcase`` section.
+
+    Like the hand modes it is constructed but not started, so a missing model
+    file or camera only fails the start of the mode the operator selects.
+    """
+    if config.showcase is None:
+        return {}
+    try:
+        from cpsa.board.showcase_mode import ShowcaseMode
+    except ImportError as exc:
+        raise StartupError(
+            "the showcase mode is configured but its dependencies are not installed "
+            f"(install the 'vision' and 'camera' extras): {exc}"
+        ) from exc
+    return {"showcase": ShowcaseMode(config)}
+
+
 def _build_server(
     config: Config, on_command: Callable[[str, dict[str, Any], int | None], None]
 ) -> Any:
@@ -128,6 +146,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         modes: dict[str, Mode] = {"medical": _load_medical_mode(config, args.fake_medical)}
         modes.update(_load_hand_modes(config))
+        modes.update(_load_showcase_mode(config))
         if default_mode != "idle" and default_mode not in modes:
             raise StartupError(f"unknown supervisor default_mode {default_mode!r}")
         supervisor_holder: list[Supervisor] = []

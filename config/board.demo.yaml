@@ -3,6 +3,7 @@
 # This is config/board.yaml specialized for the Thursday demo:
 # - the DPU xmodel pose backend at 512x384,
 # - the web dashboard on 0.0.0.0:8080, booting in the `hologram` hand demo,
+# - the `showcase` mode ("Cosa vede l'IA") on the pre-trained YOLOX-nano detector,
 # - evidence and logs under /home/kria/cpsa/runs/.
 #
 # `server` and `supervisor` are the F6 sections consumed by `cpsa-supervisor`.
@@ -169,7 +170,7 @@ server:
 
 # F6: mode selected by cpsa-supervisor at startup.
 supervisor:
-  default_mode: hologram          # idle | hologram | rps | medical
+  default_mode: hologram          # idle | hologram | rps | medical | showcase
 
 # Camera-only medical mode (FR-026): the BlueCoins are never scanned or connected,
 # and the vision trigger starts and ends the episodes instead of the IMU.
@@ -209,3 +210,17 @@ hands:
     result_s: 3.0                 # how long win/lose/draw/unclear stays on screen
     score_reset_s: 20.0           # score reset after this long without a hand
     min_share: 0.6                # minimum vote share for a recognized gesture
+
+# AI showcase (F-S3): the `showcase` mode ("Cosa vede l'IA") runs a pre-trained
+# model-zoo detector on the RGB camera of `vision.camera` above and draws its
+# boxes on the dashboard video. Nothing here is trained or quantized by us.
+showcase:
+  default_model: yolox_nano       # the model the mode starts
+  labels: it                      # it | en: language of the overlay and of the panel
+  max_fps: 30                     # processing cap, frames per second
+  models:
+    - name: yolox_nano            # Vitis-AI model zoo, YOLOX-nano COCO 80 classes
+      kind: yolox                 # decoder family; only "yolox" is accepted now
+      path: models/yolox_nano.xmodel  # compiled KV260 xmodel (deploy --showcase-model)
+      conf_thr: 0.35              # minimum score of a kept box
+      iou_thr: 0.45               # NMS IoU threshold

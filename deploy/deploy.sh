@@ -22,12 +22,14 @@ readonly REMOTE_DIR="cpsa"
 readonly REMOTE_MODEL="models/pose_halfbust62.xmodel"
 readonly REMOTE_HAND_MODEL="models/hand21_topdown.xmodel"
 readonly REMOTE_RPS_MODEL="models/rps_mlp.npz"
+readonly REMOTE_MODELS_DIR="models"
 readonly SUPERVISOR_PORT="8080"
 
 host="$DEFAULT_HOST"
 user="$DEFAULT_USER"
 model=""
 hand_model=""
+showcase_models=()
 wheels=""
 dry_run=0
 restart=1
@@ -49,6 +51,12 @@ Options:
                      and `rps` modes. Without it those modes report
                      model_missing; the medical demo is unaffected.
                      models/rps_mlp.npz is copied when it exists on this PC.
+  --showcase-model PATH
+                     Compiled detector (.xmodel) for the `showcase` mode
+                     ("Cosa vede l'IA"), installed as ~/cpsa/models/<basename>.
+                     Repeatable, one flag per model; the name must match a
+                     `showcase.models[].path` of config/board.demo.yaml.
+                     Without it the mode reports model_missing.
   --host HOST        Board host or SSH alias (default: 10.42.0.83).
   --user USER        SSH user on the board (default: kria).
   --wheels DIR       Directory of linux-aarch64 / cp310 wheels prepared on this
@@ -135,6 +143,11 @@ while (($# > 0)); do
       hand_model="$2"
       shift 2
       ;;
+    --showcase-model)
+      [[ $# -ge 2 && -n "${2:-}" ]] || die "--showcase-model needs a value"
+      showcase_models+=("$2")
+      shift 2
+      ;;
     --wheels)
       [[ $# -ge 2 && -n "${2:-}" ]] || die "--wheels needs a value"
       wheels="$2"
@@ -206,6 +219,12 @@ if [[ -n "$hand_model" && ! -f "$hand_model" ]]; then
   warn "hand model file not found: $hand_model"
   preflight_failed=1
 fi
+for showcase_model in "${showcase_models[@]}"; do
+  if [[ ! -f "$showcase_model" ]]; then
+    warn "showcase model file not found: $showcase_model"
+    preflight_failed=1
+  fi
+done
 if ((preflight_failed)); then
   if ((dry_run)); then
     note "dry run: showing the plan despite the missing prerequisites above"
@@ -261,6 +280,11 @@ fi
 if [[ -n "$hand_model" ]]; then
   run rsync -az "${rsync_opts[@]}" "$hand_model" "${ssh_target}:${REMOTE_HOME}/${REMOTE_DIR}/${REMOTE_HAND_MODEL}"
 fi
+# The showcase detectors keep their file name: the mode's config names them by
+# path, and each --showcase-model lands in ~/cpsa/models/<basename>.
+for showcase_model in "${showcase_models[@]}"; do
+  run rsync -az "${rsync_opts[@]}" "$showcase_model" "${ssh_target}:${REMOTE_HOME}/${REMOTE_DIR}/${REMOTE_MODELS_DIR}/$(basename -- "$showcase_model")"
+done
 
 note "step 3: building the native Kalman kernel on the board"
 # The tracker's Kalman kernel is a C artifact, not a Python package, so `uv sync`

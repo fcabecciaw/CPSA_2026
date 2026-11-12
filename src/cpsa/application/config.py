@@ -31,9 +31,13 @@ from cpsa.vision.trigger import TriggerConfig
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 VISION_MODEL_KINDS = ("onnx", "xmodel")
-SUPERVISOR_MODES = ("idle", "hologram", "medical", "rps")
+SUPERVISOR_MODES = ("idle", "hologram", "medical", "rps", "showcase")
 MEDICAL_TRIGGERS = ("imu", "vision")
 """Episode trigger sources (FR-026)."""
+SHOWCASE_KINDS = ("yolox",)
+"""Detector families the ``showcase`` mode can decode (F-S3); only YOLOX for now."""
+SHOWCASE_LABELS = ("it", "en")
+"""Label language of the overlay and of ``showcase.state`` (Italian by default)."""
 
 TriggerMode = Literal["imu", "vision"]
 DEFAULT_CAMERA_MATCH = "RealSense"
@@ -342,6 +346,70 @@ class HandsConfig:
 
 
 @dataclass(frozen=True)
+class ShowcaseModelConfig:
+    """One detector of the ``showcase`` mode (F-S3).
+
+    ``kind`` selects the decoder family, so later plans can add MoveNet or SESR-S
+    entries without changing the shape; ``path`` is the compiled ``.xmodel`` the
+    DPU loads (relative paths resolve against the process working directory).
+    """
+
+    name: str
+    kind: str
+    path: Path
+    conf_thr: float = 0.35
+    iou_thr: float = 0.45
+
+    def __post_init__(self) -> None:
+        if self.kind not in SHOWCASE_KINDS:
+            raise ValueError(f"showcase kind must be one of {', '.join(SHOWCASE_KINDS)}")
+        if not self.name.strip():
+            raise ValueError("showcase model name must not be empty")
+        if not 0.0 <= self.conf_thr <= 1.0:
+            raise ValueError("showcase conf_thr must be in [0, 1]")
+        if not 0.0 <= self.iou_thr <= 1.0:
+            raise ValueError("showcase iou_thr must be in [0, 1]")
+
+
+@dataclass(frozen=True)
+class ShowcaseConfig:
+    """The optional ``showcase`` section: the "Cosa vede l'IA" mode (F-S3).
+
+    The mode is registered only when the document has this section. The RGB
+    camera is the one of ``vision.camera``, so the booth setup is shared with the
+    medical mode and never duplicated here.
+    """
+
+    default_model: str
+    models: tuple[ShowcaseModelConfig, ...]
+    labels: str = "it"
+    max_fps: float = 30.0
+    """Upper bound on the frames processed per second."""
+
+    def __post_init__(self) -> None:
+        if self.labels not in SHOWCASE_LABELS:
+            raise ValueError(f"showcase labels must be one of {', '.join(SHOWCASE_LABELS)}")
+        if not math.isfinite(self.max_fps) or self.max_fps <= 0.0:
+            raise ValueError("showcase max_fps must be a finite positive number")
+        if not self.models:
+            raise ValueError("showcase needs at least one model")
+        names = [model.name for model in self.models]
+        if len(set(names)) != len(names):
+            raise ValueError("showcase model names must be unique")
+        if self.default_model not in names:
+            raise ValueError("showcase default_model must name one of its models")
+
+    def model(self, name: str | None = None) -> ShowcaseModelConfig:
+        """Return the model called ``name``, or :attr:`default_model` when ``None``."""
+
+        wanted = self.default_model if name is None else name
+        for model in self.models:
+            if model.name == wanted:
+                return model
+        raise KeyError(wanted)
+
+
+@dataclass(frozen=True)
 class Config:
     log: LogConfig
     bluecoins: BlueCoinsConfig
@@ -352,6 +420,7 @@ class Config:
     vision: VisionConfig
     medical: MedicalConfig = field(default_factory=MedicalConfig)
     hands: HandsConfig | None = None
+    showcase: ShowcaseConfig | None = None
     server: ServerConfig = field(default_factory=ServerConfig)
     supervisor: SupervisorConfig = field(default_factory=SupervisorConfig)
 
@@ -397,6 +466,8 @@ def parse(data: object) -> Config:
     medical = _medical_config(root.optional_section("medical"), cooldown_s)
     hands_section = root.optional_section("hands")
     hands = _hands_config(hands_section) if hands_section is not None else None
+    showcase_section = root.optional_section("showcase")
+    showcase = _showcase_config(showcase_section) if showcase_section is not None else None
 
     if vision.fast_budget_s >= verification_deadline_s:
         raise ConfigError(
@@ -457,6 +528,7 @@ def parse(data: object) -> Config:
         vision=vision,
         medical=medical,
         hands=hands,
+        showcase=showcase,
         server=server,
         supervisor=supervisor,
     )
@@ -589,6 +661,47 @@ def _hands_rps_config(rps: _Section) -> HandsRpsConfig:
         min_share=rps.optional_fraction("min_share", 0.6),
     )
     rps.reject_unknown()
+    return config
+
+
+def _showcase_config(showcase: _Section) -> ShowcaseConfig:
+    """Build the validated optional ``showcase`` section (F-S3).
+
+    ``default_model`` must name one of ``models``: the mode starts exactly one
+    detector, and the others stay available for the later model selector. An
+    absent section leaves :attr:`Config.showcase` ``None``, so the supervisor
+    registers no ``showcase`` mode and nothing else changes.
+    """
+    default_model = showcase.text("default_model")
+    models = tuple(_showcase_model_config(model) for model in showcase.sequence("models"))
+    labels = showcase.optional_text("labels", "it")
+    if labels not in SHOWCASE_LABELS:
+        raise ConfigError("showcase.labels", f"expected one of {', '.join(SHOWCASE_LABELS)}")
+    max_fps = showcase.optional_positive("max_fps", 30.0)
+    showcase.reject_unknown()
+    names = [model.name for model in models]
+    if len(set(names)) != len(names):
+        raise ConfigError("showcase.models", "model names must be unique")
+    if default_model not in names:
+        raise ConfigError("showcase.default_model", "must name one of the showcase models")
+    return ShowcaseConfig(
+        default_model=default_model,
+        models=models,
+        labels=labels,
+        max_fps=max_fps,
+    )
+
+
+def _showcase_model_config(model: _Section) -> ShowcaseModelConfig:
+    """Build one validated ``showcase.models`` entry (F-S3)."""
+    config = ShowcaseModelConfig(
+        name=model.text("name"),
+        kind=model.choice("kind", SHOWCASE_KINDS),
+        path=Path(model.text("path")).expanduser(),
+        conf_thr=model.optional_fraction("conf_thr", 0.35),
+        iou_thr=model.optional_fraction("iou_thr", 0.45),
+    )
+    model.reject_unknown()
     return config
 
 
@@ -922,6 +1035,20 @@ class _Section:
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
             raise ConfigError(self._key(name), "expected a list of strings")
         return tuple(value)
+
+    def sequence(self, name: str) -> tuple[_Section, ...]:
+        """Return the non-empty list of mappings at ``name`` as sections.
+
+        Each entry is addressed as ``<key>[<index>]``, so a validation failure
+        names the offending field of the offending entry.
+        """
+
+        value = self._get(name)
+        if not isinstance(value, list) or not value:
+            raise ConfigError(self._key(name), "expected a non-empty list of mappings")
+        return tuple(
+            _Section(item, f"{self._key(name)}[{index}]") for index, item in enumerate(value)
+        )
 
     def positive_int(self, name: str) -> int:
         value = self._get(name)

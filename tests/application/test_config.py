@@ -610,3 +610,154 @@ def test_the_demo_config_has_the_hands_section() -> None:
     assert (config.hands.model.input_height, config.hands.model.input_width) == (256, 320)
     assert config.hands.rps is not None
     assert config.hands.rps.classifier_path == Path("models/rps_mlp.npz")
+
+
+# -- the optional showcase section (F-S3) -----------------------------------
+
+
+def showcase_document() -> dict[str, Any]:
+    """A valid document with the optional showcase section and its defaults."""
+
+    data = valid()
+    data["showcase"] = {
+        "default_model": "yolox_nano",
+        "models": [{"name": "yolox_nano", "kind": "yolox", "path": "models/yolox_nano.xmodel"}],
+    }
+    return data
+
+
+def test_a_missing_showcase_section_leaves_the_showcase_mode_off() -> None:
+    assert load(SHIPPED).showcase is None
+
+
+def test_the_showcase_defaults_are_loaded() -> None:
+    showcase = parse(showcase_document()).showcase
+
+    assert showcase is not None
+    assert showcase.default_model == "yolox_nano"
+    assert showcase.labels == "it"
+    assert showcase.max_fps == pytest.approx(30.0)
+    assert len(showcase.models) == 1
+    model = showcase.models[0]
+    assert (model.name, model.kind) == ("yolox_nano", "yolox")
+    assert model.path == Path("models/yolox_nano.xmodel")
+    assert (model.conf_thr, model.iou_thr) == (0.35, 0.45)
+    assert showcase.model() is model
+
+
+def test_the_showcase_values_are_loaded() -> None:
+    data = showcase_document()
+    data["showcase"] = {
+        "default_model": "second",
+        "labels": "en",
+        "max_fps": 12.5,
+        "models": [
+            {
+                "name": "first",
+                "kind": "yolox",
+                "path": "~/models/first.xmodel",
+                "conf_thr": 0.2,
+                "iou_thr": 0.6,
+            },
+            {"name": "second", "kind": "yolox", "path": "models/second.xmodel"},
+        ],
+    }
+
+    showcase = parse(data).showcase
+
+    assert showcase is not None
+    assert showcase.default_model == "second"
+    assert showcase.labels == "en"
+    assert showcase.max_fps == pytest.approx(12.5)
+    assert [model.name for model in showcase.models] == ["first", "second"]
+    assert showcase.models[0].path == Path("~/models/first.xmodel").expanduser()
+    assert (showcase.model().conf_thr, showcase.model().iou_thr) == (0.35, 0.45)
+    assert showcase.model("first").conf_thr == pytest.approx(0.2)
+    with pytest.raises(KeyError):
+        showcase.model("third")
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("showcase", []),
+        ("showcase.default_model", ""),
+        ("showcase.labels", "de"),
+        ("showcase.max_fps", 0),
+        ("showcase.models", []),
+        ("showcase.models", {"yolox_nano": {}}),
+        ("showcase.models.0.kind", "movenet"),
+        ("showcase.models.0.path", ""),
+        ("showcase.models.0.conf_thr", 1.5),
+        ("showcase.models.0.iou_thr", -0.1),
+        ("showcase.models.0.unknown", 1),
+        ("showcase.unknown", 1),
+    ],
+)
+def test_invalid_showcase_value_is_named(key: str, value: object) -> None:
+    data = showcase_document()
+    if key == "showcase":
+        data["showcase"] = value
+    elif key.startswith("showcase.models.0."):
+        data["showcase"]["models"][0][key.rpartition(".")[2]] = value
+    elif key == "showcase.models":
+        data["showcase"]["models"] = value
+    else:
+        data["showcase"][key.rpartition(".")[2]] = value
+
+    with pytest.raises(ConfigError) as info:
+        parse(data)
+    expected = key.replace("showcase.models.0.", "showcase.models[0].")
+    assert info.value.key == expected
+
+
+def test_the_showcase_default_model_must_be_configured() -> None:
+    data = showcase_document()
+    data["showcase"]["default_model"] = "movenet"
+
+    with pytest.raises(ConfigError) as info:
+        parse(data)
+
+    assert info.value.key == "showcase.default_model"
+
+
+def test_showcase_model_names_must_be_unique() -> None:
+    data = showcase_document()
+    data["showcase"]["models"].append(
+        {"name": "yolox_nano", "kind": "yolox", "path": "models/other.xmodel"}
+    )
+
+    with pytest.raises(ConfigError) as info:
+        parse(data)
+
+    assert info.value.key == "showcase.models"
+
+
+def test_a_missing_showcase_key_is_named() -> None:
+    data = showcase_document()
+    del data["showcase"]["models"][0]["name"]
+
+    with pytest.raises(ConfigError) as info:
+        parse(data)
+
+    assert info.value.key == "showcase.models[0].name"
+
+
+def test_the_showcase_mode_is_a_valid_default_mode() -> None:
+    data = valid()
+    data["supervisor"] = {"default_mode": "showcase"}
+
+    assert parse(data).supervisor.default_mode == "showcase"
+
+
+def test_the_demo_config_has_the_showcase_section() -> None:
+    config = load(REPO_ROOT / "config" / "board.demo.yaml")
+
+    assert config.showcase is not None
+    assert config.showcase.default_model == "yolox_nano"
+    assert config.showcase.labels == "it"
+    assert config.showcase.max_fps == pytest.approx(30.0)
+    model = config.showcase.model()
+    assert model.kind == "yolox"
+    assert model.path == Path("models/yolox_nano.xmodel")
+    assert (model.conf_thr, model.iou_thr) == (0.35, 0.45)

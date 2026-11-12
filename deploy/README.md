@@ -137,7 +137,8 @@ The script:
 1. Checks SSH, `web/dist/index.html` and the `--model` file.
 2. Rsyncs the repository to `kria@HOST:~/cpsa` (excluding `.git`, `ml/`,
    `build/`, `.venv`, `node_modules`, `runs/` and PC caches), then `web/dist`
-   and the model to `~/cpsa/models/pose_halfbust62.xmodel`.
+   and the model to `~/cpsa/models/pose_halfbust62.xmodel`; `--hand-model` and
+   each `--showcase-model` land under `~/cpsa/models/` too.
 3. Builds the native Kalman kernel on the board: `cc -O2 -std=c99 -fPIC
    -shared` from `native/kalman2d/kalman2d.c` into
    `src/cpsa/adapters/native/lib/libcpsa_kalman2d.so` (see
@@ -182,6 +183,8 @@ The script:
 | `--host` | `10.42.0.83` | Board host or SSH alias. |
 | `--user` | `kria` | SSH user; files still go to `/home/kria/cpsa` and the service runs as `kria`. |
 | `--model` | required | `.xmodel` to install as `~/cpsa/models/pose_halfbust62.xmodel`. |
+| `--hand-model` | none | HAND21 `.xmodel` to install as `~/cpsa/models/hand21_topdown.xmodel`, for `hologram` and `rps`. |
+| `--showcase-model` | none | Detector `.xmodel` of the `showcase` mode, installed as `~/cpsa/models/<basename>`; repeatable (see [The AI showcase mode](#the-ai-showcase-mode)). |
 | `--wheels` | none | Offline wheel directory (see below). |
 | `--no-restart` | off | Leave an already-running supervisor alone; start it only if inactive. |
 | `--skip-warble` | off | Do not rebuild and reinstall the debug `warble`. Faster; the MetaWear then aborts with `*** buffer overflow detected ***` unless the debug build is already in the venv. |
@@ -391,6 +394,29 @@ boot and after every restart, so no `mode.set` command is needed.
 `deploy.sh` already enables both units. `--no-restart` is for installing new
 files without interrupting a running demo; the new code is picked up at the
 next restart.
+
+## The AI showcase mode
+
+`showcase` ("Cosa vede l'IA" in the dashboard) runs a pre-trained Vitis-AI model
+zoo detector on the RGB camera instead of our own pose model. Nothing is trained
+or quantized on this PC: the zoo package ships the QAT-converted `YOLOX_0_int.xmodel`,
+`tools/vitis/zoo_yolox_nano.sh` downloads it and compiles it for the board, and
+the result is the `yolox_nano.xmodel` the demo config names.
+
+```bash
+tools/vitis/zoo_yolox_nano.sh            # once: build/vitis/yolox_nano/compiled/yolox_nano.xmodel
+deploy/deploy.sh --model build/vitis/hagrid_lrelu512/compiled/pose_halfbust62.xmodel \
+  --hand-model build/vitis/hand_topdown/compiled/hand21_topdown.xmodel \
+  --showcase-model build/vitis/yolox_nano/compiled/yolox_nano.xmodel
+```
+
+`--showcase-model PATH` copies the file to `~/cpsa/models/<basename>`, so the
+`showcase.models[].path` of `config/board.demo.yaml` must match that name.
+The flag is repeatable: a second model only needs its own config entry (the
+model selector itself is a later plan). The mode needs `vision.camera` (the RGB
+node of the medical demo) and `server.video: true` for the annotated stream; the
+`showcase` section is optional, and without it the supervisor registers no
+`showcase` mode, exactly like `hands`.
 
 ## Recording RPS data
 

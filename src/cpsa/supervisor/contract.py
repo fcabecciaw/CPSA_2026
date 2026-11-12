@@ -15,7 +15,7 @@ from typing import Any, Final, Literal, Protocol, runtime_checkable
 from cpsa.application.config import Config
 from cpsa.ports import Publisher
 
-ModeName = Literal["idle", "lab", "hologram", "medical", "rps"]
+ModeName = Literal["idle", "lab", "hologram", "medical", "rps", "showcase"]
 ModeState = Literal["stopped", "starting", "running", "stopping", "failed"]
 
 #: Closed list of error codes (IF-304). Extended only by a protocol addition.

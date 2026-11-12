@@ -155,7 +155,7 @@ def test_connect_receives_hello_then_the_full_snapshot(tmp_path: Path) -> None:
             hello = messages[0]["data"]
             assert hello["server_version"] == "test-version"
             assert hello["protocol_version"] == 1
-            assert hello["modes"] == ["idle", "medical", "hologram", "rps"]
+            assert hello["modes"] == ["idle", "medical", "hologram", "rps", "showcase"]
             assert "status" in hello["capabilities"]
             assert messages[1]["data"]["mode"] == "medical"
 
@@ -341,6 +341,93 @@ def test_hand_mode_states_are_not_snapshot_in_medical(tmp_path: Path) -> None:
                 pong = await receive(ws)
 
             assert [hello["type"], status["type"], pong["type"]] == ["hello", "status", "pong"]
+
+        run(scenario)
+
+
+SHOWCASE_STATE = {
+    "model": "yolox_nano",
+    "width": 640,
+    "height": 480,
+    "fps": 29.7,
+    "dpu_ms": 4.1,
+    "total_ms": 21.0,
+    "objects": [
+        {"label": "persona", "class_id": 0, "score": 0.91, "box": [1.0, 2.0, 30.0, 40.0]}
+    ],
+    "counts": [{"label": "persona", "count": 1}],
+}
+
+
+def test_the_showcase_mode_and_its_state_are_offered(tmp_path: Path) -> None:
+    assert "showcase" in server_module.MODES
+    assert "showcase.state" in server_module.CAPABILITIES
+
+    with running_server(tmp_path) as (server, _):
+
+        async def scenario() -> dict[str, Any]:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.ws_connect(f"http://127.0.0.1:{server.port}/ws") as ws,
+            ):
+                hello = await receive(ws)
+                validate_server_message(hello)
+                return hello["data"]
+
+        hello = run(scenario)
+
+    assert "showcase" in hello["modes"]
+    assert "showcase.state" in hello["capabilities"]
+
+
+def test_showcase_state_is_snapshot_only_in_the_showcase_mode(tmp_path: Path) -> None:
+    with running_server(tmp_path) as (server, _):
+        publish_state(server, "status", status_data(mode="medical"))
+        publish_state(server, "showcase.state", SHOWCASE_STATE)
+
+        async def in_medical() -> list[str]:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.ws_connect(f"http://127.0.0.1:{server.port}/ws") as ws,
+            ):
+                messages = [await receive(ws) for _ in range(2)]
+                return [message["type"] for message in messages]
+
+        assert run(in_medical) == ["hello", "status"]
+
+        publish_state(server, "status", status_data(mode="showcase"))
+
+        async def in_showcase() -> list[str]:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.ws_connect(f"http://127.0.0.1:{server.port}/ws") as ws,
+            ):
+                messages = [await receive(ws) for _ in range(3)]
+                for message in messages:
+                    validate_server_message(message)
+                assert messages[2]["data"] == SHOWCASE_STATE
+                return [message["type"] for message in messages]
+
+        assert run(in_showcase) == ["hello", "status", "showcase.state"]
+
+
+def test_mode_set_forwards_showcase(tmp_path: Path) -> None:
+    with running_server(tmp_path) as (server, commands):
+
+        async def scenario() -> None:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.ws_connect(f"http://127.0.0.1:{server.port}/ws") as ws,
+            ):
+                await receive(ws)
+                await ws.send_json(
+                    {"v": 1, "type": "mode.set", "seq": 7, "data": {"mode": "showcase"}}
+                )
+                await ws.send_json({"v": 1, "type": "ping", "data": {"id": 1}})
+                pong = await receive(ws)
+
+            assert pong["type"] == "pong"
+            assert commands == [("mode.set", {"mode": "showcase"}, 7)]
 
         run(scenario)
 
