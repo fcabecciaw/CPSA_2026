@@ -146,3 +146,30 @@ it differently etc. Identify all possible corners and possible problems and hand
   both runners preloaded in process A; web YOLO/MoveNet switch + skeleton room (perspective room, floor grid, glow;
   style of the deleted `web/src/hologram.ts`, available in git history at `fded0e7`). AC-E2, AC-E3.
 - **K-board** (coordinator): deploy, measure, user test. AC-E2, AC-E4.
+
+## Round 2 (user feedback 2026-11-12, approved)
+
+User (verbatim, abridged): "I dont like the face. First of all it's half, not full face. plus, i dont want a front
+face, a 2/3 third view positioned on top right would be much cooler. Plus the face should look like [a digital face
+made of luminous points] with animated expressions and mouth. [...] I prefer something like an animated wave [a
+point-cloud sphere]. [...] the voice is very clearly fake. Cant we use something more human? [...] when it's idle, it
+says some random facts or quick poetry. Next, the interactions with human should be more cohesive. For example when a
+human waves, smiles, etc." Approved design: hybrid particle sphere <-> face, local human TTS, scenes, MediaPipe smile
+detection on the laptop. "The random facts are especially interesting."
+
+- **R2-F (avatar, web):** one three.js particle system: idle = breathing point-cloud wave sphere (cyan→violet, like the
+  user's reference); a person engages = particles flow into a 3D head (2/3 view, top right, full face) with ARKit
+  blendshapes (expressions: neutral, happy/smile, surprised, curious, thinking, sleepy, worried; blink; idle
+  micro-motion) and a mouth driven by the voice audio (WebAudio analyser → jawOpen/visemes); leaving = back to sphere.
+  Head mesh: three.js `examples/models/gltf/facecap.glb` if its licence allows reuse (check the three.js repo), else a
+  TalkingHead (met4citizen, MIT) sample avatar head with ARKit blendshapes, else a procedural head.
+- **R2-V (voice, laptop):** local TTS HTTP service (`tools/tts/`): Kokoro (`if_sara`, `im_nicola`) and XTTS-v2 (Italian),
+  disk cache keyed by (engine, voice, text), pre-generation of all fixed phrases; the browser plays the WAV via WebAudio
+  (amplitude feeds the mouth) with Web Speech as the fallback.
+- **R2-D (dialogue, web):** scene state machine Attract → Engage → Play → Farewell with continuity (refers to what
+  happened); idle content = curated Italian facts and short original poems (`web/src/cognitive/content/`), never
+  repeated within a day; gesture/face events from pose (MoveNet, board) and from MediaPipe Face Landmarker running in
+  the laptop browser on `/video.mjpeg` (smile, mouth open, nod, head shake, looking at the camera); F-E4 corner cases
+  still hold.
+- **R2-G (board):** MoveNet runs every frame alongside YOLOX (DPU ~4.7 + ~2–3 ms) so gestures work in both views;
+  `pose.state` always published; the YOLO/MoveNet switch only changes the view.
