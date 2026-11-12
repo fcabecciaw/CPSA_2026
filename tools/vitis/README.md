@@ -1,9 +1,9 @@
 # `tools/vitis` — the KV260 DPU model pipeline
 
-PC-side pipeline that turns the Vitis AI model-zoo **YOLOX-nano** into an
-`.xmodel` compiled for the KV260 DPU (`DPUCZDX8G_ISA1_B4096`, fingerprint
-`0x101000016010407`). No training and no requantization: the zoo's QAT package
-is already quantized.
+PC-side pipeline that turns the Vitis AI model-zoo **YOLOX-nano** and
+**MoveNet** into `.xmodel` files compiled for the KV260 DPU
+(`DPUCZDX8G_ISA1_B4096`, fingerprint `0x101000016010407`). No training and no
+requantization: both zoo packages are already quantized.
 
 Vitis AI 3.5's `DPUCZDX8G_ISA1_B4096` target alias maps to fingerprint
 `0x101000056010407` (the 3.x feature code), which the 2.5-era KV260 B4096
@@ -92,6 +92,71 @@ no extra or missing boxes; boxes that collapse below 1 px^2 against the frame
 edge are excluded on both sides (predictions into the letterbox padding have no
 usable area). Observed on 27 COCO images (plus the package demo and two
 Ultralytics samples): 177 matched boxes, minimum IoU 0.999987, no failures.
+
+## MoveNet (`src/cpsa/movenet.py`, M1)
+
+```sh
+tools/vitis/zoo_movenet.sh            # download, extract, compile, inspect
+tools/vitis/zoo_movenet.sh --skip-download
+```
+
+`pt_movenet_coco_192_192_0.5G_3.0.zip` (11.4 MB) ships the quantized
+`quantized/MoveNet_int.xmodel`, which is recompiled with the same pinned
+fingerprint. Outputs (git-ignored): `build/models/zoo/movenet/` (package),
+`build/vitis/movenet/compiled/movenet.xmodel`,
+`build/vitis/report/inspect_movenet.json`, `build/vitis/logs/zoo_movenet_*.log`.
+The script fails unless the artifact reports one DPU subgraph, fingerprint
+`0x101000016010407`, a `1x192x192x3` input and the four heads below.
+
+Observed: 6 subgraphs, 1 DPU, input `1x192x192x3` xint8 `fp=6`, four `48x48`
+heads at stride 4:
+
+| head | shape | `fix_point` | contents |
+|---|---|---|---|
+| heatmaps | `1x48x48x17` | 3 | keypoint logits, sigmoid in a CPU subgraph |
+| centers | `1x48x48x1` | 3 | person-center logits, sigmoid in a CPU subgraph |
+| regs | `1x48x48x34` | 2 | `(dx, dy)` per keypoint from the center cell |
+| offsets | `1x48x48x34` | 7 | sub-cell `(dx, dy)` per keypoint |
+
+The input `fix_point` is 6, i.e. the int8 grid covers `[-2, 2)`, while the zoo
+preprocessing is a plain RGB square resize with no normalization. Feeding raw
+`0..255` saturates every pixel above 2 at `127` and the pose collapses; the
+runtime feeds `pixel / 128` (`int8 = round(pixel / 2)`,
+`movenet.MOVENET_INPUT_SCALE`). Measured against the package's float model on 24
+COCO person crops (keypoints both sides score >= 0.3): `pixel / 128` 2.69 px
+mean, `/127.5 - 1` 3.94 px, `/255` 4.26 px, raw 37.87 px. The package's own
+reported accuracy uses raw pixels and does not transfer to the compiled grid.
+
+Because the graph-level heatmaps and centers are post-sigmoid but the DPU
+subgraph exports logits, `movenet.decode` applies `sigmoid` itself, then the
+zoo threshold (`0.1`), the analytic center prior (`1 / (distance + 1.8)`, the
+package's `center_weight_origin.npy`), the regression target from the center
+cell, the `1 / (distance + 1.8)` heatmap weighting and the offset field.
+
+The runtime is not wired into the pipeline yet (that is M2); `movenet_reference.py`
+checks it standalone:
+
+```sh
+uv run --no-sync python tools/vitis/movenet_reference.py prepare \
+  --images build/vitis/movenet_reference/images --work build/vitis/movenet_reference
+tools/vitis/run_vitis.sh python tools/vitis/movenet_reference.py dump \
+  --model build/models/zoo/movenet/pt_movenet_coco_192_192_0.5G_3.0 \
+  --work build/vitis/movenet_reference
+uv run --no-sync python tools/vitis/movenet_reference.py check \
+  --work build/vitis/movenet_reference --out build/vitis/report/movenet_reference.json
+```
+
+`dump` runs the package's quantized TorchScript model on the dequantized inputs,
+inverts the `nn.Sigmoid` the package ends its heatmap and center heads with,
+round-trips all four heads through the DPU fix points and decodes them with the
+package's own `movenetDecode` (the function `movenet.decode` mirrors).
+`movenetDecode` returns no scores, so the tool reads each score from the
+package's heatmap at the package's own peak cell and aborts if that peak does not
+reproduce the package coordinates. `check` requires pixel-identical
+preprocessing and int8 inputs, the same set of keypoints at score >= 0.3, and at
+least 20 images with a mean distance <= 2 px on the 192 grid. Observed on 24
+COCO person crops: 102 compared keypoints, mean 0.0000 px, max 0.0000 px, no
+failures.
 
 ## The 60 fps runtime
 

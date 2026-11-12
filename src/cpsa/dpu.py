@@ -97,8 +97,9 @@ def stride_for(input_hw: tuple[int, int], spatial_hw: tuple[int, int]) -> int:
 
 @dataclass(frozen=True)
 class OutputTensor:
-    """One DPU output: its ``(H, W, C)`` NHWC shape, ``fix_point`` and stride."""
+    """One DPU output: its name, ``(H, W, C)`` NHWC shape, ``fix_point`` and stride."""
 
+    name: str
     shape: tuple[int, int, int]
     fix_point: int
     stride: int
@@ -109,6 +110,9 @@ class DpuRunner:
 
     Args:
         xmodel_path: Path to the compiled ``.xmodel``.
+        min_channels: Fewest channels an output head may have. The YOLOX heads
+            carry boxes and classes; MoveNet has a single-channel center
+            heatmap, so its detector asks for ``1``.
 
     Raises:
         RuntimeError: If the ``xir``/``vart`` Python bindings are unavailable.
@@ -117,7 +121,7 @@ class DpuRunner:
             not a single batched NHWC input with ``(1, H, W, C)`` outputs.
     """
 
-    def __init__(self, xmodel_path: str | Path) -> None:
+    def __init__(self, xmodel_path: str | Path, *, min_channels: int = 6) -> None:
         try:
             import vart
             import xir
@@ -164,10 +168,13 @@ class DpuRunner:
             dims = [int(dim) for dim in tensor.dims]
             if len(dims) != 4 or dims[0] != 1:
                 raise ValueError(f"expected NHWC outputs, got shape {dims} at output {index}")
-            if dims[3] < 6:
-                raise ValueError(f"output {index} has {dims[3]} channels, expected >= 6")
+            if dims[3] < min_channels:
+                raise ValueError(
+                    f"output {index} has {dims[3]} channels, expected >= {min_channels}"
+                )
             output_tensors.append(
                 OutputTensor(
+                    name=tensor.name,
                     shape=(dims[1], dims[2], dims[3]),
                     fix_point=tensor_fix_point(tensor),
                     stride=stride_for(self._input_hw, (dims[1], dims[2])),
