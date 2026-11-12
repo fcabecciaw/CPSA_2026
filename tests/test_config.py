@@ -89,7 +89,7 @@ def test_the_shipped_configuration_parses_and_names_the_machine() -> None:
     assert config.model.conf_thr == 0.35
     assert config.model.class_conf == {"person": 0.40}
     assert config.model.object_conf == 0.25
-    assert config.model.zoom == 1.3
+    assert config.model.zoom == 1.5
     assert config.model.zoom_center == (0.5, 0.5)
     assert config.movenet.name == "movenet"
     assert config.movenet.path == Path("models/movenet.xmodel")
