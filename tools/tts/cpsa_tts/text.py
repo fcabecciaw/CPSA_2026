@@ -77,6 +77,30 @@ def normalize(text: str, engine: str | None = None) -> str:
 _SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+")
 
 
+#: XTTS runs on after a lone one- or two-word sentence ("Psst!" came out 1.4 s
+#: long): such a sentence is spoken together with the next one.
+MIN_SENTENCE_WORDS = 3
+
+
 def sentences(text: str) -> list[str]:
-    """Split a normalized utterance into sentences, each keeping its mark."""
-    return [part.strip() for part in _SENTENCE_END_RE.split(text) if part.strip(" .!?")]
+    """Split a normalized utterance into sentences, each keeping its mark.
+
+    A sentence shorter than :data:`MIN_SENTENCE_WORDS` is joined to the next one
+    ("Psst! Sì, dico proprio a te." stays one chunk).
+    """
+    parts = [part.strip() for part in _SENTENCE_END_RE.split(text) if part.strip(" .!?")]
+    chunks: list[str] = []
+    pending = ""
+    for part in parts:
+        chunk = f"{pending} {part}".strip()
+        if len(chunk.split()) < MIN_SENTENCE_WORDS:
+            pending = chunk
+            continue
+        chunks.append(chunk)
+        pending = ""
+    if pending:
+        if chunks:
+            chunks[-1] = f"{chunks[-1]} {pending}"
+        else:
+            chunks.append(pending)
+    return chunks

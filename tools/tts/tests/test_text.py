@@ -61,10 +61,19 @@ def test_normalize_is_idempotent() -> None:
 
 
 def test_sentences_keep_their_marks_and_numbers() -> None:
-    assert sentences("Psst! Sì, dico proprio a te. Vieni!") == [
-        "Psst!",
-        "Sì, dico proprio a te.",
-        "Vieni!",
+    assert sentences("Ciao a tutti! Siete in 3") == ["Ciao a tutti!", "Siete in 3"]
+    assert sentences("Già 10.000 persone oggi. Davvero un bel numero") == [
+        "Già 10.000 persone oggi.",
+        "Davvero un bel numero",
     ]
-    assert sentences("Già 10.000 persone. Wow") == ["Già 10.000 persone.", "Wow"]
     assert sentences("Ciao") == ["Ciao"]
+
+
+def test_short_sentences_join_the_next_one() -> None:
+    # A lone "Psst!" made XTTS run on for 1.4 s: it is spoken with what follows.
+    assert sentences("Psst! Sì, dico proprio a te. Vieni a dare un'occhiata!") == [
+        "Psst! Sì, dico proprio a te.",
+        "Vieni a dare un'occhiata!",
+    ]
+    assert sentences("Ciao a tutti! Wow!") == ["Ciao a tutti! Wow!"]
+    assert sentences("Oh! Ciao!") == ["Oh! Ciao!"]

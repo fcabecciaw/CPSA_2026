@@ -226,11 +226,10 @@ def test_xtts_speaks_sentence_by_sentence_without_final_periods() -> None:
         "Psst! Sì, dico proprio a te. Vieni a dare un'occhiata!", "ana_florence"
     )
     assert [call["text"] for call in fake.calls] == [
-        "Psst!",
-        "Sì, dico proprio a te",
+        "Psst! Sì, dico proprio a te",
         "Vieni a dare un'occhiata!",
     ]
     assert {call["speed"] for call in fake.calls} == {1.15}
     assert {call["split_sentences"] for call in fake.calls} == {False}
     gap = int(24_000 * CHUNK_GAP_S)
-    assert samples.size == 3 * 2_400 + 2 * gap
+    assert samples.size == 2 * 2_400 + gap
