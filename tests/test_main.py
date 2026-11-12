@@ -28,6 +28,7 @@ from cpsa.config import (
     ModelConfig,
     MovenetConfig,
     ShowcaseConfig,
+    SmoothingConfig,
     TrackerConfig,
     WebConfig,
 )
@@ -36,6 +37,18 @@ from cpsa.yolox import Detection
 
 WIDTH, HEIGHT = 16, 8
 PERSON = Detection(box=(2.0, 1.0, 8.0, 6.0), score=0.75, class_id=0)
+
+SMOOTHING = SmoothingConfig(
+    enabled=True,
+    min_cutoff=1.0,
+    beta=0.02,
+    d_cutoff=1.0,
+    deadband_px=1.5,
+    show_score=0.35,
+    hide_score=0.25,
+    show_frames=2,
+    hide_frames=4,
+)
 
 
 class FakeQueue:
@@ -151,7 +164,7 @@ def showcase_config(
             max_misses=6,
         ),
         model=ModelConfig(path=model, conf_thr=0.35, iou_thr=0.45),
-        movenet=MovenetConfig(path=movenet, enabled=True, publish_hz=30.0),
+        movenet=MovenetConfig(path=movenet, enabled=True, publish_hz=30.0, smoothing=SMOOTHING),
         labels="it",
         web=WebConfig(
             host="127.0.0.1",

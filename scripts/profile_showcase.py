@@ -60,6 +60,15 @@ MOVENET_PREPROCESS_TARGET_MS = 1.5
 MOVENET_DECODE_TARGET_MS = 1.0
 """Board targets of the A53 MoveNet stages (R2-G)."""
 
+MOVENET_CROP_PREPROCESS_TARGET_MS = 1.5
+"""Board target of feeding the model a square body crop instead of the frame."""
+
+MOVENET_LOCK_TARGET_MS = 1.0
+"""Board target of the person lock: crop, centre prior and the per-frame update."""
+
+MOVENET_STABILIZE_TARGET_MS = 0.5
+"""Board target of the keypoint stabilizer (One Euro, deadband, hysteresis)."""
+
 SKELETON_DRAW_TARGET_MS = 1.5
 """Board target of the MoveNet overlay: the dimmed frame plus the neon skeleton."""
 
@@ -271,11 +280,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     import cv2
 
     from cpsa.camera import yuyv_to_rgb
+    from cpsa.config import SmoothingConfig
     from cpsa.dpu import OutputTensor, input_quantization_lut_scaled
+    from cpsa.keypoints import KeypointStabilizer
     from cpsa.movenet import (
         MOVENET_INPUT_SCALE,
         MOVENET_INPUT_SIZE,
+        Crop,
         DpuMovenet,
+        MovenetPose,
+        PersonLock,
         decode_quantized,
         dequantize_heads,
         quantized_heads,
@@ -415,6 +429,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         MOVENET_PREPROCESS_TARGET_MS,
     )
 
+    # The person lock feeds the graph a square crop of the previous pose, so the
+    # real loop pays this preprocess instead of the whole-frame one above.
+    movenet_probe_crop = Crop(
+        x=args.width // 4, y=args.height // 4, side=min(300, args.height // 2)
+    )
+
+    def movenet_crop_preprocess() -> None:
+        preprocess_movenet_into(frame, movenet_lut, movenet_view, movenet_probe_crop)
+
+    movenet_crop_preprocess_ms = report(
+        "movenet crop",
+        timed(args.runs, movenet_crop_preprocess),
+        MOVENET_CROP_PREPROCESS_TARGET_MS,
+        note=f"{movenet_probe_crop.side}px square body crop",
+    )
+
     keypoints = synthetic_keypoints(args.width, args.height)
 
     def skeleton() -> None:
@@ -425,6 +455,61 @@ def main(argv: Sequence[str] | None = None) -> int:
         timed(args.runs, skeleton),
         SKELETON_DRAW_TARGET_MS,
         note="dim + neon skeleton",
+    )
+
+    # A body that fits the frame's short side, so the lock really crops it.
+    lock_points = (keypoints[:, :2] - np.float32([args.width / 2, args.height / 2])) * np.float32(
+        0.5
+    ) + np.float32([args.width / 2, args.height / 2])
+    lock_pose = MovenetPose(
+        keypoints=np.column_stack([lock_points, keypoints[:, 2]]).astype(np.float32),
+        score=0.8,
+    )
+    lock = PersonLock()
+    lock.observe(lock_pose, 0.0, (args.height, args.width))
+    lock_crop = lock.crop
+
+    def movenet_lock() -> None:
+        lock.observe(lock_pose, 0.0, (args.height, args.width))
+        lock.prior(lock_crop, (args.height, args.width))
+
+    movenet_lock_ms = report(
+        "movenet lock",
+        timed(args.runs, movenet_lock),
+        MOVENET_LOCK_TARGET_MS,
+        note=f"crop={lock_crop.side if lock_crop else 'frame'} + prior + observe",
+    )
+
+    # The shipped ``config/showcase.yaml`` smoothing block: the same numbers the
+    # board runs, so the stage measures the deployed filter and not a variant.
+    stabilizer = KeypointStabilizer(
+        SmoothingConfig(
+            enabled=True,
+            min_cutoff=1.0,
+            beta=0.02,
+            d_cutoff=1.0,
+            deadband_px=1.5,
+            show_score=0.35,
+            hide_score=0.25,
+            show_frames=2,
+            hide_frames=4,
+        )
+    )
+    stabilize_frames = [0]
+
+    def movenet_stabilize() -> None:
+        stabilize_frames[0] += 1
+        stabilizer.update(
+            lock_pose,
+            stabilize_frames[0] / 30.0,
+            size=(args.width, args.height),
+        )
+
+    movenet_stabilize_ms = report(
+        "movenet stab",
+        timed(args.runs, movenet_stabilize),
+        MOVENET_STABILIZE_TARGET_MS,
+        note="One Euro + deadband + hysteresis",
     )
 
     movenet_dpu_ms = args.movenet_dpu_ms
@@ -442,18 +527,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         pose_dpu_times: list[float] = []
         pose_decode_times: list[float] = []
         pose_preprocess_times: list[float] = []
+        pose_lock_times: list[float] = []
         for _ in range(args.runs):
             movenet_cycle()
             pose_stage = pose_detector.stage_ms
             pose_preprocess_times.append(pose_stage["preprocess"])
             pose_dpu_times.append(pose_stage["dpu"])
             pose_decode_times.append(pose_stage["decode"])
+            pose_lock_times.append(pose_stage["lock"])
         movenet_preprocess_ms = report(
             "movenet pre", pose_preprocess_times, MOVENET_PREPROCESS_TARGET_MS
         )
         movenet_dpu_ms = report("movenet dpu", pose_dpu_times, args.target_ms, note="graph")
         movenet_decode_ms = report(
             "movenet decode", pose_decode_times, MOVENET_DECODE_TARGET_MS, note="int8 heads"
+        )
+        # The runner's own lock stage is the measured one: it sees the crop the
+        # tracked pose asks for, not the probe crop above.
+        movenet_lock_ms = report(
+            "movenet lock", pose_lock_times, MOVENET_LOCK_TARGET_MS, note="runner stage"
         )
     else:
         buffers = synthetic_movenet_heads()
@@ -501,7 +593,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     yolox_cpu_ms = camera_cv2 + preprocess_ms + decode_ms + draw_ms
     yolox_loop_ms = max(yolox_dpu_ms, yolox_cpu_ms)
     movenet_dpu_frame_ms = movenet_preprocess_ms + movenet_dpu_ms
-    movenet_cpu_ms = camera_cv2 + movenet_preprocess_ms + movenet_decode_ms + skeleton_ms
+    movenet_cpu_ms = (
+        camera_cv2
+        + movenet_preprocess_ms
+        + movenet_decode_ms
+        + movenet_lock_ms
+        + movenet_stabilize_ms
+        + skeleton_ms
+    )
     movenet_loop_ms = max(movenet_dpu_frame_ms, movenet_cpu_ms)
     print(
         f"\nYOLOX view: max(preprocess+dpu={yolox_dpu_ms:.2f}, "
@@ -510,8 +609,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     print(
         f"MoveNet view: max(movenet pre+dpu={movenet_dpu_frame_ms:.2f}, "
-        f"camera+movenet pre+decode+skeleton={movenet_cpu_ms:.2f}) = {movenet_loop_ms:.2f} ms "
-        f"-> {1000.0 / movenet_loop_ms:.1f} fps"
+        f"camera+movenet pre+decode+lock+stabilize+skeleton={movenet_cpu_ms:.2f}) = "
+        f"{movenet_loop_ms:.2f} ms -> {1000.0 / movenet_loop_ms:.1f} fps"
+    )
+    print(
+        f"MoveNet person crop: pre={movenet_crop_preprocess_ms:.2f} ms "
+        f"(whole frame {movenet_preprocess_ms:.2f}), lock={movenet_lock_ms:.2f}, "
+        f"stabilize={movenet_stabilize_ms:.2f}"
     )
     print(
         f"web encoder thread: jpeg={jpeg_ms:.2f} ms "

@@ -35,7 +35,22 @@ DOCUMENT = {
         "max_misses": 6,
     },
     "model": {"path": "models/yolox_nano.xmodel", "conf_thr": 0.35, "iou_thr": 0.45},
-    "movenet": {"path": "models/movenet.xmodel", "enabled": True, "publish_hz": 30},
+    "movenet": {
+        "path": "models/movenet.xmodel",
+        "enabled": True,
+        "publish_hz": 30,
+        "smoothing": {
+            "enabled": True,
+            "min_cutoff": 1.0,
+            "beta": 0.02,
+            "d_cutoff": 1.0,
+            "deadband_px": 1.5,
+            "show_score": 0.35,
+            "hide_score": 0.25,
+            "show_frames": 2,
+            "hide_frames": 4,
+        },
+    },
     "labels": "it",
     "web": {
         "host": "0.0.0.0",
@@ -63,6 +78,15 @@ def test_the_shipped_configuration_parses_and_names_the_machine() -> None:
     assert config.movenet.path == Path("models/movenet.xmodel")
     assert config.movenet.enabled is True
     assert config.movenet.publish_hz == 30.0
+    assert config.movenet.smoothing.enabled is True
+    assert config.movenet.smoothing.min_cutoff == 1.0
+    assert config.movenet.smoothing.beta == 0.02
+    assert config.movenet.smoothing.d_cutoff == 1.0
+    assert config.movenet.smoothing.deadband_px == 1.5
+    assert config.movenet.smoothing.show_score == 0.35
+    assert config.movenet.smoothing.hide_score == 0.25
+    assert config.movenet.smoothing.show_frames == 2
+    assert config.movenet.smoothing.hide_frames == 4
     assert config.camera.device == "auto"
     assert config.camera.width == 640 and config.camera.height == 480
     assert config.camera.fps == 60.0
@@ -108,6 +132,7 @@ def test_a_document_parses_with_the_default_camera_match() -> None:
         ("movenet", "path"),
         ("movenet", "enabled"),
         ("movenet", "publish_hz"),
+        ("movenet", "smoothing"),
         ("web", "jpeg_quality"),
         ("log", "level"),
     ],
@@ -188,6 +213,64 @@ def test_the_pose_model_can_be_disabled_or_slowed() -> None:
 
     assert config.movenet.enabled is False
     assert config.movenet.publish_hz == 15.0
+
+
+def test_the_keypoint_smoothing_can_be_disabled() -> None:
+    data = document()
+    data["movenet"]["smoothing"]["enabled"] = False  # type: ignore[index]
+
+    assert parse(data).movenet.smoothing.enabled is False
+
+
+def test_a_missing_smoothing_key_is_named() -> None:
+    data = document()
+    del data["movenet"]["smoothing"]["beta"]  # type: ignore[index]
+
+    with pytest.raises(ConfigError) as excinfo:
+        parse(data)
+    assert excinfo.value.key == "movenet.smoothing.beta"
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        ("enabled", "yes"),
+        ("min_cutoff", 0),
+        ("beta", 0),
+        ("d_cutoff", -1),
+        ("deadband_px", 0),
+        ("show_score", 1.5),
+        ("hide_score", -0.1),
+        ("show_frames", 0),
+        ("hide_frames", 101),
+        ("show_frames", 2.5),
+    ],
+)
+def test_an_invalid_smoothing_value_is_named(key: str, value: object) -> None:
+    data = document()
+    data["movenet"]["smoothing"][key] = value  # type: ignore[index]
+
+    with pytest.raises(ConfigError) as excinfo:
+        parse(data)
+    assert excinfo.value.key == f"movenet.smoothing.{key}"
+
+
+def test_the_hide_score_must_stay_below_the_show_score() -> None:
+    data = document()
+    data["movenet"]["smoothing"]["hide_score"] = 0.35  # type: ignore[index]
+
+    with pytest.raises(ConfigError) as excinfo:
+        parse(data)
+    assert excinfo.value.key == "movenet.smoothing.hide_score"
+
+
+def test_an_unknown_smoothing_key_is_rejected() -> None:
+    data = document()
+    data["movenet"]["smoothing"]["kalman"] = True  # type: ignore[index]
+
+    with pytest.raises(ConfigError) as excinfo:
+        parse(data)
+    assert excinfo.value.key == "movenet.smoothing.kalman"
 
 
 def test_the_tracker_can_be_disabled() -> None:

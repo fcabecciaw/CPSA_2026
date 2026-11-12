@@ -14,7 +14,10 @@ camera:  { device: auto, match: RealSense, width: 640, height: 480, fps: 60,
 tracker: { enabled: true, iou_match: 0.3, alpha: 0.35, fast_alpha: 0.8,
            deadband_iou: 0.9, min_hits: 2, max_misses: 6 }
 model:   { path: models/yolox_nano.xmodel, conf_thr: 0.35, iou_thr: 0.45 }
-movenet: { path: models/movenet.xmodel, enabled: true, publish_hz: 30 }
+movenet: { path: models/movenet.xmodel, enabled: true, publish_hz: 30,
+           smoothing: { enabled: true, min_cutoff: 1.0, beta: 0.02,
+                        d_cutoff: 1.0, deadband_px: 1.5, show_score: 0.35,
+                        hide_score: 0.25, show_frames: 2, hide_frames: 4 } }
 labels: it
 web:     { host: 0.0.0.0, port: 8080, video_fps: 60, jpeg_quality: 70,
            static_dir: web/dist }
@@ -41,6 +44,7 @@ __all__ = [
     "ModelConfig",
     "MovenetConfig",
     "ShowcaseConfig",
+    "SmoothingConfig",
     "TrackerConfig",
     "WebConfig",
     "load",
@@ -141,6 +145,31 @@ class TrackerConfig:
 
 
 @dataclass(frozen=True)
+class SmoothingConfig:
+    """Keypoint stabilization between the MoveNet decoder and the overlay.
+
+    ``enabled: false`` publishes the raw keypoints unchanged. Otherwise every
+    keypoint runs a One Euro filter on ``x, y``: ``min_cutoff`` Hz at rest, raised
+    by ``beta`` pixels of measured speed so a real swing is followed, with
+    ``d_cutoff`` Hz on the speed estimate itself. The published position leaves
+    a ``deadband_px`` deadband (widened to 1 % of the shoulder width when that
+    is wider) and a keypoint is shown after ``show_frames`` frames at
+    ``show_score`` and hidden only after ``hide_frames`` frames under
+    ``hide_score``.
+    """
+
+    enabled: bool
+    min_cutoff: float
+    beta: float
+    d_cutoff: float
+    deadband_px: float
+    show_score: float
+    hide_score: float
+    show_frames: int
+    hide_frames: int
+
+
+@dataclass(frozen=True)
 class ModelConfig:
     """The compiled detector this build runs.
 
@@ -165,13 +194,14 @@ class MovenetConfig:
 
     ``path`` is the compiled ``.xmodel`` the DPU runner loads on a swap;
     ``enabled: false`` rejects ``model.set movenet`` and leaves the process
-    YOLOX-only, and ``publish_hz`` caps ``pose.state``, independently of the
-    frame rate.
+    YOLOX-only, ``publish_hz`` caps ``pose.state``, independently of the frame
+    rate, and ``smoothing`` holds the keypoint stabilization.
     """
 
     path: Path
     enabled: bool
     publish_hz: float
+    smoothing: SmoothingConfig
 
     @property
     def name(self) -> str:
@@ -296,8 +326,30 @@ def _movenet_config(movenet: _Section) -> MovenetConfig:
         path=Path(movenet.text("path")).expanduser(),
         enabled=movenet.boolean("enabled"),
         publish_hz=movenet.positive("publish_hz"),
+        smoothing=_smoothing_config(movenet.section("smoothing")),
     )
     movenet.reject_unknown()
+    return config
+
+
+def _smoothing_config(smoothing: _Section) -> SmoothingConfig:
+    config = SmoothingConfig(
+        enabled=smoothing.boolean("enabled"),
+        min_cutoff=smoothing.positive("min_cutoff"),
+        beta=smoothing.positive("beta"),
+        d_cutoff=smoothing.positive("d_cutoff"),
+        deadband_px=smoothing.positive("deadband_px"),
+        show_score=smoothing.fraction("show_score"),
+        hide_score=smoothing.fraction("hide_score"),
+        show_frames=smoothing.integer("show_frames", 1, 100),
+        hide_frames=smoothing.integer("hide_frames", 1, 100),
+    )
+    smoothing.reject_unknown()
+    if config.hide_score >= config.show_score:
+        raise ConfigError(
+            smoothing._key("hide_score"),
+            "expected a value below show_score",
+        )
     return config
 
 

@@ -31,6 +31,7 @@ RULES: dict[str, tuple[frozenset[str], frozenset[str] | None]] = {
     "movenet": (frozenset({"dpu"}), frozenset({"cv2", "numpy"})),
     "overlay": (frozenset({"protocol"}), frozenset({"cv2", "numpy"})),
     "tracker": (frozenset({"config", "yolox"}), frozenset({"numpy"})),
+    "keypoints": (frozenset({"config", "movenet"}), frozenset({"numpy"})),
     "pipeline": (
         frozenset(
             {
@@ -38,6 +39,7 @@ RULES: dict[str, tuple[frozenset[str], frozenset[str] | None]] = {
                 "camera",
                 "channel",
                 "config",
+                "keypoints",
                 "movenet",
                 "overlay",
                 "tracker",

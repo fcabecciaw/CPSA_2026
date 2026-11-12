@@ -5,7 +5,8 @@ DPU model at a time (R2-G): :class:`~cpsa.yolox.YoloxDetector` for the boxes or
 :class:`~cpsa.movenet.DpuMovenet` for the 17-keypoint skeleton. ``model.set``
 swaps the loaded model: the loop waits for the frame in flight, releases the
 current runner (graph and buffers) and builds the other one, then resumes. The
-tracker stabilizes the YOLOX boxes. The loop publishes the overlay of the active
+tracker stabilizes the YOLOX boxes and the keypoint stabilizer the MoveNet
+skeleton. The loop publishes the overlay of the active
 model into the shared :class:`~cpsa.channel.FrameChannel` and the snapshot
 messages into the :class:`~cpsa.channel.MessageChannel`; ``model.set`` arrives
 the other way through the :class:`~cpsa.channel.CommandChannel`.
@@ -50,6 +51,7 @@ from cpsa import protocol
 from cpsa.camera import CameraError, CameraNotFound, UvcCamera, VideoFrame
 from cpsa.channel import CommandChannel, FrameChannel, MessageChannel
 from cpsa.config import CameraConfig, ModelConfig, MovenetConfig, ShowcaseConfig
+from cpsa.keypoints import KeypointStabilizer
 from cpsa.movenet import DpuMovenet, MovenetPose
 from cpsa.overlay import draw_overlay, draw_skeleton
 from cpsa.tracker import Tracker
@@ -181,6 +183,8 @@ class _PendingFrame:
     camera_ms: float
     model: str
     """Which runner owns ``token``: ``yolox`` or ``movenet``."""
+    t: float
+    """The frame's monotonic capture time: the keypoint filter measures ``dt`` from it."""
 
 
 class _LatestSlot:
@@ -251,6 +255,7 @@ class Pipeline:
             tuple(labels) if labels is not None else labels_for(config.labels)
         )
         self._tracker = Tracker(config.tracker)
+        self._stabilizer = KeypointStabilizer(config.movenet.smoothing)
         self._lock = threading.Lock()
         self._slot = _LatestSlot()
         self._stop = threading.Event()
@@ -549,6 +554,7 @@ class Pipeline:
                 detect(rgb),
                 started,
                 camera_ms,
+                frame.t,
             )
             return None
 
@@ -562,6 +568,7 @@ class Pipeline:
             started=started,
             camera_ms=camera_ms,
             model=model,
+            t=frame.t,
         )
         if pending is not None:
             # A failure while finishing frame N-1 must not cost frame N its
@@ -596,6 +603,7 @@ class Pipeline:
             runner.wait(pending.token),
             pending.started,
             pending.camera_ms,
+            pending.t,
         )
 
     def _finish(
@@ -609,6 +617,7 @@ class Pipeline:
         output: Sequence[Detection] | MovenetPose,
         started: float,
         camera_ms: float,
+        timestamp: float,
     ) -> None:
         """Draw, publish and time one decoded frame."""
 
@@ -616,7 +625,11 @@ class Pipeline:
         pose: MovenetPose | None = None
         objects: list[protocol.ShowcaseObject] = []
         if model == "movenet":
-            pose = cast(MovenetPose, output)
+            stabilize_started = time.perf_counter()
+            pose = self._stabilizer.update(
+                cast(MovenetPose, output), timestamp, size=(width, height)
+            )
+            track_ms = (time.perf_counter() - stabilize_started) * 1000.0
         else:
             detections = cast(Sequence[Detection], output)
             track_started = time.perf_counter()
@@ -771,6 +784,7 @@ class Pipeline:
             self._last_pose = 0.0
             if loaded == "yolox":
                 self._tracker.reset()
+            self._stabilizer.reset()
         if failed:
             # Stays in ``status.errors`` until a swap succeeds: frames keep
             # coming from the restored model, so they must not clear it.
@@ -955,7 +969,7 @@ def _default_detector(model: ModelConfig) -> Detector:
 
 def _default_movenet(config: MovenetConfig) -> PoseDetector:
     """Build the MoveNet runner of F-E2 (it binds the VART runtime too)."""
-    return DpuMovenet(config.path)
+    return DpuMovenet(config.path, hide_score=config.smoothing.hide_score)
 
 
 def _default_camera(config: CameraConfig) -> Camera:

@@ -51,15 +51,27 @@ DPU) and ``wait`` (block, decode, map to source pixels), mirroring
 :class:`cpsa.yolox.YoloxDetector`: two buffer sets are in flight at most, so
 frame N runs on the DPU while frame N-1 is decoded. :meth:`DpuMovenet.close`
 releases the graph and its buffers, which is what a model swap needs (R2-G).
+
+The graph is single-person, and with two people in view a plain image-centre
+prior makes it jump between them. :class:`PersonLock` keeps it on one body: the
+input of the next frame is a square :class:`Crop` around the confident
+keypoints of the previous pose (the official inference recipe, so the other
+people are out of the input), and the center-head prior is a Gaussian centred on
+the tracked person instead of on the image. The person is given up only when
+their pose score stays under the hide threshold for :data:`LEAVE_AFTER_S`, or
+when a centre candidate is clearly stronger near the frame centre for
+:data:`SWITCH_AFTER_S` -- never frame by frame.
 """
 
 from __future__ import annotations
 
 import functools
+import math
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 import cv2
 import numpy as np
@@ -73,6 +85,15 @@ from cpsa.dpu import (
 )
 
 __all__ = [
+    "CROP_MARGIN",
+    "CROP_SCORE",
+    "LEAVE_AFTER_S",
+    "LOCK_SIGMA_FRACTION",
+    "MIN_CROP_FRACTION",
+    "MIN_CROP_KEYPOINTS",
+    "STRONGER_FACTOR",
+    "SWITCH_AFTER_S",
+    "Crop",
     "DpuMovenet",
     "KEYPOINTS",
     "MOVENET_CENTER_BIAS",
@@ -83,8 +104,11 @@ __all__ = [
     "MOVENET_STRIDE",
     "MovenetHeads",
     "MovenetPose",
+    "PersonLock",
     "QuantizedHeads",
+    "center_peak",
     "center_prior",
+    "crop_region",
     "decode",
     "decode_buffers",
     "decode_quantized",
@@ -113,6 +137,32 @@ MOVENET_HM_THRESHOLD = 0.1
 #: Distance weight added to the center prior and to the regression distance
 #: (``1.8`` in the package's ``movenetDecode``/``maxPoint``).
 MOVENET_CENTER_BIAS = 1.8
+
+#: A keypoint at or above this score counts towards the crop of the next frame.
+CROP_SCORE = 0.3
+
+#: The square input of the next frame is this much wider than the body extent.
+CROP_MARGIN = 1.5
+
+#: Fewer confident keypoints than this mean the pose is lost: the crop goes back
+#: to the whole frame.
+MIN_CROP_KEYPOINTS = 4
+
+#: A crop smaller than this fraction of the frame's short side is degenerate.
+MIN_CROP_FRACTION = 0.1
+
+#: Sigma of the lock Gaussian on the center head, as a fraction of the input.
+LOCK_SIGMA_FRACTION = 0.15
+
+#: A pose whose score stays below the hide threshold this long has left.
+LEAVE_AFTER_S = 0.5
+
+#: A competing centre peak must be this much stronger, for this long, to switch.
+STRONGER_FACTOR = 1.5
+SWITCH_AFTER_S = 1.0
+
+#: Pose score under which the tracked person counts as gone (``movenet.smoothing.hide_score``).
+LOCK_HIDE_SCORE = 0.25
 
 #: COCO-17 keypoint order of the heatmap channels.
 KEYPOINTS: tuple[str, ...] = (
@@ -257,6 +307,72 @@ def center_prior() -> NDArray[np.float64]:
     return 1.0 / (distance + MOVENET_CENTER_BIAS)
 
 
+@dataclass(frozen=True)
+class Crop:
+    """A square source region resized into the model input.
+
+    Attributes:
+        x: Left edge in source pixels.
+        y: Top edge in source pixels.
+        side: Side of the square, in source pixels.
+    """
+
+    x: int
+    y: int
+    side: int
+
+    def __post_init__(self) -> None:
+        if self.side <= 0:
+            raise ValueError(f"a crop needs a positive side, got {self.side}")
+
+
+def crop_region(
+    points: NDArray[np.float64],
+    frame_size: tuple[int, int],
+) -> Crop | None:
+    """Return the square crop around ``points``, or ``None`` for the whole frame.
+
+    This is the official MoveNet inference recipe: the next frame is cropped
+    around the pose just decoded, with :data:`CROP_MARGIN` of margin, and that
+    square is resized into the ``192x192`` input, so the tracked body fills the
+    input and the other people in the frame are cut away.
+
+    Args:
+        points: The confident keypoint coordinates, ``(N, 2)`` in source pixels.
+        frame_size: Source frame ``(height, width)`` in pixels.
+
+    Returns:
+        A square crop clamped inside the frame, or ``None`` when the pose is too
+        small, too large or too sparse to be worth cropping.
+    """
+
+    height, width = int(frame_size[0]), int(frame_size[1])
+    if height <= 0 or width <= 0:
+        return None
+    if points.ndim != 2 or points.shape[1] < 2 or len(points) < MIN_CROP_KEYPOINTS:
+        return None
+    finite = np.isfinite(points[:, :2]).all(axis=1)
+    if not finite.all():
+        points = points[finite]
+        if len(points) < MIN_CROP_KEYPOINTS:
+            return None
+    left = float(np.min(points[:, 0]))
+    right = float(np.max(points[:, 0]))
+    top = float(np.min(points[:, 1]))
+    bottom = float(np.max(points[:, 1]))
+    side = int(math.ceil(max(right - left, bottom - top) * CROP_MARGIN))
+    short_side = min(width, height)
+    if side >= short_side or side < MIN_CROP_FRACTION * short_side:
+        return None
+    x = int(round(0.5 * (left + right) - 0.5 * side))
+    y = int(round(0.5 * (top + bottom) - 0.5 * side))
+    return Crop(
+        x=min(max(x, 0), width - side),
+        y=min(max(y, 0), height - side),
+        side=side,
+    )
+
+
 def _validate_frame(rgb: NDArray[np.uint8]) -> NDArray[np.uint8]:
     """Return ``rgb`` after checking the shape and dtype the graph needs."""
 
@@ -297,8 +413,9 @@ def preprocess_into(
     rgb: NDArray[np.uint8],
     lut: NDArray[np.int8],
     out: NDArray[np.int8],
+    crop: Crop | None = None,
 ) -> None:
-    """Resize and quantize one frame straight into a DPU input view.
+    """Resize and quantize one frame (or one crop of it) into a DPU input view.
 
     Args:
         rgb: ``(H, W, 3)`` RGB uint8 frame.
@@ -306,9 +423,14 @@ def preprocess_into(
             :func:`cpsa.dpu.input_quantization_lut_scaled` with
             :data:`MOVENET_INPUT_SCALE`.
         out: ``(192, 192, 3)`` C-contiguous int8 buffer to fill.
+        crop: The square source region to feed the model, or ``None`` for the
+            whole frame. A crop is what :class:`PersonLock` derives from the
+            previous pose; it is smaller than the frame, so it is also cheaper
+            to resize.
 
     Raises:
-        ValueError: If the frame or ``out`` do not match the model input.
+        ValueError: If the frame or ``out`` do not match the model input, or the
+            crop does not fit the frame.
     """
 
     image = _validate_frame(rgb)
@@ -321,11 +443,23 @@ def preprocess_into(
         raise ValueError("rgb must not be empty")
     if lut.shape != (256,):
         raise ValueError(f"lut must have 256 entries, got {lut.shape}")
+    source = image
+    if crop is not None:
+        if (
+            crop.x < 0
+            or crop.y < 0
+            or crop.x + crop.side > image.shape[1]
+            or crop.y + crop.side > image.shape[0]
+        ):
+            raise ValueError(
+                f"crop {crop} does not fit the {image.shape[1]}x{image.shape[0]} frame"
+            )
+        source = image[crop.y : crop.y + crop.side, crop.x : crop.x + crop.side]
 
     # Resize straight into the DPU input view and quantize it in place: no
     # intermediate 192x192 frame is allocated or copied.
     view = out.view(np.uint8)
-    cv2.resize(image, (MOVENET_INPUT_SIZE[1], MOVENET_INPUT_SIZE[0]), dst=view)
+    cv2.resize(source, (MOVENET_INPUT_SIZE[1], MOVENET_INPUT_SIZE[0]), dst=view)
     cv2.LUT(view, lut.view(np.uint8), dst=view)
 
 
@@ -382,6 +516,9 @@ def _sigmoid(values: NDArray[np.float64]) -> NDArray[np.float64]:
 def decode(
     heads: MovenetHeads,
     size: tuple[int, int] = MOVENET_INPUT_SIZE,
+    *,
+    origin: tuple[float, float] = (0.0, 0.0),
+    prior: NDArray[np.float64] | NDArray[np.float32] | None = None,
 ) -> MovenetPose:
     """Decode the four head tensors into one person's keypoints.
 
@@ -399,9 +536,14 @@ def decode(
 
     Args:
         heads: The four dequantized heads; heatmaps and centers are logits.
-        size: Source frame ``(height, width)`` the keypoints are mapped to. The
-            input is a square resize of the whole frame, so the normalised
-            coordinates scale by this size.
+        size: Size ``(height, width)`` of the source region the keypoints are
+            mapped to — the whole frame, or the :class:`Crop` the input was
+            taken from. The input is a square resize of that region, so the
+            normalised coordinates scale by this size.
+        origin: Source-pixel origin of that region: the decoded keypoints are
+            offset by it, which maps a crop back onto the frame.
+        prior: Centre-head prior to use instead of :func:`center_prior`; the
+            :class:`PersonLock` passes its Gaussian here.
 
     Returns:
         The pose in source pixels, in :data:`KEYPOINTS` order.
@@ -413,6 +555,7 @@ def decode(
     height, width = int(size[0]), int(size[1])
     if height <= 0 or width <= 0:
         raise ValueError(f"size must be positive, got {size}")
+    origin_x, origin_y = float(origin[0]), float(origin[1])
 
     heatmaps = _sigmoid(heads.heatmaps)
     heatmaps = np.where(heatmaps < MOVENET_HM_THRESHOLD, 0.0, heatmaps)
@@ -422,7 +565,8 @@ def decode(
 
     grid_y, grid_x = np.mgrid[0:MOVENET_FEATURE_SIZE, 0:MOVENET_FEATURE_SIZE]
 
-    center_index = int(np.argmax(centers * center_prior()))
+    weights = center_prior() if prior is None else prior
+    center_index = int(np.argmax(centers * weights))
     center_x = center_index % MOVENET_FEATURE_SIZE
     center_y = center_index // MOVENET_FEATURE_SIZE
 
@@ -439,8 +583,8 @@ def decode(
         peak_y = min(max(peak // MOVENET_FEATURE_SIZE, 0), MOVENET_FEATURE_SIZE - 1)
         offset_x = offsets[index * 2, peak_y, peak_x]
         offset_y = offsets[index * 2 + 1, peak_y, peak_x]
-        keypoints[index, 0] = (peak_x + offset_x) / MOVENET_FEATURE_SIZE * width
-        keypoints[index, 1] = (peak_y + offset_y) / MOVENET_FEATURE_SIZE * height
+        keypoints[index, 0] = (peak_x + offset_x) / MOVENET_FEATURE_SIZE * width + origin_x
+        keypoints[index, 1] = (peak_y + offset_y) / MOVENET_FEATURE_SIZE * height + origin_y
         keypoints[index, 2] = heatmaps[index, peak_y, peak_x]
 
     return MovenetPose(
@@ -504,6 +648,34 @@ def quantized_heads(
     )
 
 
+def center_peak(
+    heads: QuantizedHeads,
+    prior: NDArray[np.float32] | NDArray[np.float64] | None = None,
+) -> tuple[int, int]:
+    """Return the winning center cell of ``argmax(sigmoid(centers) * prior)``.
+
+    The sigmoid comes from the fix point's 256-entry table, so the argmax is the
+    reference decoder's even under a prior as peaky as the person lock's; the
+    raw int8 logit times the prior would not be, because the sigmoid does not
+    commute with a non-uniform weight.
+
+    Args:
+        heads: The int8 heads, as :func:`quantized_heads` builds them.
+        prior: The ``(48, 48)`` center prior, or ``None`` for the image-centre
+            one.
+
+    Returns:
+        ``(column, row)`` in feature cells.
+    """
+
+    weights = _center_prior_f32() if prior is None else prior
+    table = _sigmoid_table(heads.centers_fix_point)
+    probabilities = table[heads.centers[:, :, 0].view(np.uint8)]
+    weighted = probabilities * weights
+    flat = int(np.argmax(weighted))
+    return flat % MOVENET_FEATURE_SIZE, flat // MOVENET_FEATURE_SIZE
+
+
 def decode_buffers(
     buffers: Sequence[NDArray[np.int8]],
     tensors: Sequence[OutputTensor],
@@ -519,15 +691,18 @@ def decode_buffers(
 def decode_quantized(
     heads: QuantizedHeads,
     size: tuple[int, int] = MOVENET_INPUT_SIZE,
+    *,
+    origin: tuple[float, float] = (0.0, 0.0),
+    prior: NDArray[np.float32] | NDArray[np.float64] | None = None,
 ) -> MovenetPose:
     """Decode the int8 heads directly: the A53 path of :func:`decode`.
 
     The result matches the reference decoder, with the same steps done in the
     integer domain and over all 17 keypoints at once:
 
-    1. ``argmax(sigmoid(centers) * prior)`` equals ``argmax(centers * prior)``:
-       ``sigmoid`` is monotonic, so only the raw center logits and the
-       ``float32`` prior table are needed;
+    1. ``argmax(sigmoid(centers) * prior)`` is evaluated exactly as the reference
+       does, with the fix point's 256-entry sigmoid table in place of the
+       float64 ``sigmoid`` (see :func:`center_peak`);
     2. the ``float32`` sigmoid table of the heatmap fix point already zeroes
        every value below :data:`MOVENET_HM_THRESHOLD`, so a cell below the
        table's cutoff cannot win the weighted search and is not scored at all;
@@ -536,7 +711,10 @@ def decode_quantized(
 
     Args:
         heads: The four int8 heads, as :func:`quantized_heads` builds them.
-        size: Source frame ``(height, width)`` the keypoints are mapped to.
+        size: Size ``(height, width)`` of the source region the keypoints are
+            mapped to, as in :func:`decode`.
+        origin: Source-pixel origin of that region, as in :func:`decode`.
+        prior: Centre-head prior to use instead of the image-centre one.
 
     Returns:
         The pose in source pixels, in :data:`KEYPOINTS` order.
@@ -548,12 +726,11 @@ def decode_quantized(
     height, width = int(size[0]), int(size[1])
     if height <= 0 or width <= 0:
         raise ValueError(f"size must be positive, got {size}")
+    origin_x, origin_y = float(origin[0]), float(origin[1])
 
-    # A monotonic transform does not move the argmax, so the raw int8 centers
-    # multiplied by the float32 prior pick the same cell as the reference.
-    center = int(np.argmax(heads.centers[:, :, 0] * _center_prior_f32()))
-    center_x = center % MOVENET_FEATURE_SIZE
-    center_y = center // MOVENET_FEATURE_SIZE
+    # The reference decoder multiplies the sigmoid of the centers by the prior,
+    # so the int8 path applies the fix point's sigmoid table first.
+    center_x, center_y = center_peak(heads, prior)
 
     # The package casts ``value + 0.5`` to int32, which truncates towards zero;
     # ``reshape(17, 2)`` turns the 34-field regression into an (x, y) pair.
@@ -608,6 +785,8 @@ def decode_quantized(
         (width / MOVENET_FEATURE_SIZE, height / MOVENET_FEATURE_SIZE),
         out=coords,
     )
+    coords[:, 0] += origin_x
+    coords[:, 1] += origin_y
     keypoints = np.empty((_NUM_KEYPOINTS, 3), dtype=np.float32)
     keypoints[:, :2] = coords
     keypoints[:, 2] = scores
@@ -621,6 +800,206 @@ def _center_prior_f32() -> NDArray[np.float32]:
     prior = center_prior().astype(np.float32)
     prior.flags.writeable = False
     return prior
+
+
+LockPrior = NDArray[np.float32]
+
+
+def _lock_prior(center_x: float, center_y: float) -> LockPrior:
+    """Return the ``(48, 48)`` Gaussian prior centred on a tracked person.
+
+    The image-centre prior of :func:`center_prior` alone lets a stronger person
+    anywhere in the input win the centre argmax, which is what makes the
+    single-person graph jump when two people are in view. The lock prior falls
+    off with :data:`LOCK_SIGMA_FRACTION` of the input instead, so the person
+    already being tracked keeps the centre unless it really disappears.
+
+    The Gaussian is separable: two ``exp`` calls over 48 values and one outer
+    product cost a few microseconds, where one ``exp`` over the 48x48 grid costs
+    several times that on the A53.
+    """
+
+    sigma = LOCK_SIGMA_FRACTION * MOVENET_FEATURE_SIZE
+    scale = np.float32(1.0 / (2.0 * sigma * sigma))
+    axis = np.arange(MOVENET_FEATURE_SIZE, dtype=np.float32)
+    horizontal = np.exp(-np.square(axis - np.float32(center_x)) * scale)
+    vertical = np.exp(-np.square(axis - np.float32(center_y)) * scale)
+    prior: LockPrior = cast(LockPrior, np.multiply.outer(vertical, horizontal))
+    return prior
+
+
+class PersonLock:
+    """Keep the single-person decode on the person it is already tracking.
+
+    The lock owns the crop of the next input and the center prior of the next
+    decode. :meth:`observe` runs once per decoded pose and decides what the next
+    frame sees:
+
+    * while the pose is healthy, the crop follows the confident keypoints and
+      the prior follows their centre;
+    * a pose under ``hide_score`` for more than :data:`LEAVE_AFTER_S` drops the
+      lock, so the next frame is the whole frame with the image-centre prior;
+    * a centre candidate that is :data:`STRONGER_FACTOR` stronger than the
+      tracked one near the frame centre switches the lock only after
+      :data:`SWITCH_AFTER_S`, so the two people can never alternate frame by
+      frame.
+
+    Args:
+        hide_score: Pose score under which the person counts as gone; the
+            pipeline passes ``movenet.smoothing.hide_score``.
+    """
+
+    def __init__(self, hide_score: float = LOCK_HIDE_SCORE) -> None:
+        self._hide_score = float(hide_score)
+        self._crop: Crop | None = None
+        self._center: tuple[float, float] | None = None
+        self._lost_at: float | None = None
+        self._switch_at: float | None = None
+
+    @property
+    def crop(self) -> Crop | None:
+        """The square source region the next input is taken from, if any."""
+        return self._crop
+
+    @property
+    def center(self) -> tuple[float, float] | None:
+        """The tracked person's centre in source pixels, if tracked."""
+        return self._center
+
+    @property
+    def locked(self) -> bool:
+        """Whether a person is being tracked."""
+        return self._center is not None
+
+    def reset(self) -> None:
+        """Forget the tracked person: the next frame is the whole frame again."""
+        self._crop = None
+        self._center = None
+        self._lost_at = None
+        self._switch_at = None
+
+    def prior(
+        self,
+        crop: Crop | None,
+        source_hw: tuple[int, int],
+    ) -> LockPrior:
+        """The centre-head prior of the input built from ``crop``.
+
+        Args:
+            crop: The region the input is taken from, or ``None`` for the whole
+                frame.
+            source_hw: Source frame ``(height, width)`` in pixels.
+
+        Returns:
+            The Gaussian on the tracked person, or the image-centre prior when
+            nothing is tracked.
+        """
+
+        height, width = int(source_hw[0]), int(source_hw[1])
+        if self._center is None or height <= 0 or width <= 0:
+            return _center_prior_f32()
+        center_x, center_y = self._center
+        if crop is None:
+            # The whole frame is resized anisotropically to the square input.
+            feature_x = center_x / width * MOVENET_FEATURE_SIZE
+            feature_y = center_y / height * MOVENET_FEATURE_SIZE
+        else:
+            feature_x = (center_x - crop.x) / crop.side * MOVENET_FEATURE_SIZE
+            feature_y = (center_y - crop.y) / crop.side * MOVENET_FEATURE_SIZE
+        return _lock_prior(feature_x, feature_y)
+
+    def frame_center_prior(
+        self,
+        crop: Crop | None,
+        source_hw: tuple[int, int],
+    ) -> LockPrior:
+        """The prior of "the person nearest the frame centre", in this input.
+
+        With the whole frame of the graph that is the package's image-centre
+        prior; with a crop it is the frame centre mapped into the crop, so the
+        two priors the switch hysteresis compares stay in one input space.
+
+        Args:
+            crop: The region the input is taken from, or ``None`` for the whole
+                frame.
+            source_hw: Source frame ``(height, width)`` in pixels.
+
+        Returns:
+            The prior of the frame centre, or the image-centre prior for the
+            whole frame.
+        """
+
+        height, width = int(source_hw[0]), int(source_hw[1])
+        if crop is None or height <= 0 or width <= 0:
+            return _center_prior_f32()
+        feature_x = (0.5 * width - crop.x) / crop.side * MOVENET_FEATURE_SIZE
+        feature_y = (0.5 * height - crop.y) / crop.side * MOVENET_FEATURE_SIZE
+        return _lock_prior(feature_x, feature_y)
+
+    def observe(
+        self,
+        pose: MovenetPose,
+        now: float,
+        source_hw: tuple[int, int],
+        *,
+        competitor: bool = False,
+    ) -> None:
+        """Update the lock from the pose just decoded.
+
+        Args:
+            pose: The decoded pose, already mapped to source pixels.
+            now: Monotonic seconds; the leave and switch timers use it.
+            source_hw: Source frame ``(height, width)`` in pixels.
+            competitor: Whether a centre candidate near the frame centre is
+                clearly stronger than the tracked one this frame.
+        """
+
+        keypoints = np.asarray(pose.keypoints, dtype=np.float64)
+        confident = keypoints[:, 2] >= CROP_SCORE
+        confident &= np.isfinite(keypoints[:, :2]).all(axis=1)
+        if float(pose.score) < self._hide_score or int(confident.sum()) < MIN_CROP_KEYPOINTS:
+            # Hold the last crop for a moment: a one-frame score dip is the same
+            # dropout the keypoint hysteresis rides out.
+            if self._lost_at is None:
+                self._lost_at = now
+            elif now - self._lost_at > LEAVE_AFTER_S:
+                self.reset()
+            return
+        self._lost_at = None
+
+        points = keypoints[confident, :2]
+        self._center = (
+            0.5 * float(np.min(points[:, 0]) + np.max(points[:, 0])),
+            0.5 * float(np.min(points[:, 1]) + np.max(points[:, 1])),
+        )
+        self._crop = crop_region(points, source_hw)
+        if not competitor:
+            self._switch_at = None
+        elif self._switch_at is None:
+            self._switch_at = now
+        elif now - self._switch_at > SWITCH_AFTER_S:
+            # The other person has held the centre for a full second: let the
+            # next full frame pick the person nearest the frame centre.
+            self.reset()
+
+
+@functools.cache
+def _sigmoid_table(fix_point: int) -> NDArray[np.float32]:
+    """Return a fix point's 256-entry sigmoid table, without the threshold.
+
+    Entry ``u`` is ``sigmoid(signed(u) * 2 ** -fix_point)`` with the int8 byte
+    order folded in (``u >= 128`` addresses a negative value), exactly as the
+    reference decoder computes it in float64. Unlike :func:`_sigmoid_lut` the
+    table keeps the small values: the center head is not thresholded, and its
+    sigmoid is what the prior has to be multiplied by.
+    """
+
+    signed = np.arange(256, dtype=np.int16)
+    signed[signed >= 128] -= 256
+    probabilities = _sigmoid(signed.astype(np.float64) * (2.0 ** -int(fix_point)))
+    table = probabilities.astype(np.float32)
+    table.flags.writeable = False
+    return table
 
 
 @functools.cache
@@ -638,15 +1017,12 @@ def _sigmoid_lut(fix_point: int) -> tuple[NDArray[np.float32], int]:
     which is what lets the decoder ignore the background grid.
     """
 
-    signed = np.arange(256, dtype=np.int16)
-    signed[signed >= 128] -= 256
-    probabilities = _sigmoid(signed.astype(np.float64) * (2.0 ** -int(fix_point)))
-    probabilities = np.where(probabilities < MOVENET_HM_THRESHOLD, 0.0, probabilities)
+    table = _sigmoid_table(fix_point)
+    probabilities = np.where(table < MOVENET_HM_THRESHOLD, np.float32(0.0), table)
     order = np.concatenate([np.arange(128, 256), np.arange(0, 128)])
     cutoff_index = int(order[np.argmax(probabilities[order] > 0.0)])
-    lut = probabilities.astype(np.float32)
-    lut.flags.writeable = False
-    return lut, cutoff_index if cutoff_index < 128 else cutoff_index - 256
+    probabilities.flags.writeable = False
+    return probabilities, cutoff_index if cutoff_index < 128 else cutoff_index - 256
 
 
 class DpuMovenet:
@@ -654,6 +1030,8 @@ class DpuMovenet:
 
     Args:
         xmodel_path: Path to the compiled ``.xmodel``.
+        hide_score: Pose score under which the tracked person counts as gone;
+            the pipeline passes ``movenet.smoothing.hide_score``.
 
     Raises:
         RuntimeError: If the ``xir``/``vart`` Python bindings are unavailable.
@@ -662,7 +1040,7 @@ class DpuMovenet:
             subgraph, one ``192x192x3`` int8 input and the four stride-4 heads.
     """
 
-    def __init__(self, xmodel_path: str | Path) -> None:
+    def __init__(self, xmodel_path: str | Path, *, hide_score: float = LOCK_HIDE_SCORE) -> None:
         self._runner = DpuRunner(xmodel_path, min_channels=1)
         input_hw = self._runner.input_hw
         if input_hw != MOVENET_INPUT_SIZE:
@@ -682,7 +1060,18 @@ class DpuMovenet:
         self._next_slot = 0
         self._token = 0
         self._pending: dict[int, _Job] = {}
-        self._stage_ms: dict[str, float] = {"preprocess": 0.0, "dpu": 0.0, "decode": 0.0}
+        self._lock = PersonLock(hide_score)
+        self._stage_ms: dict[str, float] = {
+            "preprocess": 0.0,
+            "dpu": 0.0,
+            "decode": 0.0,
+            "lock": 0.0,
+        }
+
+    @property
+    def lock(self) -> PersonLock:
+        """The person lock that keeps the decode on the tracked body."""
+        return self._lock
 
     @staticmethod
     def _classify(outputs: Sequence[OutputTensor]) -> tuple[str, ...]:
@@ -754,6 +1143,9 @@ class DpuMovenet:
     def submit(self, rgb: NDArray[np.uint8]) -> int:
         """Preprocess ``rgb`` and start the DPU without waiting for it.
 
+        The input is taken from the person lock's crop, with the lock's centre
+        prior, so the graph keeps looking at the body it already tracks.
+
         Returns a token for :meth:`wait`. Submitting frame N and then waiting
         for frame N-1 overlaps the DPU with the CPU decode. Two jobs may be in
         flight (one per slot); a third submit raises.
@@ -772,8 +1164,13 @@ class DpuMovenet:
         self._next_slot = (self._next_slot + 1) % len(self._slots)
         source_hw = (int(image.shape[0]), int(image.shape[1]))
 
+        lock_started = time.perf_counter()
+        crop = _fitted_crop(self._lock.crop, source_hw)
+        prior = self._lock.prior(crop, source_hw)
+        self._stage_ms["lock"] = (time.perf_counter() - lock_started) * 1000.0
+
         started = time.perf_counter()
-        preprocess_into(image, self._lut, slot.input_view)
+        preprocess_into(image, self._lut, slot.input_view, crop)
         self._stage_ms["preprocess"] = (time.perf_counter() - started) * 1000.0
 
         dpu_started = time.perf_counter()
@@ -785,11 +1182,16 @@ class DpuMovenet:
             job_id=job_id,
             dpu_started=dpu_started,
             source_hw=source_hw,
+            crop=crop,
+            prior=prior,
         )
         return token
 
     def wait(self, token: int) -> MovenetPose:
         """Wait for a job from :meth:`submit` and decode it into a pose.
+
+        The pose is mapped back onto the source frame, then handed to the
+        person lock, which chooses the crop and the prior of the next frame.
 
         Raises:
             ValueError: If ``token`` is not a pending job.
@@ -801,10 +1203,54 @@ class DpuMovenet:
         self._runner.wait(job.job_id)
         self._stage_ms["dpu"] = (time.perf_counter() - job.dpu_started) * 1000.0
 
+        crop = job.crop
         started = time.perf_counter()
-        pose = decode_quantized(job.slot.heads, size=job.source_hw)
+        if crop is None:
+            pose = decode_quantized(job.slot.heads, size=job.source_hw, prior=job.prior)
+        else:
+            pose = decode_quantized(
+                job.slot.heads,
+                size=(crop.side, crop.side),
+                origin=(float(crop.x), float(crop.y)),
+                prior=job.prior,
+            )
         self._stage_ms["decode"] = (time.perf_counter() - started) * 1000.0
+
+        lock_started = time.perf_counter()
+        competitor = self._competitor(job.slot.heads, job.prior, crop, job.source_hw)
+        self._lock.observe(pose, time.monotonic(), job.source_hw, competitor=competitor)
+        self._stage_ms["lock"] += (time.perf_counter() - lock_started) * 1000.0
         return pose
+
+    def _competitor(
+        self,
+        heads: QuantizedHeads,
+        prior: NDArray[np.float32],
+        crop: Crop | None,
+        source_hw: tuple[int, int],
+    ) -> bool:
+        """Whether another centre candidate is clearly stronger than the lock.
+
+        The two candidates are the peak of the locked prior and the peak of the
+        frame-centre prior (see :meth:`PersonLock.frame_center_prior`), and
+        they are weighed by their **probabilities**, not by the prior-weighted
+        scores: the priors differ, so only the center head's confidence is
+        comparable. The graph is allowed to look away from the tracked person
+        only when the person near the frame centre is
+        :data:`STRONGER_FACTOR` more confident; :class:`PersonLock` then
+        requires that to hold for :data:`SWITCH_AFTER_S`.
+        """
+
+        if not self._lock.locked:
+            return False
+        own_x, own_y = center_peak(heads, prior)
+        other_x, other_y = center_peak(heads, self._lock.frame_center_prior(crop, source_hw))
+        if (own_x, own_y) == (other_x, other_y):
+            return False
+        scale = 2.0**-heads.centers_fix_point
+        own = float(_sigmoid(heads.centers[own_y, own_x, 0] * scale))
+        other = float(_sigmoid(heads.centers[other_y, other_x, 0] * scale))
+        return other > STRONGER_FACTOR * own
 
     def detect(self, rgb: NDArray[np.uint8]) -> MovenetPose:
         """Run the DPU model on an ``(H, W, 3)`` RGB uint8 frame."""
@@ -839,3 +1285,24 @@ class _Job:
     job_id: int
     dpu_started: float
     source_hw: tuple[int, int]
+    crop: Crop | None
+    """The region the input was taken from: ``None`` means the whole frame."""
+    prior: NDArray[np.float32]
+    """The centre prior this job's input was decoded with."""
+
+
+def _fitted_crop(crop: Crop | None, source_hw: tuple[int, int]) -> Crop | None:
+    """Return ``crop`` if it fits a frame of ``source_hw``, else ``None``."""
+
+    if crop is None:
+        return None
+    height, width = int(source_hw[0]), int(source_hw[1])
+    if (
+        crop.side <= 0
+        or crop.x < 0
+        or crop.y < 0
+        or crop.x + crop.side > width
+        or crop.y + crop.side > height
+    ):
+        return None
+    return crop

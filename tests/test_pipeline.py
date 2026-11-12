@@ -21,6 +21,7 @@ from cpsa.config import (
     ModelConfig,
     MovenetConfig,
     ShowcaseConfig,
+    SmoothingConfig,
     TrackerConfig,
     WebConfig,
 )
@@ -189,6 +190,18 @@ DEFAULT_TRACKER = TrackerConfig(
     max_misses=6,
 )
 
+DEFAULT_SMOOTHING = SmoothingConfig(
+    enabled=True,
+    min_cutoff=1.0,
+    beta=0.02,
+    d_cutoff=1.0,
+    deadband_px=1.5,
+    show_score=0.35,
+    hide_score=0.25,
+    show_frames=2,
+    hide_frames=4,
+)
+
 
 def feed(camera: FakeCamera, count: int = 3, *, value: int = 0, delay: float = 0.03) -> None:
     """Push frames slowly enough that the loop takes each one from the slot."""
@@ -226,7 +239,12 @@ def config(
         ),
         tracker=tracker if tracker is not None else DEFAULT_TRACKER,
         model=ModelConfig(path=model, conf_thr=0.35, iou_thr=0.45),
-        movenet=MovenetConfig(path=movenet_model, enabled=movenet_enabled, publish_hz=publish_hz),
+        movenet=MovenetConfig(
+            path=movenet_model,
+            enabled=movenet_enabled,
+            publish_hz=publish_hz,
+            smoothing=DEFAULT_SMOOTHING,
+        ),
         labels="it",
         web=WebConfig(
             host="127.0.0.1",

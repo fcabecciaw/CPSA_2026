@@ -35,6 +35,16 @@ movenet:                      # single-pose skeleton model, loaded by model.set 
   path: models/movenet.xmodel # compiled KV260 xmodel (deploy.sh --movenet-model)
   enabled: true               # false: YOLOX only, model.set movenet is rejected
   publish_hz: 30              # cap of pose.state while MoveNet is loaded
+  smoothing:                  # keypoints stabilized like the tracker does for boxes
+    enabled: true             # false: publish the raw keypoints
+    min_cutoff: 1.0           # Hz: One Euro cutoff at rest, where the body stands still
+    beta: 0.02                # px: how much measured speed raises the cutoff (follow a swing)
+    d_cutoff: 1.0             # Hz: cutoff of the speed estimate itself
+    deadband_px: 1.5          # the drawn joint moves only past this (or 1% of the shoulder width)
+    show_score: 0.35          # a joint appears after show_frames frames at or above this score
+    hide_score: 0.25          # ... and disappears after hide_frames frames below this one
+    show_frames: 2            # consecutive confident frames before a joint is shown
+    hide_frames: 4            # consecutive weak frames before a shown joint is dropped
 
 labels: it                    # it | en: language of the boxes and of the panel
 
