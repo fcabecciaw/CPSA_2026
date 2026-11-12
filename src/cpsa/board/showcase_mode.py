@@ -73,6 +73,29 @@ STATE_PERIOD_S = 0.1
 TIMING_PERIOD_S = 5.0
 """The per-stage timing line is logged once per this many seconds."""
 
+_CAP_SLACK_S = 0.002
+"""A frame up to this early on the ``max_fps`` cadence is still processed."""
+
+
+def cap_admits(now: float, next_due: float, period: float) -> tuple[bool, float]:
+    """Decide whether a frame arriving at ``now`` fits the ``max_fps`` cadence.
+
+    The cadence is fixed (``next_due`` advances by ``period``) with
+    :data:`_CAP_SLACK_S` of slack: camera frames arrive with jitter around their
+    period, so a strict ``now < next_due`` test would drop every frame that is a
+    hair early and roughly halve the rate when ``max_fps`` equals the camera rate.
+    A late frame restarts the cadence from its own arrival, so it never builds
+    credit for a burst.
+
+    Returns:
+        ``(admit, next_due)`` with the updated due time.
+    """
+
+    if now < next_due - _CAP_SLACK_S:
+        return False, next_due
+    return True, max(next_due + period, now + period - 2.0 * _CAP_SLACK_S)
+
+
 CAMERA_STALE_S = 1.0
 """``health()["camera"]`` is not ``ok`` when no frame arrived for this long."""
 
@@ -471,10 +494,9 @@ class ShowcaseMode:
             frame = self._slot.get(timeout=_SLOT_TIMEOUT_S)
             if frame is None:
                 continue
-            now = time.perf_counter()
-            if now < next_due:
+            admit, next_due = cap_admits(time.perf_counter(), next_due, period)
+            if not admit:
                 continue
-            next_due = now + period
             try:
                 pending = self._step(frame, pending)
             except Exception:

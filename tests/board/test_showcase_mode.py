@@ -21,6 +21,7 @@ from cpsa.application.config import (
 )
 from cpsa.board.showcase_mode import (
     ShowcaseMode,
+    cap_admits,
     class_color,
     draw_overlay,
     showcase_camera,
@@ -718,3 +719,34 @@ def test_a_failed_wait_does_not_wedge_the_pipeline(
         finally:
             assert mode.stop(1.0) is True
     assert detector.waits >= 3
+
+
+def _admitted(arrivals: list[float], max_fps: float) -> int:
+    next_due = 0.0
+    count = 0
+    for now in arrivals:
+        admit, next_due = cap_admits(now, next_due, 1.0 / max_fps)
+        count += admit
+    return count
+
+
+def test_the_cap_keeps_every_jittered_frame_at_the_camera_rate() -> None:
+    # 60 fps camera with +-1 ms jitter: a strict cadence test dropped about a third.
+    jitter = [0.001 if index % 2 else -0.001 for index in range(600)]
+    arrivals = [1.0 + index / 60.0 + offset for index, offset in enumerate(jitter)]
+
+    assert _admitted(arrivals, max_fps=60.0) == 600
+
+
+def test_the_cap_still_halves_a_camera_twice_as_fast() -> None:
+    arrivals = [1.0 + index / 60.0 for index in range(600)]
+
+    assert _admitted(arrivals, max_fps=30.0) == 300
+
+
+def test_a_late_frame_does_not_build_credit_for_a_burst() -> None:
+    period = 1.0 / 30.0
+    admit, next_due = cap_admits(10.0, 1.0, period)
+
+    assert admit is True
+    assert cap_admits(10.0 + period / 2, next_due, period)[0] is False
