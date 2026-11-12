@@ -25,6 +25,8 @@ export interface PerceptionOptions {
   sceneryContinuousMs: number;
   sceneryReturnMs: number;
   minScore: number;
+  /** "persona" only: the board already filters people at 0.40 (C3). */
+  personMinScore: number;
   minAreaRatio: number;
   implausibleScore: number;
   implausibleHoldMs: number;
@@ -50,6 +52,7 @@ export const DEFAULT_PERCEPTION_OPTIONS: PerceptionOptions = {
   sceneryContinuousMs: 120_000,
   sceneryReturnMs: 30_000,
   minScore: 0.5,
+  personMinScore: 0.4,
   minAreaRatio: 0.0015,
   implausibleScore: 0.7,
   implausibleHoldMs: 2_000,
@@ -160,6 +163,8 @@ export class Perception {
   private largestPerson: Box | null = null;
   private rawPeople = 0;
   private posePerson = false;
+  /** The fused presence (C3): somebody is still there for another source. */
+  private presenceHeld = false;
 
   constructor(options: Partial<PerceptionOptions> = {}) {
     this.options = { ...DEFAULT_PERCEPTION_OPTIONS, ...options };
@@ -173,6 +178,8 @@ export class Perception {
     largestPerson: Box | null;
     /** MoveNet sees a body: MoveNet has no count, only presence (F-E4 #22). */
     posePerson: boolean;
+    /** The stable YOLOX "persona" track (debounced, absent after `absenceMs`). */
+    personTrack: boolean;
   } {
     return {
       mode: this.mode,
@@ -181,7 +188,18 @@ export class Perception {
       crowd: this.stablePeople >= 5,
       largestPerson: this.largestPerson,
       posePerson: this.posePerson,
+      personTrack: this.tracks.get("persona")?.present ?? false,
     };
+  }
+
+  /**
+   * The fused presence of `presence.ts` (C3). While it holds, a YOLOX people
+   * count that drops to 0 is not settled (no `count` → 0 event, no idle
+   * lines): the person is still in front of the camera, just not as a
+   * "persona" box (too close, turned away, Scheletro view).
+   */
+  holdPresence(present: boolean): void {
+    this.presenceHeld = present;
   }
 
   /** Read-only track of a class, for the face and the tests. */
@@ -285,7 +303,9 @@ export class Perception {
     this.rawPeople = people.count;
     this.largestPerson = people.largest;
     if (warmup) {
-      this.stablePeople = this.rawPeople;
+      if (!(this.rawPeople === 0 && this.presenceHeld)) {
+        this.stablePeople = this.rawPeople;
+      }
       this.pendingPeople = null;
       if (this.rawPeople > 0) {
         this.lastPeopleAt = now;
@@ -419,7 +439,9 @@ export class Perception {
       { label: string; count: number; score: number; box: Box; area: number; best: number }
     >();
     for (const object of objects) {
-      if (object.score < this.options.minScore) {
+      const minScore =
+        object.label === "persona" ? this.options.personMinScore : this.options.minScore;
+      if (object.score < minScore) {
         continue;
       }
       const area = areaOf(object.box) / frameArea;
@@ -554,7 +576,7 @@ export class Perception {
     let largest: Box | null = null;
     let largestArea = 0;
     for (const object of objects) {
-      if (object.label !== "persona" || object.score < this.options.minScore) {
+      if (object.label !== "persona" || object.score < this.options.personMinScore) {
         continue;
       }
       const area = areaOf(object.box) / frameArea;
@@ -572,6 +594,11 @@ export class Perception {
 
   private settlePeople(now: number, events: CognitiveEvent[]): void {
     if (this.rawPeople === this.stablePeople) {
+      this.pendingPeople = null;
+      return;
+    }
+    if (this.rawPeople === 0 && this.presenceHeld) {
+      // Another source still sees the person: keep the last count (C3).
       this.pendingPeople = null;
       return;
     }
@@ -666,6 +693,11 @@ export class Perception {
 
   private idle(now: number): CognitiveEvent[] {
     const events: CognitiveEvent[] = [];
+    if (this.stablePeople === 0 && this.presenceHeld) {
+      // Somebody is there for the face or the skeleton: not idle (C3).
+      this.lastPeopleAt = now;
+      return events;
+    }
     if (this.stablePeople === 0) {
       const since = this.lastPeopleAt ?? this.sessionStartedAt ?? now;
       const idleS = (now - since) / 1000;

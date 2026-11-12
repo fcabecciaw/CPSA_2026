@@ -210,6 +210,35 @@
             >
           </p>
 
+          <p class="mente presence-debug debug-only" id="presence-debug">
+            <span class="mente-item"
+              ><span class="mente-key">presenza</span>
+              <span class="presence-dot" id="presence-yolo" data-state="off"
+                title="Traccia persona stabile di YOLOX (vista Oggetti)">YOLO</span>
+              <span class="presence-dot" id="presence-face" data-state="off"
+                title="Almeno un volto dal Face Landmarker del laptop">volto</span>
+              <span class="presence-dot" id="presence-pose" data-state="off"
+                title="Scheletro MoveNet con punteggio ≥ 0,3 (vista Scheletro)">scheletro</span></span
+            >
+            <span class="mente-item"
+              ><span class="mente-key">stato</span>
+              <span id="presence-state"
+                title="Assente solo dopo 5 s senza alcuna fonte; il saluto finale solo dopo un saluto iniziale"
+                >—</span
+              ></span
+            >
+            <span class="mente-item"
+              ><span class="mente-key">sorriso</span>
+              <span id="presence-smile" title="Punteggio attuale / soglia (base neutra del volto + 0,20, o 0,55)"
+                >—</span
+              ></span
+            >
+            <span class="mente-item"
+              ><span class="mente-key">ultimo volto</span>
+              <span id="presence-cue">—</span></span
+            >
+          </p>
+
         </section>
       </main>
 

@@ -10,6 +10,8 @@
  *   refers back to the previous thing it named), asks playful yes/no questions
  *   and answers a nod or a head shake.
  * - **Farewell** — people leave: one goodbye, then back to Attract after ~10 s.
+ *   With the fused presence (C3) "leave" means no YOLOX person, no face and no
+ *   skeleton for 5 s, and the goodbye needs a greeting earlier in the visit.
  *
  * The machine only *decides what to say and when*: every line is offered to
  * `CognitiveEngine.offerScene`, which keeps the single voice, the global gap,
@@ -39,6 +41,17 @@ export interface SceneWorld {
   /** A person in the MoveNet skeleton (MoveNet has no count, F-E4 #22). */
   posePerson: boolean;
   mode: WorldModelName;
+  /**
+   * Fused presence from YOLOX, faces and skeleton (C3, `presence.ts`). When
+   * omitted: `people > 0`, or a MoveNet pose in the Scheletro view.
+   */
+  present?: boolean;
+  /** Faces the laptop tracker sees right now: no goodbye while one is visible. */
+  faces?: number;
+  /** The presence continues an earlier visit: no new greeting. */
+  sameVisit?: boolean;
+  /** A goodbye is allowed (greeted in this visit, 60 s apart). Default true. */
+  farewellAllowed?: boolean;
 }
 
 export interface SceneSnapshot {
@@ -67,6 +80,10 @@ export interface SceneOptions {
   followUpMinMs?: number;
   followUpMaxMs?: number;
 }
+
+/** A smile reaction queues while ARI speaks (queue slot >= 80, C3). */
+export const SMILE_PRIORITY = 85;
+export const SMILE_COOLDOWN_MS = 6_000;
 
 const DEFAULTS: Required<SceneOptions> = {
   rng: Math.random,
@@ -283,6 +300,8 @@ export class SceneMachine {
   private engageAt = 0;
   private farewellAt = 0;
   private goodbyeSent = false;
+  private goodbyeAllowed = true;
+  private faces = 0;
   private playSince = 0;
   private lastSpokenAt = Number.NEGATIVE_INFINITY;
   private lastObject: { label: string; count: number; at: number } | null = null;
@@ -351,6 +370,8 @@ export class SceneMachine {
     this.idleLines = 0;
     this.engageStep = 0;
     this.goodbyeSent = false;
+    this.goodbyeAllowed = true;
+    this.faces = 0;
     this.playSince = now;
     this.lastSpokenAt = Number.NEGATIVE_INFINITY;
     this.lastObject = null;
@@ -454,19 +475,22 @@ export class SceneMachine {
     this.people = world.people;
     this.crowd = world.crowd;
     this.posePerson = world.posePerson;
-    this.present = world.people > 0 || (world.mode === "movenet" && world.posePerson);
+    this.faces = world.faces ?? 0;
+    this.present =
+      world.present ?? (world.people > 0 || (world.mode === "movenet" && world.posePerson));
 
     if (this.present) {
       if (this.name === "attract") {
-        if (now < this.quietUntil) {
+        if (now < this.quietUntil || world.sameVisit === true) {
           this.enterPlay(now);
         } else {
           this.enterEngage(now);
         }
       } else if (this.name === "farewell") {
-        // A short absence (< 10 s) is not a new arrival: no second greeting
-        // (F-E4 #4), straight back to Play.
-        if (now - this.farewellAt < this.options.farewellMs) {
+        // A short absence is not a new arrival: no second greeting (F-E4 #4),
+        // straight back to Play. With the fused presence the visit decides
+        // (back within 15 s of the last sighting, C3).
+        if (world.sameVisit ?? (now - this.farewellAt < this.options.farewellMs)) {
           this.enterPlay(now);
         } else {
           this.enterEngage(now);
@@ -474,7 +498,7 @@ export class SceneMachine {
       }
     } else if (wasPresent || this.name === "engage" || this.name === "play") {
       if (this.name === "engage" || this.name === "play") {
-        this.enterFarewell(now);
+        this.enterFarewell(now, world.farewellAllowed ?? true);
       }
     } else if (this.name === "farewell" && now - this.farewellAt >= this.options.farewellMs) {
       this.enterAttract(now);
@@ -496,10 +520,12 @@ export class SceneMachine {
     this.followUp = null;
   }
 
-  private enterFarewell(now: number): void {
+  private enterFarewell(now: number, goodbyeAllowed: boolean): void {
     this.name = "farewell";
     this.farewellAt = now;
     this.goodbyeSent = false;
+    // No greeting in this visit, or a goodbye less than 60 s ago: leave quietly.
+    this.goodbyeAllowed = goodbyeAllowed;
     this.question = null;
     this.proposedQuestion = null;
     this.followUp = null;
@@ -571,7 +597,7 @@ export class SceneMachine {
   // --- Engage ---------------------------------------------------------------
 
   private engageLine(now: number, memory: CognitiveMemory): SceneLine | null {
-    if (this.people === 0 && !(this.mode === "movenet" && this.posePerson)) {
+    if (!this.present) {
       return null;
     }
     if (this.engageStep > 0 && now - this.engageAt < this.options.engageStepMs) {
@@ -797,7 +823,7 @@ export class SceneMachine {
       });
     }
     if (kind === "smile") {
-      if (!this.cooldown("smile", now, 10_000)) {
+      if (!this.cooldown("smile", now, SMILE_COOLDOWN_MS)) {
         return null;
       }
       const recently = this.lastSmileAt !== null && now - this.lastSmileAt < 60_000;
@@ -805,7 +831,8 @@ export class SceneMachine {
       return this.line({
         ruleId: recently ? "scene.smile.again" : "scene.smile",
         kind: "reaction",
-        priority: 64,
+        // >= 80: waits in the queue slot while ARI is speaking (C3).
+        priority: SMILE_PRIORITY,
         expression: "happy",
         gaze: "person",
         phrases: recently ? SMILES_AGAIN : SMILES,
@@ -952,7 +979,7 @@ export class SceneMachine {
   // --- Farewell -------------------------------------------------------------
 
   private farewellLine(memory: CognitiveMemory): SceneLine | null {
-    if (this.goodbyeSent) {
+    if (this.goodbyeSent || !this.goodbyeAllowed) {
       return null;
     }
     this.goodbyeSent = true;
@@ -964,7 +991,8 @@ export class SceneMachine {
       gaze: "wander",
       phrases: GOODBYES,
       memory,
-      valid: () => this.name === "farewell",
+      // Never while a face is visible: the person is still there (C3).
+      valid: () => this.name === "farewell" && !this.present && this.faces === 0,
     });
   }
 

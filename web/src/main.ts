@@ -6,7 +6,7 @@ import {
   type ConnectionInfo,
   type SocketFactory,
 } from "./client";
-import { CognitiveAgent, HEARTBEAT_MS } from "./cognitive/agent";
+import { CognitiveAgent, HEARTBEAT_MS, type MindSnapshot } from "./cognitive/agent";
 import { CognitiveMemory } from "./cognitive/memory";
 import { Perception } from "./cognitive/perception";
 import { RULEBOOK } from "./cognitive/rulebook";
@@ -115,6 +115,12 @@ const menteRule = byId("mente-rule");
 const menteUtility = byId("mente-utility");
 const menteScene = byId("mente-scene");
 const menteFace = byId("mente-face");
+const presenceYolo = byId("presence-yolo");
+const presenceFace = byId("presence-face");
+const presencePose = byId("presence-pose");
+const presenceState = byId("presence-state");
+const presenceSmile = byId("presence-smile");
+const presenceCue = byId("presence-cue");
 
 const mind = new CognitiveAgent({
   engine: new CognitiveEngine(RULEBOOK),
@@ -251,6 +257,8 @@ const faceTracker = new FaceCueTracker({
   onCue: (cue) => {
     mind.onFace(cue.kind, cue.score, cue.faces, Date.now());
   },
+  // Faces are a presence source too (C3): a close visitor YOLOX misses.
+  onFaces: (sample) => mind.onFaces(sample.count, Date.now()),
   onStatus: () => {
     mind.setFaceStatus(faceTracker.label);
     renderMind();
@@ -281,6 +289,58 @@ function renderMind(): void {
     snapshot.utility === null ? "—" : formatNumber(snapshot.utility, 2);
   menteScene.textContent = snapshot.scene;
   menteFace.textContent = snapshot.face;
+  renderPresence(snapshot);
+}
+
+/** Write a node only when its text changes: this runs at the 10 Hz heartbeat. */
+function setText(node: HTMLElement, text: string): void {
+  if (node.textContent !== text) {
+    node.textContent = text;
+  }
+}
+
+function setDot(node: HTMLElement, on: boolean): void {
+  const value = on ? "on" : "off";
+  if (node.dataset.state !== value) {
+    node.dataset.state = value;
+  }
+}
+
+/**
+ * Debug readout (C3): why ARI greets, says goodbye or reacts to a smile —
+ * the three presence sources, the fused state, the live smile score against
+ * its per-face threshold and the last face cue.
+ */
+function renderPresence(snapshot: MindSnapshot): void {
+  if (document.documentElement.dataset.ui !== "debug") {
+    return;
+  }
+  const presence = snapshot.presence;
+  setDot(presenceYolo, presence.sources.yolo);
+  setDot(presenceFace, presence.sources.face);
+  setDot(presencePose, presence.sources.pose);
+  const state = presence.present
+    ? presence.missingMs !== null
+      ? `presente · nessuna fonte da ${formatNumber(presence.missingMs / 1000, 1)} s`
+      : `presente · ${presence.people} ${presence.people === 1 ? "persona" : "persone"}`
+    : "assente";
+  const visit = presence.greeted ? " · salutato" : "";
+  setText(presenceState, `${state}${visit}`);
+  const smile = faceTracker.smile;
+  setText(
+    presenceSmile,
+    smile === null
+      ? "—"
+      : `${formatNumber(smile.value, 2)} / ${formatNumber(smile.threshold, 2)}` +
+          (smile.baseline === null ? " (base …)" : ` (base ${formatNumber(smile.baseline, 2)})`),
+  );
+  const cue = snapshot.lastFace;
+  setText(
+    presenceCue,
+    cue === null
+      ? "—"
+      : `${cue.kind} ${formatNumber(cue.score, 2)} · ${Math.round((Date.now() - cue.at) / 1000)} s fa`,
+  );
 }
 
 /** The badge, the click gate and the mute button, from the voice snapshot. */
@@ -484,7 +544,10 @@ async function boot(): Promise<void> {
     // Face when someone is there — a YOLO person box or a MoveNet pose with a
     // real body in it — and back to the sphere after 3 s alone.
     const posePresent = lastPose !== null && now - lastPoseAt < 2_000 && lastPose.score >= 0.3;
-    avatar.setEngaged(world.largestPerson !== null || posePresent, now);
+    avatar.setEngaged(
+      world.largestPerson !== null || posePresent || mind.presence.isPresent,
+      now,
+    );
     showcase.tick();
     // The empty invitation changes meaning while the pose model is active.
     const note =

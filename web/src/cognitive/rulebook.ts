@@ -374,17 +374,9 @@ const personRules: Rule[] = [
       !event.quiet &&
       memory.working.focus.people === event.to,
   },
-  {
-    id: "person.leave",
-    category: "person",
-    priority: 55,
-    cooldown_s: 20,
-    expression: "neutral",
-    gaze: "wander",
-    model: "yolox",
-    phrases: ["Ciao, a presto!", "Grazie della visita!", "Ciao ciao! Io resto qui."],
-    when: (event) => event.type === "count" && event.to === 0 && event.from > 0,
-  },
+  // No "person.leave" rule: the goodbye belongs to the Farewell scene alone,
+  // gated by the fused presence (5 s with no person, face or skeleton, after a
+  // greeting, at most once per 60 s; C3).
   {
     id: "person.return",
     category: "person",

@@ -41,7 +41,7 @@ function calibrate(detector: FaceCueDetector, from = 0, step = 50): number {
 }
 
 describe("smile — held, released and cooldown", () => {
-  it("needs 0.4 s above 0.5 before it fires, then fires once per smile", () => {
+  it("needs 0.3 s above the threshold before it fires, then fires once per smile", () => {
     const detector = new FaceCueDetector(options());
     let now = calibrate(detector);
     const smile = face({ blendshapes: { mouthSmileLeft: 0.8, mouthSmileRight: 0.7 } });
@@ -51,7 +51,7 @@ describe("smile — held, released and cooldown", () => {
     }
     expect(cueKinds(fired).filter((kind) => kind === "smile")).toEqual(["smile"]);
     expect(fired[0]!.score).toBeGreaterThan(0.5);
-    expect(fired[0]!.at).toBeGreaterThanOrEqual(550 + 400);
+    expect(fired[0]!.at).toBeGreaterThanOrEqual(550 + 300);
   });
 
   it("does not fire on a spike or below the threshold", () => {
@@ -59,9 +59,10 @@ describe("smile — held, released and cooldown", () => {
     let now = calibrate(detector);
     expect(detector.update(frame(now, [face({ blendshapes: { mouthSmileLeft: 0.9 } })])).length).toBe(0);
     now += 100;
+    // The neutral baseline is 0 here: 0.15 is below baseline + 0.20.
     for (let step = 0; step < 10; step += 1, now += 100) {
       expect(
-        detector.update(frame(now, [face({ blendshapes: { mouthSmileLeft: 0.45 } })])).length,
+        detector.update(frame(now, [face({ blendshapes: { mouthSmileLeft: 0.15 } })])).length,
       ).toBe(0);
     }
   });
@@ -199,5 +200,85 @@ describe("several faces and empty frames", () => {
       fired.push(...detector.update(frame(now, [smile])));
     }
     expect(cueKinds(fired)).toEqual(["smile"]);
+  });
+});
+
+describe("smile — per-face neutral baseline (C3)", () => {
+  const smiles = (cues: readonly FaceCue[]): string[] =>
+    cueKinds(cues).filter((kind) => kind === "smile");
+
+  /** A slightly noisy stream around `level`, deterministic. */
+  function wobble(level: number, step: number): number {
+    return level + [0, 0.03, -0.02, 0.04, -0.03][step % 5]!;
+  }
+
+  function run(
+    detector: FaceCueDetector,
+    from: number,
+    to: number,
+    level: number,
+  ): { cues: FaceCue[]; now: number } {
+    const cues: FaceCue[] = [];
+    let now = from;
+    for (let step = 0; now < to; step += 1, now += 100) {
+      const value = wobble(level, step);
+      cues.push(
+        ...detector.update(
+          frame(now, [face({ blendshapes: { mouthSmileLeft: value, mouthSmileRight: value - 0.02 } })]),
+        ),
+      );
+    }
+    return { cues, now };
+  }
+
+  it("does not fire on a high neutral, and fires on that person's smile", () => {
+    const detector = new FaceCueDetector(options());
+    // A face whose resting mouth reads ~0.42: the old fixed 0.5 was a coin toss.
+    const neutral = run(detector, 0, 4_000, 0.42);
+    expect(smiles(neutral.cues)).not.toContain("smile");
+    expect(detector.smile?.baseline).toBeCloseTo(0.42, 1);
+    expect(detector.smile?.threshold).toBeCloseTo(0.55, 2);
+    const smile = run(detector, neutral.now, neutral.now + 1_000, 0.75);
+    expect(smiles(smile.cues)).toEqual(["smile"]);
+  });
+
+  it("fires on a shy smile over a low neutral, never on the neutral itself", () => {
+    const detector = new FaceCueDetector(options());
+    const neutral = run(detector, 0, 4_000, 0.05);
+    expect(smiles(neutral.cues)).not.toContain("smile");
+    expect(detector.smile?.threshold).toBeCloseTo(0.25, 1);
+    // 0.33 never reached the old 0.5 threshold.
+    const smile = run(detector, neutral.now, neutral.now + 1_000, 0.33);
+    expect(smiles(smile.cues)).toEqual(["smile"]);
+    expect(smile.cues[0]!.at - neutral.now).toBeGreaterThanOrEqual(300);
+  });
+
+  it("keeps a held smile out of the baseline", () => {
+    const detector = new FaceCueDetector(options());
+    const neutral = run(detector, 0, 3_000, 0.05);
+    const held = run(detector, neutral.now, neutral.now + 5_000, 0.6);
+    expect(smiles(held.cues)).toEqual(["smile"]);
+    expect(detector.smile?.baseline).toBeCloseTo(0.05, 1);
+  });
+
+  it("keeps one baseline per face, followed by its box", () => {
+    const detector = new FaceCueDetector(options());
+    const left = (value: number): FaceObservation =>
+      face({ blendshapes: { mouthSmileLeft: value }, box: [0.1, 0.2, 0.2, 0.35] });
+    const right = (value: number): FaceObservation =>
+      face({ blendshapes: { mouthSmileLeft: value }, box: [0.7, 0.2, 0.8, 0.35] });
+    let now = 0;
+    const cues: FaceCue[] = [];
+    // Left rests at 0.45, right at 0.05; the order of the faces flips.
+    for (let step = 0; now < 4_000; step += 1, now += 100) {
+      const faces = step % 2 === 0 ? [left(0.45), right(0.05)] : [right(0.05), left(0.45)];
+      cues.push(...detector.update(frame(now, faces)));
+    }
+    expect(smiles(cues)).not.toContain("smile");
+    // The right face smiles shyly (0.3): only its own low baseline sees it.
+    for (const end = now + 800; now < end; now += 100) {
+      cues.push(...detector.update(frame(now, [left(0.45), right(0.3)])));
+    }
+    expect(smiles(cues)).toEqual(["smile"]);
   });
 });

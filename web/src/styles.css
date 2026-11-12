@@ -1000,6 +1000,32 @@ button {
   color: var(--ion);
 }
 
+/* C3 presence readout: one dot per source, lit while it sees somebody. */
+.presence-debug {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.presence-dot {
+  margin-left: 0.5em;
+}
+
+.presence-dot::before {
+  content: "";
+  display: inline-block;
+  width: 0.6em;
+  height: 0.6em;
+  margin-right: 0.3em;
+  border-radius: 50%;
+  border: 1px solid var(--haze);
+  vertical-align: baseline;
+}
+
+.presence-dot[data-state="on"]::before {
+  background: var(--ion);
+  border-color: var(--ion);
+}
+
 .view-meta {
   margin: 0.4em 0 0;
   font-family: var(--mono);

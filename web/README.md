@@ -98,8 +98,12 @@ numbers. The discreet button at the top right (or the `d` key, ignored while
 typing in a field) switches to **debug mode**, which adds the connection label,
 fps and frame time, “voce: in pausa” when the audio context is suspended, the
 voice picker, the `RGB` badge, the counts and the most confident detections
-with their score bars, the “mente” strip of the cognitive agent and the model
-footer. The choice is stored in `localStorage` (`cpsa.dashboard.ui.v1`);
+with their score bars, the “mente” strip of the cognitive agent, the presence
+readout and the model footer. The presence readout shows why ARI greets, says
+goodbye or reacts to a smile: one dot per presence source (YOLO person track,
+laptop face, MoveNet skeleton with score ≥ 0.3), the fused state (absent only
+after 5 s with no source), the live smile score against its per-face threshold
+and the last face cue. The choice is stored in `localStorage` (`cpsa.dashboard.ui.v1`);
 `?debug=1` or `?debug=0` force it for one load. The CSS does the hiding:
 `<html data-ui>` hides `.debug-only` or `.presentation-only` elements.
 

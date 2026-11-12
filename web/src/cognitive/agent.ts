@@ -10,6 +10,7 @@ import type { CognitiveEvent, FaceCueKind, SceneName, WorldModelName } from "./e
 import { describeEvent } from "./events";
 import { CognitiveMemory } from "./memory";
 import { Perception } from "./perception";
+import { PresenceFusion, type PresenceSnapshot } from "./presence";
 import type { Expression, Utterance } from "./rules";
 import { CognitiveEngine } from "./rules";
 import { SceneMachine } from "./scene";
@@ -24,6 +25,10 @@ export interface MindSnapshot {
   scene: SceneName;
   /** Whether the laptop face cues are on, for the "mente" strip. */
   face: string;
+  /** Fused presence and its sources, for the debug readout (C3). */
+  presence: PresenceSnapshot;
+  /** The last face cue the agent received, for the debug readout. */
+  lastFace: { kind: FaceCueKind; score: number; at: number } | null;
 }
 
 export interface SpeechHandlers {
@@ -38,6 +43,8 @@ export interface AgentOptions {
   perception?: Perception;
   /** The dialogue scenes; tests inject a machine with short timings. */
   scene?: SceneMachine;
+  /** Presence fusion of YOLOX, faces and skeleton (C3). */
+  presence?: PresenceFusion;
   /** Speak one sentence; `main.ts` bridges this to `VoiceEngine`. */
   speak?: (text: string, handlers: SpeechHandlers) => void;
   /**
@@ -53,6 +60,15 @@ export interface AgentOptions {
 
 const SELF_FACT_MS = 20_000;
 
+/** Greetings that open a visit: after one of these a goodbye is allowed. */
+const GREETING_RULES: ReadonlySet<string> = new Set([
+  "person.single",
+  "person.two",
+  "person.small_group",
+  "person.crowd",
+  "person.return",
+]);
+
 /**
  * Period of the cognitive heartbeat (`tick`) the dashboard should use: 100 ms
  * keeps the gap, the queue and the scene timers within a tenth of a second.
@@ -66,6 +82,7 @@ export class CognitiveAgent {
   readonly memory: CognitiveMemory;
   readonly perception: Perception;
   readonly scene: SceneMachine;
+  readonly presence: PresenceFusion;
 
   private readonly options: AgentOptions;
   private mode: WorldModelName = "yolox";
@@ -82,6 +99,7 @@ export class CognitiveAgent {
 
   /** Face cues come from the laptop browser, never from the board (R2-D). */
   private faceStatus = "spento";
+  private lastFace: MindSnapshot["lastFace"] = null;
 
   constructor(options: AgentOptions) {
     this.options = options;
@@ -89,6 +107,7 @@ export class CognitiveAgent {
     this.memory = options.memory ?? new CognitiveMemory();
     this.perception = options.perception ?? new Perception();
     this.scene = options.scene ?? new SceneMachine();
+    this.presence = options.presence ?? new PresenceFusion();
   }
 
   get isVisionLost(): boolean {
@@ -104,6 +123,8 @@ export class CognitiveAgent {
       mode: this.mode,
       scene: this.scene.scene,
       face: this.faceStatus,
+      presence: this.presence.snapshot(),
+      lastFace: this.lastFace,
     };
   }
 
@@ -135,7 +156,10 @@ export class CognitiveAgent {
       return modeEvents;
     }
 
+    this.perception.holdPresence(this.presence.update(now).present);
     const events = this.perception.update(state, now);
+    const world = this.perception.world;
+    this.presence.observeYolo(world.personTrack, world.people, now);
     this.prepare(events, now);
     this.emit([...modeEvents, ...events], now);
     return events;
@@ -154,6 +178,7 @@ export class CognitiveAgent {
       modeEvents.push({ type: "vision", state: "back", now });
       this.options.onExpression?.("happy");
     }
+    this.presence.observePose(pose.score, now);
     const events = this.perception.updatePose(pose, now);
     this.prepare(events, now);
     this.emit([...modeEvents, ...events], now);
@@ -163,10 +188,19 @@ export class CognitiveAgent {
   /** A face cue confirmed by the laptop face tracker (MediaPipe, R2-D). */
   onFace(kind: FaceCueKind, score: number, faces: number, now: number): CognitiveEvent[] {
     this.begin(now);
+    this.lastFace = { kind, score, at: now };
     const event: CognitiveEvent = { type: "face", kind, score, faces, now };
     this.prepare([event], now);
     this.emit([event], now);
     return [event];
+  }
+
+  /**
+   * One laptop Face Landmarker sample (10–15 Hz): how many faces it saw. Only
+   * a presence source (C3); the cues themselves arrive through `onFace`.
+   */
+  onFaces(count: number, now: number): void {
+    this.presence.observeFaces(count, now);
   }
 
   /** `status` at 1 Hz: self-facts and camera errors. */
@@ -249,7 +283,9 @@ export class CognitiveAgent {
     // A mode switch must not look like an arrival: the scene keeps the person
     // it can still see and skips the greeting (F-E4 #22).
     const wasPresent =
-      this.perception.world.people > 0 || this.perception.world.posePerson;
+      this.perception.world.people > 0 ||
+      this.perception.world.posePerson ||
+      this.presence.isPresent;
     this.mode = model;
     this.perception.reset(now, model);
     this.memory.setFocus({ mode: model, people: 0, crowd: false, present: [] });
@@ -309,6 +345,11 @@ export class CognitiveAgent {
     const utterance = this.engine.tick(now, this.memory);
     if (utterance !== null) {
       this.lastUtterance = utterance;
+      if (utterance.sceneKind === "greeting" || GREETING_RULES.has(utterance.ruleId)) {
+        this.presence.noteGreeting(now);
+      } else if (utterance.sceneKind === "goodbye") {
+        this.presence.noteFarewell(now);
+      }
       this.scene.noteSpoken(utterance, this.memory, now);
       this.options.onExpression?.(utterance.expression);
       const handlers: SpeechHandlers = {
@@ -353,11 +394,19 @@ export class CognitiveAgent {
   /** Ask the scene machine what it wants to say; the engine decides when. */
   private offerScene(now: number): void {
     const world = this.perception.world;
+    const presence = this.presence.update(now);
+    this.perception.holdPresence(presence.present);
     const line = this.scene.step(now, this.memory, {
-      people: world.people,
+      // YOLOX counts people; with no YOLOX person (Scheletro, very close) the
+      // faces do, and a lone skeleton is one person (C3).
+      people: world.people > 0 ? world.people : presence.people,
       crowd: world.crowd,
       posePerson: world.posePerson,
       mode: this.mode,
+      present: presence.present,
+      faces: presence.faces,
+      sameVisit: presence.sameVisit,
+      farewellAllowed: this.presence.farewellAllowed(now),
     });
     if (line !== null) {
       this.engine.offerScene(line, this.memory, now);
