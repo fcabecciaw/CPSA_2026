@@ -51,6 +51,7 @@ stops B, releases the camera and the DPU and unlinks the shared memory.
 | `cpsa/camera.py` | V4L2 capture through `linuxpy`, node selection, controls, YUYV→RGB (`cv2`). |
 | `cpsa/dpu.py` | VART graph introspection: subgraphs, tensor shapes and fix points, LUT quantization. |
 | `cpsa/yolox.py` | YOLOX-nano detector: preprocessing, `submit`/`wait` pipelining, int8 decode, COCO labels. |
+| `cpsa/yolov5.py` | YOLOv5-nano (640x640) evaluation: same seams, YOLOv5 anchors/exp decode, not wired into the pipeline. |
 | `cpsa/overlay.py` | Boxes and tags on the frame. |
 | `cpsa/channel.py` | The frame channel and the message channel between the processes. |
 | `cpsa/pipeline.py` | The loop: frame cadence, publishing, camera recovery, stage timings. |
@@ -154,6 +155,30 @@ uv run python scripts/profile_showcase.py --model models/yolox_nano.xmodel
 
 That prints the per-stage cost (preprocess, DPU, decode, draw, JPEG) against the
 16.7 ms frame budget.
+
+## YOLOv5-nano (evaluation)
+
+`src/cpsa/yolov5.py` is a standalone evaluation of the model-zoo YOLOv5-nano at
+its native 640x640 (`4.6 G` float ops against YOLOX-nano's `1.0 G` at 416): same
+preprocessing/`submit`/`wait`/int8-prefilter seams, YOLOv5's anchors and
+`sigmoid(t) * 2` decode, and the zoo's per-cell, multi-label post-processing.
+It is **not wired into the pipeline or the configuration**, and the YOLOX
+detector stays the one the showcase runs.
+
+The DPU artifact comes from `tools/vitis/zoo_yolov5_nano.sh`; the reference
+check (`tools/vitis/yolov5_reference.py`) is described in
+[`tools/vitis/README.md`](tools/vitis/README.md), together with the zoo
+packaging constraint that forces the prebuilt route. On the board, with the
+service stopped:
+
+```sh
+sudo systemctl stop cpsa-showcase
+uv run python scripts/profile_showcase.py --yolov5-model models/yolov5_nano.xmodel
+```
+
+Without `--yolov5-model` the `yolov5` lines measure the host preprocess and
+decode for real and report the DPU stage as an estimate; the graph has not been
+timed on the board.
 
 ## Building the model
 

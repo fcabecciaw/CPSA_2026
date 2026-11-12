@@ -29,6 +29,7 @@ RULES: dict[str, tuple[frozenset[str], frozenset[str] | None]] = {
     "camera": (frozenset({"config"}), frozenset({"cv2", "linuxpy", "numpy"})),
     "yolox": (frozenset({"dpu"}), frozenset({"cv2", "numpy"})),
     "motion": (frozenset(), frozenset({"cv2", "numpy"})),
+    "yolov5": (frozenset({"dpu", "yolox"}), frozenset({"cv2", "numpy"})),
     "movenet": (frozenset({"dpu"}), frozenset({"cv2", "numpy"})),
     "overlay": (frozenset({"protocol"}), frozenset({"cv2", "numpy"})),
     "tracker": (frozenset({"config", "yolox"}), frozenset({"numpy"})),

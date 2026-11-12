@@ -69,6 +69,7 @@ def test_the_package_is_the_one_flat_tree() -> None:
         "protocol",
         "server",
         "tracker",
+        "yolov5",
         "yolox",
     ]
     directories = [

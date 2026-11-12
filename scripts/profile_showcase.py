@@ -9,13 +9,15 @@ frame, which is what the coordinator re-runs after a deploy::
     cd ~/cpsa && PYTHONPATH=src python3 scripts/profile_showcase.py
 
 With ``--model models/yolox_nano.xmodel`` the real graph runs on the DPU through
-:class:`~cpsa.yolox.YoloxDetector`, and with ``--movenet-model
+:class:`~cpsa.yolox.YoloxDetector`, with ``--yolov5-model
+models/yolov5_nano.xmodel`` the YOLOv5-nano graph runs through
+:class:`~cpsa.yolov5.Yolov5Detector`, and with ``--movenet-model
 models/movenet.xmodel`` the real MoveNet graph runs through
 :class:`~cpsa.movenet.DpuMovenet`: preprocess, DPU and decode are timed by
 ``submit``/``wait``, exactly as the showcase loop drives them. Without them the
 DPU stages report the wired-in stand-ins (``--dpu-ms`` 4.6 ms for YOLOX,
-``--movenet-dpu-ms`` 3.14 ms for MoveNet, the board measurements) and the CPU
-stages are measured for real.
+``--yolov5-dpu-ms`` for YOLOv5-nano, ``--movenet-dpu-ms`` 3.14 ms for MoveNet)
+and the CPU stages are measured for real.
 
 R2-G loads one model at a time, so the report has one budget line per model: the
 DPU runs frame N while the CPU decodes, draws and encodes frame N-1, and a frame
@@ -45,6 +47,13 @@ bilinear resize -- not a second pass over the frame.
 and one absolute difference per frame. While the scene does not move the loop
 pays ``camera + motion + draw`` per frame instead of the whole YOLOX loop, plus
 a full detection every ``tracker.still.force_every_s`` seconds.
+
+``yolov5 decode`` is the same measurement on YOLOv5-nano's 640x640 heads
+(``(80, 80, 255)`` anchor-major slots at ``fix_point`` 3, 4, 4). The YOLOv5 DPU
+line has no board measurement yet: without ``--yolov5-model`` it scales the
+YOLOX run by the float-op ratio of the two graphs (4.6 G against 1.0 G) and says
+so in the note, so the view's budget figure is an estimate until the graph is
+run.
 
 Exit status is 0 when the measurement ran; ``--target-ms`` only labels the
 PASS/FAIL column.
@@ -91,6 +100,18 @@ YOLOX_OBJECT_CONF = 0.25
 """The thresholds of ``config/showcase.yaml``, mirrored so the profile decodes
 like the showcase: ``person`` strict, every other class loose enough to keep a
 bottle held in front of it."""
+
+YOLOV5_CONF_THR = 0.35
+YOLOV5_IOU_THR = 0.45
+YOLOV5_CLASS_CONF = {"person": 0.40}
+YOLOV5_OBJECT_CONF = 0.25
+"""The same showcase thresholds for YOLOv5-nano, whose graph is not wired into
+the pipeline yet."""
+
+DEFAULT_YOLOV5_DPU_MS = 21.0
+"""YOLOv5-nano's 640x640 graph has not been timed on the board: this scales the
+4.6 ms YOLOX measurement by the float-op ratio of the two graphs (4.6 G against
+1.0 G). Pass ``--yolov5-model`` to measure instead."""
 
 SKELETON_DRAW_TARGET_MS = 1.5
 """Board target of the MoveNet overlay: the dimmed frame plus the neon skeleton."""
@@ -175,6 +196,46 @@ def synthetic_heads() -> list[NDArray[np.int8]]:
             head[row, column, 5] = generator.integers(80, 127)  # person
             if index % 2 == 0:
                 head[row, column, 5 + 39] = generator.integers(40, 100)  # bottle
+        heads.append(head)
+    return heads
+
+
+YOLOV5_HEAD_SHAPES = ((80, 80, 255), (40, 40, 255), (20, 20, 255))
+"""Output shapes of the compiled YOLOv5-nano graph (``inspect_xmodel.py``)."""
+
+YOLOV5_FIX_POINTS = (3, 4, 4)
+"""Per-head output ``fix_point`` of the same graph, in stride order."""
+
+
+def synthetic_yolov5_heads() -> list[NDArray[np.int8]]:
+    """The three int8 heads of a realistic 640x640 YOLOv5-nano frame.
+
+    Shape and ``fix_point`` are the compiled graph's; YOLOv5 slots are
+    anchor-major, so slot ``a`` starts at channel ``85 * a`` and its objectness
+    and class logits are not at channels 4 and 5 of the cell. The background
+    objectness sits at the most negative int8 value, so the int8 prefilter drops
+    the grid and only the planted slots reach the float decode; half of them also
+    carry a bottle above its threshold, the multi-label case.
+    """
+
+    generator = np.random.default_rng(20261112)
+    heads: list[NDArray[np.int8]] = []
+    for height, width, channels in YOLOV5_HEAD_SHAPES:
+        head = np.full((height, width, channels), -128, dtype=np.int8)
+        for anchor in range(3):
+            base = anchor * 85
+            head[..., base : base + 4] = generator.integers(
+                -40, 40, size=(height, width, 4), dtype=np.int8
+            )
+        for index in range(8):
+            row = int(generator.integers(0, height))
+            column = int(generator.integers(0, width))
+            base = (index % 3) * 85
+            head[row, column, base + 4] = generator.integers(70, 120)
+            head[row, column, base + 5 : base + 85] = generator.integers(-100, -20, size=80)
+            head[row, column, base + 5] = generator.integers(80, 127)  # person
+            if index % 2 == 0:
+                head[row, column, base + 5 + 39] = generator.integers(40, 100)  # bottle
         heads.append(head)
     return heads
 
@@ -287,6 +348,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--dpu-ms", type=float, default=DEFAULT_DPU_MS)
     parser.add_argument(
+        "--yolov5-model",
+        default=None,
+        help=(
+            "compiled YOLOv5-nano .xmodel to run on the DPU; without it --yolov5-dpu-ms is assumed"
+        ),
+    )
+    parser.add_argument("--yolov5-dpu-ms", type=float, default=DEFAULT_YOLOV5_DPU_MS)
+    parser.add_argument(
         "--movenet-model",
         default=None,
         help="compiled MoveNet .xmodel to run on the DPU; without it --movenet-dpu-ms is assumed",
@@ -333,6 +402,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     from cpsa.overlay import draw_overlay, draw_skeleton
     from cpsa.protocol import ShowcaseObject
+    from cpsa.yolov5 import (
+        YOLOV5_INPUT_SCALE,
+        YOLOV5_INPUT_SIZE,
+        YOLOV5_PAD_VALUE,
+        YOLOV5_STRIDES,
+        QuantizedYolov5Decoder,
+        Yolov5Detector,
+    )
+    from cpsa.yolov5 import (
+        prepare_input_into as prepare_yolov5_into,
+    )
     from cpsa.yolox import (
         YOLOX_INPUT_SIZE,
         YOLOX_PAD_VALUE,
@@ -346,6 +426,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     yolox_thresholds = class_thresholds(
         YOLOX_CONF_THR, class_conf=YOLOX_CLASS_CONF, object_conf=YOLOX_OBJECT_CONF
+    )
+    yolov5_thresholds = class_thresholds(
+        YOLOV5_CONF_THR, class_conf=YOLOV5_CLASS_CONF, object_conf=YOLOV5_OBJECT_CONF
     )
 
     frame = synthetic_frame(args.width, args.height)
@@ -497,6 +580,87 @@ def main(argv: Sequence[str] | None = None) -> int:
             [args.dpu_ms] * args.runs,
             args.target_ms,
             note="assumed, pass --model to measure",
+        )
+
+    # -- YOLOv5-nano at 640x640: the same two-slot loop, larger input ---------
+    yolov5_lut = input_quantization_lut_scaled(6, YOLOV5_INPUT_SCALE)
+    yolov5_view = np.empty((*YOLOV5_INPUT_SIZE, 3), dtype=np.int8)
+    yolov5_view.fill(yolov5_lut[YOLOV5_PAD_VALUE])
+
+    def yolov5_preprocess() -> None:
+        prepare_yolov5_into(frame, YOLOV5_INPUT_SIZE, yolov5_lut, yolov5_view, fill_pad=False)
+
+    yolov5_preprocess_ms = report("yolov5 pre", timed(args.runs, yolov5_preprocess), args.target_ms)
+
+    yolov5_decode_ms = 0.0
+    yolov5_dpu_ms = args.yolov5_dpu_ms
+    if args.yolov5_model:
+        yolov5_detector = Yolov5Detector(
+            args.yolov5_model,
+            conf_thr=YOLOV5_CONF_THR,
+            iou_thr=YOLOV5_IOU_THR,
+            class_thr=yolov5_thresholds,
+        )
+        yolov5_tokens: list[int] = []
+
+        def yolov5_cycle() -> None:
+            yolov5_tokens.append(yolov5_detector.submit(frame))
+            yolov5_detector.wait(yolov5_tokens.pop())
+
+        for _ in range(2):
+            yolov5_cycle()
+        yolov5_dpu_times: list[float] = []
+        yolov5_decode_times: list[float] = []
+        yolov5_preprocess_times: list[float] = []
+        yolov5_round_trip: list[float] = []
+        for _ in range(args.runs):
+            started = time.perf_counter()
+            yolov5_cycle()
+            yolov5_round_trip.append((time.perf_counter() - started) * 1000.0)
+            stage = yolov5_detector.stage_ms
+            yolov5_preprocess_times.append(stage["preprocess"])
+            yolov5_dpu_times.append(stage["dpu"])
+            yolov5_decode_times.append(stage["decode"])
+        yolov5_preprocess_ms = report("yolov5 pre", yolov5_preprocess_times, args.target_ms)
+        yolov5_dpu_ms = report("yolov5 dpu", yolov5_dpu_times, args.target_ms, note="graph")
+        yolov5_decode_ms = report(
+            "yolov5 decode",
+            yolov5_decode_times,
+            args.target_ms,
+            note="int8 prefilter, multi-label",
+        )
+        report(
+            "yolov5 s+w",
+            yolov5_round_trip,
+            args.target_ms,
+            note="preprocess+dpu+decode",
+        )
+        print(
+            f"yolov5 decode: last frame kept {yolov5_detector.last_candidate_count} int8 candidates"
+        )
+    else:
+        yolov5_heads = synthetic_yolov5_heads()
+        yolov5_decoder = QuantizedYolov5Decoder(
+            [tuple(int(value) for value in head.shape) for head in yolov5_heads],
+            YOLOV5_STRIDES,
+            YOLOV5_FIX_POINTS,
+        )
+        yolov5_decode_ms = report(
+            "yolov5 decode",
+            timed(
+                args.runs,
+                lambda: yolov5_decoder.decode(
+                    yolov5_heads, YOLOV5_CONF_THR, YOLOV5_IOU_THR, yolov5_thresholds
+                ),
+            ),
+            args.target_ms,
+            note=f"int8 prefilter, {yolov5_decoder.last_candidate_count} candidates",
+        )
+        yolov5_dpu_ms = report(
+            "yolov5 dpu",
+            [args.yolov5_dpu_ms] * args.runs,
+            args.target_ms,
+            note="assumed from YOLOX ops, pass --yolov5-model to measure",
         )
 
     # -- MoveNet: the model that replaces YOLOX on the DPU (R2-G) -------------
@@ -675,6 +839,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     yolox_dpu_ms = preprocess_ms + dpu_ms
     yolox_cpu_ms = camera_cv2 + preprocess_ms + decode_ms + draw_ms
     yolox_loop_ms = max(yolox_dpu_ms, yolox_cpu_ms)
+    yolov5_dpu_frame_ms = yolov5_preprocess_ms + yolov5_dpu_ms
+    yolov5_cpu_ms = camera_cv2 + yolov5_preprocess_ms + yolov5_decode_ms + draw_ms
+    yolov5_loop_ms = max(yolov5_dpu_frame_ms, yolov5_cpu_ms)
     movenet_dpu_frame_ms = movenet_preprocess_ms + movenet_dpu_ms
     movenet_cpu_ms = (
         camera_cv2
@@ -689,6 +856,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"\nYOLOX view: max(preprocess+dpu={yolox_dpu_ms:.2f}, "
         f"camera+preprocess+decode+draw={yolox_cpu_ms:.2f}) = {yolox_loop_ms:.2f} ms "
         f"-> {1000.0 / yolox_loop_ms:.1f} fps"
+    )
+    print(
+        f"YOLOv5 view: max(preprocess+dpu={yolov5_dpu_frame_ms:.2f}, "
+        f"camera+preprocess+decode+draw={yolov5_cpu_ms:.2f}) = {yolov5_loop_ms:.2f} ms "
+        f"-> {1000.0 / yolov5_loop_ms:.1f} fps"
     )
     print(
         f"MoveNet view: max(movenet pre+dpu={movenet_dpu_frame_ms:.2f}, "
@@ -713,7 +885,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"web encoder thread: jpeg={jpeg_ms:.2f} ms "
         f"-> {1000.0 / jpeg_ms:.1f} fps (off the loop, one frame per client set)"
     )
-    for name, loop_ms in (("YOLOX", yolox_loop_ms), ("MoveNet", movenet_loop_ms)):
+    for name, loop_ms in (
+        ("YOLOX", yolox_loop_ms),
+        ("YOLOv5", yolov5_loop_ms),
+        ("MoveNet", movenet_loop_ms),
+    ):
         budget = "PASS" if loop_ms <= args.target_ms else "OVER BUDGET"
         print(
             f"budget {name:8s}: {args.target_ms:.2f} ms per frame "

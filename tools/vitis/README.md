@@ -1,9 +1,10 @@
 # `tools/vitis` — the KV260 DPU model pipeline
 
-PC-side pipeline that turns the Vitis AI model-zoo **YOLOX-nano** and
-**MoveNet** into `.xmodel` files compiled for the KV260 DPU
+PC-side pipeline that turns the Vitis AI model-zoo **YOLOX-nano**,
+**YOLOv5-nano** and **MoveNet** into `.xmodel` files compiled for the KV260 DPU
 (`DPUCZDX8G_ISA1_B4096`, fingerprint `0x101000016010407`). No training and no
-requantization: both zoo packages are already quantized.
+requantization: the zoo packages are already quantized (see the YOLOv5 section
+for the package that is no longer downloadable).
 
 Vitis AI 3.5's `DPUCZDX8G_ISA1_B4096` target alias maps to fingerprint
 `0x101000056010407` (the 3.x feature code), which the 2.5-era KV260 B4096
@@ -92,6 +93,69 @@ no extra or missing boxes; boxes that collapse below 1 px^2 against the frame
 edge are excluded on both sides (predictions into the letterbox padding have no
 usable area). Observed on 27 COCO images (plus the package demo and two
 Ultralytics samples): 177 matched boxes, minimum IoU 0.999987, no failures.
+
+## YOLOv5-nano (`src/cpsa/yolov5.py`, Y5)
+
+```sh
+tools/vitis/zoo_yolov5_nano.sh              # download, prepare, inspect
+tools/vitis/zoo_yolov5_nano.sh --skip-download
+```
+
+Two routes, in order: the float+QAT package
+(`pt_yolov5-nano_coco_640_640_4.6G_3.0.zip`) with its
+`qat/convert_qat_results/*_int.xmodel` compiled by `compile.sh`, or the prebuilt
+`yolov5_nano_pt-zcu102_zcu104_kv260-r3.0.0.tar.gz`. **The package route does not
+currently work**: the zoo returns a 1005-byte README-only archive for it (the
+YOLO packages are no longer published; the README tells customers to contact
+AMD), so there are no QAT weights and no `_int.xmodel` to compile. The prebuilt
+tar is downloadable (1.5 MB, md5 `61210fe6d964e34301af0640e0b17d93`) and is
+already compiled by Vitis AI 3.0 for `DPUCZDX8G_ISA1_B4096`, so the script
+re-stamps its recorded fingerprint `0x101000056010407` to `0x101000016010407`
+with `restamp_xmodel.py` (one protobuf varint, nothing else). **That is a
+fingerprint rewrite of a prebuilt artifact, not a compile, and the re-stamped
+file has not been loaded on a board.** Compiling the already-compiled graph is
+not an option (`vai_c_xir` refuses a non-leaf subgraph).
+
+Outputs (git-ignored): `build/models/zoo/yolov5_nano/`,
+`build/vitis/yolov5_nano/compiled/yolov5_nano.xmodel`,
+`build/vitis/report/inspect_yolov5_nano.json`, `build/vitis/logs/zoo_yolov5_nano_*.log`.
+The script fails unless the artifact reports one DPU subgraph, fingerprint
+`0x101000016010407`, target `DPUCZDX8G_ISA1_B4096`, input `1x640x640x3`, and the
+three `255`-channel heads at strides 8, 16 and 32.
+
+Observed: 5 subgraphs, 1 DPU (209 ops), input `1x640x640x3` xint8 `fp=6`,
+outputs `1x80x80x255` `fp=3`, `1x40x40x255` `fp=4`, `1x20x20x255` `fp=4`. The
+graph stays in the logit domain (no sigmoid in the xmodel), and the prototxt
+preprocessing is `mean 0, scale 0.00392156` over RGB, i.e. `pixel / 255` with a
+letterbox padded with 114. A head cell holds **three anchor slots**, anchor-major
+(`slot a` at channel `85 * a`), with the zoo anchors
+`(10,13)(16,30)(33,23)` / `(30,61)(62,45)(59,119)` / `(116,90)(156,198)(373,326)`;
+the zoo post-processing decodes `cx = (sigmoid(tx) * 2 - 0.5 + col) * stride`,
+`w = (sigmoid(tw) * 2) ** 2 * anchor_w`, `score = sigmoid(obj) * sigmoid(cls)`.
+
+The reference check mirrors `yolox_reference.py`: `prepare` letterboxes on the
+host, `dump` runs the reference model in the container and applies a literal
+port of the zoo's `yolov3_post_process` (`type: YOLOV5`) and its per-class NMS,
+and `check` decodes the same int8 head tensors through `cpsa.yolov5`:
+
+```sh
+uv run --no-sync python tools/vitis/yolov5_reference.py prepare \
+  --images build/vitis/yolov5_reference/images --work build/vitis/yolov5_reference
+tools/vitis/run_vitis.sh python tools/vitis/yolov5_reference.py dump \
+  --work build/vitis/yolov5_reference
+uv run --no-sync python tools/vitis/yolov5_reference.py check \
+  --work build/vitis/yolov5_reference --out build/vitis/report/yolov5_reference.json
+```
+
+The reference model is the public Ultralytics YOLOv5n v7.0 float checkpoint
+(`build/third_party/yolov5n.pt`, same architecture and anchors), because the QAT
+weights are not downloadable; `dump` asserts the checked model has the zoo's
+strides, the `3 x 85` head layout and the prototxt anchors, rounds both heads
+through the graph's output `fix_point` (3, 4, 4) and the input through `fp=6`,
+so both sides decode the very same tensors. **What this proves is the decode and
+post-processing equivalence, not the accuracy of the zoo weights.** Observed on
+28 COCO images (20 of them with a person and an object): 211 matched boxes,
+minimum IoU 0.999999767, no missing or extra boxes, no failures.
 
 ## MoveNet (`src/cpsa/movenet.py`, M1)
 
