@@ -101,11 +101,17 @@ camera:    # device (auto or /dev/videoN), match, width, height, fps, exposure,
            # gain, white_balance, backlight_compensation, saturation, power_line_hz
 tracker:   # enabled, iou_match, alpha, fast_alpha, deadband_iou, min_hits, max_misses,
            # still: enabled, motion_thr, force_every_s
-model:     # path, conf_thr, iou_thr
+model:     # path, conf_thr, iou_thr, zoom, zoom_center
 labels:    # it | en
 web:       # host, port, video_fps, jpeg_quality, static_dir
 log:       # level
 ```
+
+`model.zoom` centre-crops the frame before the letterbox: `1.0` is the whole
+frame, and `1.3`-`1.5` feed the central part of it into the same 416x416 input,
+so a small object reaches the network larger without extra DPU work;
+`zoom_center` moves that crop, and the boxes still come back in full-frame
+pixels.
 
 `camera.device: auto` resolves the node by card name at every start, so a
 re-plug does not need a restart of the unit. The camera's automatic exposure,

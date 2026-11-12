@@ -36,6 +36,10 @@ other class at 0.25) on int8 heads whose object cells half hold a second class
 above threshold, so the line reports the multi-label decode and its class-aware
 NMS -- the stage that keeps a bottle held in front of a person detectable.
 
+``preprocess 1.5x`` is the same letterbox fed the centred crop ``model.zoom``
+1.5 would use: the crop is a view of the frame, so the only cost is the smaller
+bilinear resize -- not a second pass over the frame.
+
 ``motion`` is the still gate in front of the YOLOX DPU
 (:class:`~cpsa.motion.StillGate`): one grey conversion, one 80x60 area resize
 and one absolute difference per frame. While the scene does not move the loop
@@ -337,6 +341,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         YoloxDetector,
         class_thresholds,
         prepare_input_into,
+        zoom_crop,
     )
 
     yolox_thresholds = class_thresholds(
@@ -366,6 +371,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         prepare_input_into(frame, YOLOX_INPUT_SIZE, lut, view, fill_pad=False)
 
     preprocess_ms = report("preprocess", timed(args.runs, preprocess), args.target_ms)
+
+    # model.zoom crops before the letterbox; the crop is a view, so the stage
+    # only pays a smaller resize than the whole-frame one above.
+    zoomed = zoom_crop(args.width, args.height, 1.5)
+
+    def preprocess_zoom() -> None:
+        crop = frame[
+            zoomed.top : zoomed.top + zoomed.height,
+            zoomed.left : zoomed.left + zoomed.width,
+        ]
+        prepare_input_into(crop, YOLOX_INPUT_SIZE, lut, view, fill_pad=False)
+
+    preprocess_zoom_ms = report(
+        "preprocess 1.5x",
+        timed(args.runs, preprocess_zoom),
+        args.target_ms,
+        note="centred crop, same 416x416 input",
+    )
 
     labels = ("persona", "bicicletta", "auto", "bottiglia", "tazza", "libro")
     objects = [
@@ -676,6 +699,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"MoveNet person crop: pre={movenet_crop_preprocess_ms:.2f} ms "
         f"(whole frame {movenet_preprocess_ms:.2f}), lock={movenet_lock_ms:.2f}, "
         f"stabilize={movenet_stabilize_ms:.2f}"
+    )
+    print(
+        f"zoom: preprocess 1.5x={preprocess_zoom_ms:.2f} ms "
+        f"(whole frame {preprocess_ms:.2f}), no extra DPU work"
     )
     print(
         f"still frame: camera+motion+draw="

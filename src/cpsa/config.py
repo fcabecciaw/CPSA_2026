@@ -14,7 +14,8 @@ camera:  { device: auto, match: RealSense, width: 640, height: 480, fps: 60,
 tracker: { enabled: true, iou_match: 0.3, alpha: 0.35, fast_alpha: 0.8,
            deadband_iou: 0.9, min_hits: 2, max_misses: 6 }
 model:   { path: models/yolox_nano.xmodel, conf_thr: 0.35,
-           class_conf: {person: 0.40}, object_conf: 0.25, iou_thr: 0.45 }
+           class_conf: {person: 0.40}, object_conf: 0.25, iou_thr: 0.45,
+           zoom: 1.0, zoom_center: [0.5, 0.5] }
 movenet: { path: models/movenet.xmodel, enabled: true, publish_hz: 30,
            smoothing: { enabled: true, min_cutoff: 1.0, beta: 0.02,
                         d_cutoff: 1.0, deadband_px: 1.5, show_score: 0.35,
@@ -29,7 +30,7 @@ log:     { level: INFO }
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,6 +40,7 @@ __all__ = [
     "LABEL_LANGUAGES",
     "LOG_LEVELS",
     "WHITE_BALANCE_AUTO",
+    "ZOOM_RANGE",
     "CameraConfig",
     "ConfigError",
     "LogConfig",
@@ -72,6 +74,10 @@ BACKLIGHT_COMPENSATION_RANGE = (0, 4)
 
 SATURATION_RANGE = (0, 255)
 """V4L2 ``saturation`` range of the F200 RGB node; the camera default is 128."""
+
+
+ZOOM_RANGE = (1.0, 2.0)
+"""``model.zoom`` range: 1.0 is the whole frame, 2.0 the central quarter."""
 
 
 DEFAULT_CAMERA_MATCH = "RealSense"
@@ -213,6 +219,12 @@ class ModelConfig:
     ``class_conf``, then ``object_conf``, then ``conf_thr``. The names are
     checked against the COCO-80 table when the detector is built
     (:func:`cpsa.yolox.class_thresholds`), so a typo cannot reach the board.
+
+    ``zoom`` centre-crops the frame before the letterbox: ``1.0`` (the default)
+    feeds the whole frame, ``1.3``-``1.5`` feeds the central 77%-44% into the
+    same 416x416 input, so the objects held in front of the camera arrive
+    larger and stop flickering between classes. ``zoom_center`` moves that crop
+    (``[0.5, 0.5]`` is the middle); boxes are mapped back to full-frame pixels.
     """
 
     path: Path
@@ -220,6 +232,8 @@ class ModelConfig:
     iou_thr: float
     class_conf: Mapping[str, float] = field(default_factory=dict)
     object_conf: float | None = None
+    zoom: float = 1.0
+    zoom_center: tuple[float, float] = (0.5, 0.5)
 
     @property
     def name(self) -> str:
@@ -369,6 +383,8 @@ def _model_config(model: _Section) -> ModelConfig:
         iou_thr=model.fraction("iou_thr"),
         class_conf=model.fraction_map("class_conf"),
         object_conf=model.optional_fraction("object_conf"),
+        zoom=model.optional_number("zoom", 1.0, *ZOOM_RANGE),
+        zoom_center=model.fraction_pair("zoom_center", (0.5, 0.5)),
     )
     model.reject_unknown()
     return config
@@ -484,6 +500,38 @@ class _Section:
         if name not in self._data:
             return None
         return self.fraction(name)
+
+    def optional_number(self, name: str, default: float, minimum: float, maximum: float) -> float:
+        """Return the number at ``name`` within ``[minimum, maximum]``, or ``default``."""
+        if name not in self._data:
+            return default
+        value = self._get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ConfigError(self._key(name), f"expected a number between {minimum} and {maximum}")
+        number = float(value)
+        if not math.isfinite(number) or not minimum <= number <= maximum:
+            raise ConfigError(self._key(name), f"expected a number between {minimum} and {maximum}")
+        return number
+
+    def fraction_pair(self, name: str, default: tuple[float, float]) -> tuple[float, float]:
+        """Return the ``[x, y]`` fraction pair at ``name``, or ``default`` when absent."""
+        if name not in self._data:
+            return default
+        value = self._get(name)
+        if isinstance(value, (str, Mapping)) or not isinstance(value, Sequence):
+            raise ConfigError(self._key(name), "expected two numbers between 0 and 1")
+        pair = list(value)
+        if len(pair) != 2:
+            raise ConfigError(self._key(name), "expected two numbers between 0 and 1")
+        numbers: list[float] = []
+        for item in pair:
+            if isinstance(item, bool) or not isinstance(item, (int, float)):
+                raise ConfigError(self._key(name), "expected two numbers between 0 and 1")
+            number = float(item)
+            if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+                raise ConfigError(self._key(name), "expected two numbers between 0 and 1")
+            numbers.append(number)
+        return (numbers[0], numbers[1])
 
     def fraction_map(self, name: str) -> dict[str, float]:
         """Return a ``class name -> fraction`` mapping, empty when the key is absent."""

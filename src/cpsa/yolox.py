@@ -23,10 +23,16 @@ removes the duplicates. A bottle held in front of a person therefore stays
 detectable in the person's own cells instead of losing them to the ``person``
 class, and :func:`decode_yolox` accepts the per-class thresholds the showcase
 resolves from ``model.class_conf`` and ``model.object_conf``.
+
+``model.zoom`` centre-crops the frame before the letterbox: the crop is a view,
+so the same 416x416 input sees the objects ``zoom`` times larger with no extra
+DPU work or frame copy, and :func:`zoom_crop` plus the ``origin`` of
+:func:`boxes_to_source` map the decoded boxes back to full-frame pixels.
 """
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -56,6 +62,7 @@ __all__ = [
     "YOLOX_PAD_VALUE",
     "YOLOX_STRIDES",
     "YoloxDetector",
+    "ZoomCrop",
     "boxes_to_source",
     "class_thresholds",
     "decode_yolox",
@@ -64,6 +71,7 @@ __all__ = [
     "labels_for",
     "prepare_input",
     "prepare_input_into",
+    "zoom_crop",
 ]
 
 #: Model input ``(height, width)`` of the zoo YOLOX-nano graph.
@@ -758,6 +766,73 @@ def _validate_frame(rgb: NDArray[np.uint8]) -> NDArray[np.uint8]:
     return image
 
 
+@dataclass(frozen=True)
+class ZoomCrop:
+    """The part of the frame the detector sees, in full-frame pixels."""
+
+    left: int
+    top: int
+    width: int
+    height: int
+
+    @property
+    def origin(self) -> tuple[float, float]:
+        """The crop's top-left corner, for :func:`boxes_to_source`."""
+        return (float(self.left), float(self.top))
+
+    @property
+    def size(self) -> tuple[int, int]:
+        """The crop size as ``(height, width)``, for :func:`boxes_to_source`."""
+        return (self.height, self.width)
+
+
+def zoom_crop(
+    width: int,
+    height: int,
+    zoom: float,
+    centre: tuple[float, float] = (0.5, 0.5),
+) -> ZoomCrop:
+    """Return the region of a ``width x height`` frame that ``zoom`` shows.
+
+    ``zoom`` 1.0 is the whole frame; 1.3 feeds the central 77% of it into the
+    same 416x416 input, so every object reaches the network 1.3 times larger and
+    a small object the whole frame shrank below a stride cell becomes visible
+    again. ``centre`` is the crop's centre as a fraction of the frame and is
+    clamped so the crop always stays inside it.
+
+    Args:
+        width: Frame width in pixels.
+        height: Frame height in pixels.
+        zoom: Linear magnification of the crop, at least 1.0.
+        centre: Crop centre as ``(x, y)`` fractions of the frame.
+
+    Returns:
+        The crop, in full-frame pixels.
+
+    Raises:
+        ValueError: If the frame is empty, ``zoom`` is below 1.0 or the centre
+            is not a pair of fractions.
+    """
+
+    if width <= 0 or height <= 0:
+        raise ValueError(f"frame must be positive, got {width}x{height}")
+    if not math.isfinite(zoom) or zoom < 1.0:
+        raise ValueError(f"zoom must be at least 1.0, got {zoom}")
+    centre_x, centre_y = float(centre[0]), float(centre[1])
+    if not (0.0 <= centre_x <= 1.0 and 0.0 <= centre_y <= 1.0):
+        raise ValueError(f"centre must be fractions in [0, 1], got {centre}")
+    crop_width = max(1, min(width, round(width / zoom)))
+    crop_height = max(1, min(height, round(height / zoom)))
+    left = round(centre_x * width - crop_width / 2.0)
+    top = round(centre_y * height - crop_height / 2.0)
+    return ZoomCrop(
+        left=min(max(left, 0), width - crop_width),
+        top=min(max(top, 0), height - crop_height),
+        width=crop_width,
+        height=crop_height,
+    )
+
+
 def letterbox_geometry(
     height: int,
     width: int,
@@ -911,6 +986,7 @@ def boxes_to_source(
     scale: float,
     pad: tuple[float, float],
     size: tuple[int, int],
+    origin: tuple[float, float] = (0.0, 0.0),
 ) -> NDArray[np.float64]:
     """Map ``xyxy`` boxes from letterboxed input pixels to clipped source pixels.
 
@@ -918,10 +994,15 @@ def boxes_to_source(
         boxes: ``(N, 4)`` ``xyxy`` boxes in model-input pixels.
         scale: Uniform resize factor returned by :func:`prepare_input`.
         pad: ``(pad_x, pad_y)`` returned by :func:`prepare_input`.
-        size: Source frame ``(height, width)``.
+        size: Size ``(height, width)`` of the region the model saw; a zoomed
+            detector passes the crop size here.
+        origin: Top-left corner of that region in the full frame, ``(0, 0)``
+            when the model saw the whole frame.
 
     Returns:
-        ``(N, 4)`` boxes in source pixels, clipped to ``[0, width] x [0, height]``.
+        ``(N, 4)`` boxes in full-frame pixels: clipped to the region the model
+        saw (so a box that ran into the letterbox pad stops at the crop edge)
+        and then shifted to the full frame.
 
     Raises:
         ValueError: If ``scale`` is not positive.
@@ -936,6 +1017,8 @@ def boxes_to_source(
     height, width = size
     array[:, [0, 2]] = np.clip(array[:, [0, 2]], 0.0, float(width))
     array[:, [1, 3]] = np.clip(array[:, [1, 3]], 0.0, float(height))
+    array[:, [0, 2]] += float(origin[0])
+    array[:, [1, 3]] += float(origin[1])
     return array
 
 
@@ -1007,12 +1090,13 @@ def _detections_from_decoded(
     scale: float,
     pad: tuple[float, float],
     source_hw: tuple[int, int],
+    origin: tuple[float, float] = (0.0, 0.0),
 ) -> list[Detection]:
-    """Map decoded input-pixel boxes to source pixels, score-descending."""
+    """Map decoded input-pixel boxes to full-frame pixels, score-descending."""
 
     if scores.size == 0:
         return []
-    mapped = boxes_to_source(boxes, scale, pad, source_hw)
+    mapped = boxes_to_source(boxes, scale, pad, source_hw, origin)
     detections = [
         Detection(
             box=(float(box[0]), float(box[1]), float(box[2]), float(box[3])),
@@ -1041,6 +1125,10 @@ class YoloxDetector:
         class_thr: Minimum ``objectness * class`` score of single COCO classes,
             overriding ``conf_thr``: the showcase keeps a stricter ``person`` and
             a looser threshold for the objects held in front of it.
+        zoom: Centre-crop magnification before the letterbox (``1.0`` is the
+            whole frame, ``1.3`` the central 77%). Objects reach the network
+            ``zoom`` times larger at no extra DPU cost.
+        zoom_center: Crop centre as ``(x, y)`` fractions of the frame.
 
     Raises:
         RuntimeError: If the ``xir``/``vart`` Python bindings are unavailable.
@@ -1057,6 +1145,8 @@ class YoloxDetector:
         conf_thr: float = 0.35,
         iou_thr: float = 0.45,
         class_thr: Mapping[int, float] | None = None,
+        zoom: float = 1.0,
+        zoom_center: tuple[float, float] = (0.5, 0.5),
     ) -> None:
         if not 0.0 <= conf_thr <= 1.0:
             raise ValueError(f"conf_thr must be in [0, 1], got {conf_thr}")
@@ -1065,6 +1155,12 @@ class YoloxDetector:
         self._conf_thr = float(conf_thr)
         self._iou_thr = float(iou_thr)
         self._class_thr = dict(class_thr or {})
+        if not math.isfinite(zoom) or zoom < 1.0:
+            raise ValueError(f"zoom must be at least 1.0, got {zoom}")
+        if not all(0.0 <= float(value) <= 1.0 for value in zoom_center):
+            raise ValueError(f"zoom_center must be fractions in [0, 1], got {zoom_center}")
+        self._zoom = float(zoom)
+        self._zoom_center = (float(zoom_center[0]), float(zoom_center[1]))
 
         self._runner = DpuRunner(xmodel_path)
         self._outputs: tuple[OutputTensor, ...] = self._runner.outputs
@@ -1150,12 +1246,16 @@ class YoloxDetector:
             raise RuntimeError("both DPU slots are busy; call wait() before submitting again")
         slot = self._slots[self._next_slot]
         self._next_slot = (self._next_slot + 1) % len(self._slots)
-        geometry = (int(image.shape[0]), int(image.shape[1]))
+        height, width = int(image.shape[0]), int(image.shape[1])
+        crop = zoom_crop(width, height, self._zoom, self._zoom_center)
+        geometry = crop.size
 
         started = time.perf_counter()
         fill_pad = slot.pad_geometry != geometry
+        # The crop is a view: cv2 resize reads it in place, so a zoomed frame
+        # letterboxes into the same buffer without an extra copy.
         scale, pad = prepare_input_into(
-            image,
+            image[crop.top : crop.top + crop.height, crop.left : crop.left + crop.width],
             self._input_hw,
             self._lut,
             slot.input_view,
@@ -1175,6 +1275,7 @@ class YoloxDetector:
             scale=scale,
             pad=pad,
             source_hw=geometry,
+            origin=crop.origin,
         )
         return token
 
@@ -1202,6 +1303,7 @@ class YoloxDetector:
             scale=job.scale,
             pad=job.pad,
             source_hw=job.source_hw,
+            origin=job.origin,
         )
         self._stage_ms["decode"] = (time.perf_counter() - started) * 1000.0
         return detections
@@ -1241,6 +1343,7 @@ class _Job:
     scale: float
     pad: tuple[float, float]
     source_hw: tuple[int, int]
+    origin: tuple[float, float] = (0.0, 0.0)
 
 
 COCO80_EN: tuple[str, ...] = (

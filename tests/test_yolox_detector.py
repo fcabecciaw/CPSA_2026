@@ -420,3 +420,59 @@ def test_the_detector_decodes_the_same_detections_as_the_float_path(
     )
     assert detections == expected
     assert detector.last_candidate_count == 2
+
+
+def test_a_zoomed_detector_maps_its_boxes_to_the_full_frame(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    outputs = {
+        8: _head(3, [(0, 0, {"tx": 2.5, "ty": 10.0, "log_w": math.log(2.0)})], 8),
+        16: _head(3, [], 16),
+        32: _head(3, [], 32),
+    }
+    detector = _detector(monkeypatch, tmp_path, payloads=outputs, zoom=1.5)
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    detections = detector.detect(frame)
+
+    crop = yolox.zoom_crop(640, 480, 1.5)
+    view = frame[crop.top : crop.top + crop.height, crop.left : crop.left + crop.width]
+    _image, scale, pad = yolox.prepare_input(view)
+    expected = yolox.detections_from_heads(
+        [outputs[stride].astype(np.float64) / 8.0 for stride in (8, 16, 32)],
+        (8, 16, 32),
+        conf_thr=0.35,
+        iou_thr=0.45,
+        scale=scale,
+        pad=pad,
+        source_hw=crop.size,
+    )
+    shifted = [
+        Detection(
+            box=(
+                item.box[0] + crop.left,
+                item.box[1] + crop.top,
+                item.box[2] + crop.left,
+                item.box[3] + crop.top,
+            ),
+            score=item.score,
+            class_id=item.class_id,
+        )
+        for item in expected
+    ]
+
+    assert detections == shifted
+    assert all(
+        crop.left <= item.box[0] < item.box[2] <= crop.left + crop.width for item in detections
+    )
+    assert all(
+        crop.top <= item.box[1] < item.box[3] <= crop.top + crop.height for item in detections
+    )
+
+
+@pytest.mark.parametrize("zoom", [0.9, 0.0, float("nan")])
+def test_the_detector_rejects_a_zoom_below_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, zoom: float
+) -> None:
+    with pytest.raises(ValueError, match="zoom"):
+        _detector(monkeypatch, tmp_path, zoom=zoom)

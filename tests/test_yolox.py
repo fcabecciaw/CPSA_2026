@@ -632,6 +632,78 @@ def test_boxes_to_source_rejects_a_bad_scale() -> None:
         boxes_to_source(np.zeros((0, 4)), 0.0, (0.0, 0.0), (10, 10))
 
 
+# -- the centre zoom (model.zoom) ---------------------------------------------
+
+
+def test_the_zoom_of_one_is_the_whole_frame() -> None:
+    crop = yolox.zoom_crop(640, 480, 1.0)
+
+    assert crop == yolox.ZoomCrop(left=0, top=0, width=640, height=480)
+    assert crop.origin == (0.0, 0.0)
+    assert crop.size == (480, 640)
+
+
+@pytest.mark.parametrize("zoom", [1.0, 1.3, 1.5])
+def test_a_zoom_crop_round_trips_the_boxes_it_saw(zoom: float) -> None:
+    """A box projected into the crop comes back to the same full-frame pixels."""
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    crop = yolox.zoom_crop(640, 480, zoom)
+    lut = input_quantization_lut_scaled(-2, 1.0)
+    out = np.empty((416, 416, 3), dtype=np.int8)
+    view = frame[crop.top : crop.top + crop.height, crop.left : crop.left + crop.width]
+
+    scale, pad = prepare_input_into(view, (416, 416), lut, out)
+    boxes = np.asarray(
+        [
+            [crop.left + 20.0, crop.top + 30.0, crop.left + 140.0, crop.top + 260.0],
+            [crop.left + 2.0, crop.top + 2.0, crop.left + 60.0, crop.top + 90.0],
+        ]
+    )
+    local = boxes - [crop.left, crop.top, crop.left, crop.top]
+    input_boxes = local * scale + [pad[0], pad[1], pad[0], pad[1]]
+
+    mapped = boxes_to_source(input_boxes, scale, pad, crop.size, crop.origin)
+
+    assert mapped == pytest.approx(boxes, abs=1e-9)
+
+
+def test_a_box_that_runs_into_the_pad_stops_at_the_crop_edge() -> None:
+    crop = yolox.zoom_crop(640, 480, 1.5)
+    # Far outside the resized region of the input: the pad must not leak.
+    input_boxes = np.asarray([[-100.0, -100.0, 900.0, 900.0]])
+
+    mapped = boxes_to_source(input_boxes, 0.8, (10.0, 20.0), crop.size, crop.origin)
+
+    assert mapped.tolist() == [
+        [
+            float(crop.left),
+            float(crop.top),
+            float(crop.left + crop.width),
+            float(crop.top + crop.height),
+        ]
+    ]
+
+
+def test_an_off_centre_zoom_moves_the_crop_and_stays_inside_the_frame() -> None:
+    crop = yolox.zoom_crop(640, 480, 1.3, (0.4, 0.6))
+
+    assert crop.left + crop.width / 2 == pytest.approx(0.4 * 640, abs=0.5)
+    assert crop.top + crop.height / 2 == pytest.approx(0.6 * 480, abs=0.5)
+
+    edge = yolox.zoom_crop(640, 480, 1.5, (0.0, 1.0))
+    assert edge.left == 0
+    assert edge.top == 480 - edge.height
+
+
+@pytest.mark.parametrize(
+    ("zoom", "centre"),
+    [(0.9, (0.5, 0.5)), (0.0, (0.5, 0.5)), (1.3, (1.5, 0.5)), (1.3, (0.5, -0.1))],
+)
+def test_a_bad_zoom_is_rejected(zoom: float, centre: tuple[float, float]) -> None:
+    with pytest.raises(ValueError):
+        yolox.zoom_crop(640, 480, zoom, centre)
+
+
 def test_the_quantization_lut_maps_raw_pixels() -> None:
     lut = input_quantization_lut_scaled(-2, 1.0)
 

@@ -89,6 +89,8 @@ def test_the_shipped_configuration_parses_and_names_the_machine() -> None:
     assert config.model.conf_thr == 0.35
     assert config.model.class_conf == {"person": 0.40}
     assert config.model.object_conf == 0.25
+    assert config.model.zoom == 1.0
+    assert config.model.zoom_center == (0.5, 0.5)
     assert config.movenet.name == "movenet"
     assert config.movenet.path == Path("models/movenet.xmodel")
     assert config.movenet.enabled is True
@@ -141,9 +143,52 @@ def test_a_document_without_class_thresholds_keeps_the_global_default() -> None:
 
     assert model.class_conf == {}
     assert model.object_conf is None
+    assert model.zoom == 1.0
+    assert model.zoom_center == (0.5, 0.5)
     assert class_thresholds(model.conf_thr, class_conf=model.class_conf) == {
         class_id: model.conf_thr for class_id in range(len(COCO80_EN))
     }
+
+
+@pytest.mark.parametrize("zoom", [1.0, 1.3, 1.5, 2.0])
+def test_the_model_zoom_parses(zoom: float) -> None:
+    data = document()
+    data["model"]["zoom"] = zoom  # type: ignore[index]
+
+    assert parse(data).model.zoom == zoom
+
+
+def test_the_zoom_center_parses_and_must_be_a_fraction_pair() -> None:
+    data = document()
+    data["model"]["zoom_center"] = [0.4, 0.6]  # type: ignore[index]
+
+    assert parse(data).model.zoom_center == (0.4, 0.6)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [0.9, 2.1, 0, "1.3", True, [1.3], None],
+)
+def test_an_invalid_zoom_is_named(value: object) -> None:
+    data = document()
+    data["model"]["zoom"] = value  # type: ignore[index]
+
+    with pytest.raises(ConfigError) as excinfo:
+        parse(data)
+    assert excinfo.value.key == "model.zoom"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [[0.5], [0.5, 0.5, 0.5], [1.5, 0.5], [-0.1, 0.5], "centre", {"x": 0.5}, [0.5, True]],
+)
+def test_an_invalid_zoom_center_is_named(value: object) -> None:
+    data = document()
+    data["model"]["zoom_center"] = value  # type: ignore[index]
+
+    with pytest.raises(ConfigError) as excinfo:
+        parse(data)
+    assert excinfo.value.key == "model.zoom_center"
 
 
 def test_the_class_thresholds_resolve_to_the_showcase_classes() -> None:

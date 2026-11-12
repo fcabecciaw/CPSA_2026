@@ -1085,6 +1085,8 @@ def _default_detector(model: ModelConfig) -> Detector:
             class_conf=model.class_conf,
             object_conf=model.object_conf,
         ),
+        zoom=model.zoom,
+        zoom_center=model.zoom_center,
     )
 
 
