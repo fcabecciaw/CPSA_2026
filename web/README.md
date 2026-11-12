@@ -1,15 +1,15 @@
-# Hands dashboard (`web/`)
+# Showcase dashboard (`web/`)
 
-The booth dashboard of the demos: a Vite + TypeScript static app that the
-Kria KV260 serves at `/`. It connects to the same origin at `/ws`, renders the
-protocol v1 snapshot and the live streams, and works with no network access and
-no CDN (NFR-07, FR-501). The UI copy is Italian, as required by `PRODUCT.md`.
+The booth dashboard of the one CPSA demo, "Cosa vede l'IA": a Vite +
+TypeScript static app that the Kria KV260 serves at `/`. It connects to the
+same origin at `/ws`, renders the protocol v1 snapshot and the live stream, and
+works with no network access and no CDN (NFR-07, FR-501). The UI copy is
+Italian, as required by `PRODUCT.md`.
 
-The medical views, their labels and their mock data are gone: this dashboard
-shows the two hand demos and the AI showcase. The server may still publish
-`medical.*` and `log` topics (medical mode still exists on the board);
-`protocol.ts` keeps their types and the store ignores them, so an unexpected
-topic is never an error.
+There is one view and no modes: the server publishes what the detector sees,
+and the dashboard draws it. The protocol is F-K1 of
+`docs/plans/showcase-only.md` — `hello`, `status`, `showcase.state`, `error`
+and `pong` from the server, `ping` from the client.
 
 ## Commands
 
@@ -24,7 +24,7 @@ npm --prefix web run typecheck
 Vite 8 needs Node `^20.19.0` or `>=22.12.0`. The only dev dependencies are
 `vite` and `typescript`, pinned to exact versions; there are no runtime
 dependencies. `npm run build` produces `web/dist`; the server's
-`server.static_dir` points there (`docs/plans/medical-demo-slice.md`, F6).
+`web.static_dir` points there (F-K3).
 
 `vite.config.ts` sets `base: "./"` so `dist/index.html` references
 `./assets/...`. That keeps the build portable when served at `/`, including
@@ -35,71 +35,51 @@ are no font files, images or scripts fetched from the network.
 
 A slim top bar and one instrument surface split in two panes:
 
-1. **Top bar** — the `CPSA` wordmark, the segmented mode switch
-   (`Ologramma` | `Sasso-carta-forbice` | `Cosa vede l'IA`), the connection
-   dot, and the analysed frames per second and their processing time. While
-   Sasso-carta-forbice runs the score rests in the bar (`Tu 2 · Tavolo 1`,
-   plus the draws once there is one).
-2. **Left pane** — `/video.mjpeg` (F14), always in the page, letterboxed 4:3
-   with `object-fit: contain`; the badge and the title say `IR` for the hand
-   demos and `RGB` for the showcase. With no frames it shows “In attesa della
-   telecamera…”; a broken stream shows “Video non disponibile” and retries
-   after 1 s, doubling up to 10 s. The pane follows the mode: while no camera
-   mode runs, no frames exist, so the placeholder is back instead of a frozen
-   last frame.
-3. **Right pane** — `hologram` mode draws `hologram.hands` as the existing
-   glowing 3D hand on canvas 2D, with the hand count and the frame size in a
-   small footer. `rps` mode draws `rps.state.hand.kpts2d` as a 2D skeleton,
-   zoomed to fill the pane, with the countdown (“Sasso… carta… forbice!”) and
-   the result banner over it and the player's gesture next to the board's move
-   at the bottom. `showcase` mode lists what the detector sees: the counts as
-   large rows (`2 × persona`), then the most confident detections with their
-   score bars, and “Mostra un oggetto alla telecamera” while the frame is
-   empty. Any other mode shows a calm empty state.
+1. **Top bar** — the `CPSA` wordmark, the view title, the connection dot with
+   its label, and the analysed frames per second and their processing time.
+2. **Left pane** — `/video.mjpeg` (F-K2), letterboxed 4:3 with
+   `object-fit: contain` and the `RGB` badge. With no frames it shows “In
+   attesa della telecamera…”; a broken stream shows “Video non disponibile”
+   and retries after 1 s, doubling up to 10 s. The stream follows the
+   connection: while the socket is not open, the placeholder is back instead of
+   a frozen last frame.
+3. **Right pane** — what the detector sees: the counts as large rows
+   (`2 × persona`), then the most confident detections with their score bars,
+   and “Mostra un oggetto alla telecamera” while the frame is empty. The footer
+   names the model and the frame size.
 
-The top-bar numbers come from the streams themselves: in `hologram` mode the
-frame rate is measured over the last 2 s of `hologram.hands` arrivals and the
-latency is its `timing.total_ms`; in `rps` mode they come from
-`status.perception` (`timing.analyzed_fps`/`latency_ms` when present,
-`fps`/`dpu_ms` otherwise), because `rps.state` carries no timing; in `showcase`
-mode they are the `fps` and `total_ms` of `showcase.state` (falling back to
-`dpu_ms`).
+The bar numbers come from `showcase.state` (`fps` and `total_ms`, falling back
+to `dpu_ms`); until the first frame arrives they come from `status`. The line
+under the bar carries what the process reports in `status.errors`, a protocol
+`error`, a transport problem, or the mock badge.
 
 ## Mock
 
 `?mock=1` runs the dev-only stand-in (`src/mock.ts`, removed from the
-production bundle by the `import.meta.env.DEV` guard). It replays the `hello`
-and `status` fixtures, and synthesises the two hand streams, the showcase
-detections and the matching fake picture (an IR hand, or the RGB room with the
-same boxes and labels the board would draw); the notice line says the data is
-fake.
+production bundle by the `import.meta.env.DEV` guard). It speaks exactly the
+F-K1 messages — `hello` on connect, `status` at 1 Hz, `showcase.state` at
+10 Hz, `pong` for every `ping`, `error` `bad_command` for anything else — and
+draws the matching fake picture: the RGB room with the same boxes and labels
+the board would draw. The notice line says the data is fake.
 
 ```sh
-# hologram, Sasso-carta-forbice; `phase` freezes a round for a screenshot
-http://localhost:5173/?mock=1&mode=hologram
-http://localhost:5173/?mock=1&mode=rps&phase=countdown&count=2
-http://localhost:5173/?mock=1&mode=rps&phase=result&outcome=win
-# showcase: the room with two people and four objects on the table
-http://localhost:5173/?mock=1&mode=showcase
-# showcase with nothing detected: the invitation only
-http://localhost:5173/?mock=1&mode=showcase&objects=0
-http://localhost:5173/?mock=1&mode=idle
+# the room with two people and four objects on the table
+http://localhost:5173/?mock=1
+# nothing detected: the invitation only
+http://localhost:5173/?mock=1&objects=0
 ```
 
-`count=3|2|1`, `outcome=win|lose|draw|unclear` refine a frozen round;
-`objects=0` empties the showcase frame; `video=0` leaves the camera pane on its
+`objects=0` empties the detector view; `video=0` leaves the camera pane on its
 placeholder.
 
 ## Files
 
-- `src/main.ts` — boot, mode switch, stream routing;
-- `src/views.ts` — top bar, notice line, score;
+- `src/main.ts` — boot, stream routing, region updates;
+- `src/views.ts` — top bar and notice line;
 - `src/metrics.ts` — the fps and latency readout;
 - `src/video.ts` — the MJPEG pane with its retry;
-- `src/hologram.ts`, `src/rps.ts`, `src/showcase.ts` — the three right-hand
-  views;
-- `src/state.ts` — the last snapshot of each stream;
-- `src/protocol.ts` — protocol v1 types and validation, including the additive
-  `showcase.state` (F-S2);
+- `src/showcase.ts` — the "Cosa vede l'IA" pane;
+- `src/state.ts` — the last snapshot of each topic;
+- `src/protocol.ts` — protocol v1 types and validation (F-K1);
 - `src/labels.ts` — Italian copy and number formatting;
 - `src/mock.ts` — the dev-only stand-in.

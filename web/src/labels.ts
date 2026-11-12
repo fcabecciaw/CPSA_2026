@@ -1,30 +1,11 @@
 /**
- * Italian UI copy and formatters of the hands dashboard.
+ * Italian UI copy and formatters of the "Cosa vede l'IA" dashboard.
  *
  * Every word an onlooker reads lives here; the protocol enum names stay in
  * `protocol.ts` (PRODUCT.md: the booth UI is Italian).
  */
 
-import type { ErrorCode, Mode, ModeState, RpsGesture, RpsOutcome } from "./protocol";
-
 export const APP_LABEL = "CPSA";
-
-export const MODE_LABEL: Record<Mode, string> = {
-  idle: "Idle",
-  lab: "Lab",
-  medical: "Medicale",
-  hologram: "Ologramma",
-  rps: "Sasso-carta-forbice",
-  showcase: "Cosa vede l'IA",
-};
-
-export const MODE_STATE_LABEL: Record<ModeState, string> = {
-  stopped: "ferma",
-  starting: "avvio",
-  running: "attiva",
-  stopping: "arresto",
-  failed: "errore",
-};
 
 export const CONNECTION_LABEL = {
   connecting: "Connessione…",
@@ -33,26 +14,13 @@ export const CONNECTION_LABEL = {
   closed: "Disconnesso",
 } as const;
 
+/** One camera, the RGB one the detector reads. */
 export const CAMERA_LABELS = {
-  title: "Telecamera infrarossa",
-  rgbTitle: "Telecamera RGB",
-  alt: "Video della telecamera infrarossa",
-  rgbAlt: "Video della telecamera RGB",
-  badge: "IR",
-  rgbBadge: "RGB",
+  title: "Telecamera RGB",
+  alt: "Video della telecamera RGB",
+  badge: "RGB",
   waiting: "In attesa della telecamera…",
   unavailable: "Video non disponibile",
-} as const;
-
-export const VIEW_LABELS = {
-  hologramTitle: "Ologramma 3D della mano",
-  hologramEmpty: "In attesa della mano…",
-  rpsTitle: "Sasso, carta, forbice",
-  rpsEmpty: "Mano non visibile",
-  showcaseTitle: "Cosa vede l'IA",
-  showcaseEmpty: "Mostra un oggetto alla telecamera",
-  idleTitle: "Nessuna demo attiva",
-  idleBody: "Scegli una demo nella barra in alto.",
 } as const;
 
 /** Copy of the "Cosa vede l'IA" panel: the counts and the detection list. */
@@ -61,49 +29,21 @@ export const SHOWCASE_LABELS = {
   objectsLabel: "Rilevamenti più sicuri",
 } as const;
 
-/** T5: copy of the Sasso-carta-forbice panel. */
-export const RPS_LABELS = {
-  waiting: "Mostra la mano per iniziare",
-  ready: "Preparati…",
-  shoot: "Via!",
-  versus: "contro",
-  player: "Tu",
-  board: "Tavolo",
-  draws: "Pareggi",
-} as const;
-
-/** "Sasso… carta… forbice!", one word for each countdown step (3, 2, 1). */
-export const RPS_COUNTDOWN_WORDS: readonly string[] = ["Sasso…", "carta…", "forbice!"];
-
-export const RPS_GESTURE_LABEL: Record<RpsGesture, string> = {
-  rock: "sasso",
-  paper: "carta",
-  scissors: "forbice",
-  none: "gesto non chiaro",
-};
-
-export const RPS_OUTCOME_LABEL: Record<RpsOutcome, string> = {
-  win: "Hai vinto!",
-  lose: "Vince il tavolo",
-  draw: "Pareggio",
-  unclear: "Gesto poco chiaro",
-};
-
-export const ERROR_LABEL: Record<ErrorCode, string> = {
+/** The error codes the process reports; an unknown code shows as itself. */
+export const ERROR_LABEL: Record<string, string> = {
   camera_missing: "telecamera assente",
   camera_error: "errore telecamera",
   model_missing: "modello assente",
   dpu_error: "errore DPU",
-  imu_not_found: "IMU non trovata",
   asset_invalid: "asset non valido",
   busy: "sistema occupato",
   bad_command: "comando non valido",
   internal: "errore interno",
 };
 
-export const NOTICE_LABEL = {
-  rejected: "Comando rifiutato",
-} as const;
+export function errorLabel(code: string): string {
+  return ERROR_LABEL[code] ?? code;
+}
 
 const INTEGER_FORMAT = new Intl.NumberFormat("it-IT", {
   maximumFractionDigits: 0,

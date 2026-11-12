@@ -4,25 +4,13 @@ import {
   DashboardClient,
   defaultSocketUrl,
   type ConnectionInfo,
-  type ConnectionPhase,
   type SocketFactory,
 } from "./client";
 import { byId } from "./dom";
-import { HologramView } from "./hologram";
 import { MetricsTracker } from "./metrics";
-import { MODES, type Mode } from "./protocol";
-import { RpsView } from "./rps";
 import { ShowcaseView } from "./showcase";
-import { DashboardStore, type StateRegion } from "./state";
-import {
-  collectElements,
-  renderAll,
-  renderConnection,
-  renderMetrics,
-  renderMode,
-  renderNotice,
-  type RenderInput,
-} from "./views";
+import { DashboardStore } from "./state";
+import { collectElements, renderAll, renderConnection, renderMetrics, renderNotice } from "./views";
 import { VideoFeed, type VideoSource } from "./video";
 
 const elements = collectElements();
@@ -33,19 +21,6 @@ const videoImage = byId<HTMLImageElement>("video");
 const videoNote = byId("video-note");
 let video: VideoSource = new VideoFeed(videoImage, videoNote);
 
-const hologram = new HologramView(
-  byId<HTMLCanvasElement>("hologram"),
-  byId("hologram-empty"),
-  byId("hologram-meta"),
-);
-const rps = new RpsView({
-  count: byId("rps-count"),
-  player: byId("rps-player"),
-  board: byId("rps-board"),
-  duel: byId("rps-duel"),
-  canvas: byId<HTMLCanvasElement>("rps-canvas"),
-  empty: byId("rps-empty"),
-});
 const showcase = new ShowcaseView({
   countsGroup: byId("showcase-counts-group"),
   counts: byId("showcase-counts"),
@@ -55,14 +30,6 @@ const showcase = new ShowcaseView({
   meta: byId("showcase-meta"),
 });
 
-/** The four right-hand panes; exactly one is visible at a time (T5). */
-const panes = {
-  hologram: byId("view-hologram"),
-  rps: byId("view-rps"),
-  showcase: byId("view-showcase"),
-  idle: byId("view-idle"),
-};
-
 const socketUrl = defaultSocketUrl();
 let connection: ConnectionInfo = {
   phase: "connecting",
@@ -71,47 +38,24 @@ let connection: ConnectionInfo = {
   retryInMs: null,
   rttMs: null,
 };
-let connectionPhase: ConnectionPhase = "connecting";
 let sourceLabel: string | null = null;
 let transportNotice: string | null = null;
 let noticeTimer: ReturnType<typeof setTimeout> | null = null;
-let lastMode: Mode | null = null;
 let streaming = false;
 
-function input(): RenderInput {
-  const mode = store.mode;
+function input() {
   return {
     state: store.state,
     connection,
-    mode,
-    readout: metrics.read(mode),
+    readout: metrics.read(),
     sourceLabel,
     transportNotice,
   };
 }
 
-/** Shows the pane of the current mode; idle (and anything else) gets the invitation. */
-function refreshView(): void {
-  const mode = store.mode;
-  const hologramVisible = mode === "hologram";
-  panes.hologram.hidden = !hologramVisible;
-  panes.rps.hidden = mode !== "rps";
-  panes.showcase.hidden = mode !== "showcase";
-  panes.idle.hidden = hologramVisible || mode === "rps" || mode === "showcase";
-  hologram.setActive(hologramVisible);
-  rps.setActive(mode === "rps");
-}
-
-/**
- * F14: the camera pane follows the mode, not the connection alone. While no
- * camera mode runs, no frames are produced, so the pane shows its placeholder
- * instead of a frozen last frame.
- */
+/** F-K2: the one camera stream lives as long as the socket is open. */
 function refreshVideo(): void {
-  const mode = store.mode;
-  const wanted =
-    connection.phase === "open" &&
-    (mode === "hologram" || mode === "rps" || mode === "showcase");
+  const wanted = connection.phase === "open";
   if (wanted === streaming) {
     return;
   }
@@ -123,23 +67,7 @@ function refreshVideo(): void {
   }
 }
 
-/** The bar, the pane and the notice line all follow the `status` snapshot. */
-function refreshMode(): void {
-  const mode = store.mode;
-  if (mode !== lastMode) {
-    // A new mode starts a new stream: the previous frame arrivals are not a
-    // frame rate any more.
-    metrics.reset();
-    lastMode = mode;
-  }
-  refreshVideo();
-  refreshView();
-  renderMode(elements, input());
-  renderMetrics(elements, input().readout);
-  renderNotice(elements, input());
-}
-
-function refreshNotice(): void {
+function refreshBar(): void {
   renderNotice(elements, input());
 }
 
@@ -151,33 +79,9 @@ function showTransportNotice(text: string): void {
   noticeTimer = setTimeout(() => {
     noticeTimer = null;
     transportNotice = null;
-    refreshNotice();
+    refreshBar();
   }, 12_000);
-  refreshNotice();
-}
-
-function renderRegions(regions: StateRegion[]): void {
-  for (const region of regions) {
-    switch (region) {
-      case "mode":
-        refreshMode();
-        break;
-      case "hologram":
-        hologram.setFrame(store.state.hologram);
-        renderMetrics(elements, input().readout);
-        break;
-      case "rps":
-        rps.setState(store.state.rps);
-        // The score lives in the bar, so the bar follows the round.
-        renderMode(elements, input());
-        renderMetrics(elements, input().readout);
-        break;
-      case "showcase":
-        showcase.setState(store.state.showcase);
-        renderMetrics(elements, input().readout);
-        break;
-    }
-  }
+  refreshBar();
 }
 
 async function boot(): Promise<void> {
@@ -193,7 +97,7 @@ async function boot(): Promise<void> {
     video = mock.createMockVideo(videoImage, videoNote);
   }
 
-  const client = new DashboardClient({
+  new DashboardClient({
     url: socketUrl,
     factory,
     handlers: {
@@ -202,53 +106,32 @@ async function boot(): Promise<void> {
         if (message.type === "status") {
           metrics.status(message.data);
         }
-        if (message.type === "hologram.hands") {
-          metrics.frame(now, message.data.timing.total_ms);
-        }
         if (message.type === "showcase.state") {
           metrics.showcase(message.data);
         }
-        renderRegions(store.apply(message, now));
+        for (const region of store.apply(message, now)) {
+          if (region === "showcase") {
+            showcase.setState(store.state.showcase);
+          }
+          if (region === "bar") {
+            renderNotice(elements, input());
+          }
+          renderMetrics(elements, metrics.read());
+        }
       },
       onConnection: (info) => {
-        if (info.phase === "open" && connectionPhase !== "open") {
-          // A new connection restarts the command counter (IF-304).
-          store.clearModeRequest();
-        }
-        connectionPhase = info.phase;
         connection = info;
         refreshVideo();
         renderConnection(elements, info);
-        renderMode(elements, input());
+        renderMetrics(elements, metrics.read());
+        renderNotice(elements, input());
       },
       onNotice: showTransportNotice,
     },
-  });
-
-  for (const button of elements.modeButtons) {
-    button.addEventListener("click", () => {
-      const requested = modeOf(button.dataset.mode);
-      if (requested === null) {
-        return;
-      }
-      const seq = client.sendMode(requested);
-      if (seq !== null) {
-        store.markModeSent(seq);
-        renderMode(elements, input());
-      }
-    });
-  }
+  }).start();
 
   renderAll(elements, input());
-  refreshView();
-  client.start();
-}
-
-/** Button `data-mode` to a protocol mode, or `null` for an unknown value. */
-function modeOf(value: string | undefined): Mode | null {
-  return value !== undefined && (MODES as readonly string[]).includes(value)
-    ? (value as Mode)
-    : null;
+  refreshVideo();
 }
 
 boot().catch((error: unknown) => {

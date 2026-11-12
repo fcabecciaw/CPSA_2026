@@ -2,18 +2,15 @@
  * WebSocket client for the dashboard.
  *
  * Connects to the same origin at `/ws` (IF-101), reconnects with exponential
- * backoff, and sends a `ping` every 10 s (IF-203). Every command carries a
- * per-connection `seq` starting at 1 and reset on reconnect; the server echoes
- * it as `error.ref_seq` (IF-304). It does not hold protocol state: every
- * message is handed to the caller, and the server resends a snapshot on
- * reconnect (FR-504).
+ * backoff, and sends a `ping` every 10 s (IF-203). It does not hold protocol
+ * state: every message is handed to the caller, and the server resends a
+ * snapshot on reconnect (FR-504). F-K1: `ping` is the only command it sends.
  */
 
 import {
   PROTOCOL_VERSION,
   parseServerMessage,
   type ClientCommand,
-  type Mode,
   type ServerMessage,
 } from "./protocol";
 
@@ -83,8 +80,6 @@ export class DashboardClient {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private pendingPings = new Map<number, number>();
   private pingId = 0;
-  /** Command counter for the current connection; 0 means nothing sent yet. */
-  private seq = 0;
   private attempt = 0;
   private rttMs: number | null = null;
   private stopped = false;
@@ -126,15 +121,6 @@ export class DashboardClient {
     this.setInfo({ phase: "closed", retryInMs: null });
   }
 
-  /** Sends a mode change; returns the command `seq`, or null if not sent. */
-  sendMode(mode: Mode): number | null {
-    if (this.info.phase !== "open") {
-      this.handlers.onNotice("Comando non inviato: server non connesso.");
-      return null;
-    }
-    return this.send({ v: PROTOCOL_VERSION, type: "mode.set", data: { mode } });
-  }
-
   private open(): void {
     this.setInfo({ phase: this.attempt === 0 ? "connecting" : "reconnecting", retryInMs: null });
 
@@ -151,8 +137,6 @@ export class DashboardClient {
     socket.onopen = () => {
       this.attempt = 0;
       this.rttMs = null;
-      // IF-304 / v1 client envelope: the command counter is per connection.
-      this.seq = 0;
       this.setInfo({ phase: "open", attempt: 0, retryInMs: null, rttMs: null });
       this.startPing();
     };
@@ -201,18 +185,15 @@ export class DashboardClient {
     }
   }
 
-  private send(command: ClientCommand): number | null {
+  private send(command: ClientCommand): void {
     const socket = this.socket;
     if (socket === null) {
-      return null;
+      return;
     }
-    const seq = ++this.seq;
     try {
-      socket.send(JSON.stringify({ ...command, seq }));
-      return seq;
+      socket.send(JSON.stringify({ ...command, v: PROTOCOL_VERSION }));
     } catch (error) {
       this.handlers.onNotice(`Invio non riuscito: ${errorText(error)}`);
-      return null;
     }
   }
 

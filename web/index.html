@@ -4,28 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
-    <meta
-      name="description"
-      content="CPSA: ologramma 3D della mano, sasso-carta-forbice e cosa vede l'IA sulla Kria KV260."
-    />
-    <title>CPSA · Ologramma, sasso-carta-forbice e IA</title>
+    <meta name="description" content="CPSA: cosa vede l'IA sulla Kria KV260." />
+    <title>CPSA · Cosa vede l'IA</title>
   </head>
   <body>
     <div class="app">
       <header class="topbar">
         <p class="wordmark">CPSA</p>
-
-        <div class="modes" role="group" aria-label="Modalità">
-          <button type="button" id="mode-hologram" data-mode="hologram" aria-pressed="false">
-            Ologramma
-          </button>
-          <button type="button" id="mode-rps" data-mode="rps" aria-pressed="false">
-            Sasso-carta-forbice
-          </button>
-          <button type="button" id="mode-showcase" data-mode="showcase" aria-pressed="false">
-            Cosa vede l'IA
-          </button>
-        </div>
+        <h1 class="title">Cosa vede l'IA</h1>
 
         <div class="readout">
           <span class="conn" id="conn">
@@ -36,47 +22,18 @@
           <span class="gauge" id="latency" title="Tempo di elaborazione del fotogramma"
             >— ms</span
           >
-          <span class="score" id="rps-score" aria-label="Punteggio" hidden></span>
         </div>
       </header>
 
-      <p id="mode-status" class="sr-only" role="status" aria-live="polite"></p>
       <p id="notice" class="notice" role="status" aria-live="polite"></p>
 
       <main class="stage">
         <section class="pane pane-camera" aria-labelledby="camera-title">
-          <h2 id="camera-title" class="sr-only">Telecamera infrarossa</h2>
+          <h2 id="camera-title" class="sr-only">Telecamera RGB</h2>
           <div class="frame">
-            <img id="video" class="video" alt="Video della telecamera infrarossa" hidden />
+            <img id="video" class="video" alt="Video della telecamera RGB" hidden />
             <p id="video-note" class="frame-note">In attesa della telecamera…</p>
-            <span class="frame-badge" id="camera-badge" aria-hidden="true">IR</span>
-          </div>
-        </section>
-
-        <section class="pane pane-view" id="view-hologram" aria-labelledby="hologram-title">
-          <h2 id="hologram-title" class="sr-only">Ologramma 3D della mano</h2>
-          <canvas
-            id="hologram"
-            role="img"
-            aria-label="Ologramma non disponibile: in attesa di dati."
-          ></canvas>
-          <p class="view-note" id="hologram-empty">In attesa della mano…</p>
-          <p class="view-meta" id="hologram-meta"></p>
-        </section>
-
-        <section class="pane pane-view" id="view-rps" aria-labelledby="rps-title" hidden>
-          <h2 id="rps-title" class="sr-only">Sasso, carta, forbice</h2>
-          <canvas id="rps-canvas" role="img" aria-label="Mano non visibile."></canvas>
-          <p class="view-note" id="rps-empty">Mano non visibile</p>
-          <div class="callout">
-            <p class="rps-count" id="rps-count" role="status" aria-live="polite">
-              Mostra la mano per iniziare
-            </p>
-          </div>
-          <div class="duel" id="rps-duel" hidden>
-            <span class="move move-player" id="rps-player">Tu —</span>
-            <span class="duel-vs">contro</span>
-            <span class="move move-board" id="rps-board">Tavolo —</span>
+            <span class="frame-badge" aria-hidden="true">RGB</span>
           </div>
         </section>
 
@@ -84,7 +41,6 @@
           class="pane pane-view pane-showcase"
           id="view-showcase"
           aria-labelledby="showcase-title"
-          hidden
         >
           <h2 id="showcase-title" class="sr-only">Cosa vede l'IA</h2>
           <div class="showcase">
@@ -99,13 +55,6 @@
           </div>
           <p class="view-note" id="showcase-empty">Mostra un oggetto alla telecamera</p>
           <p class="view-meta" id="showcase-meta"></p>
-        </section>
-
-        <section class="pane pane-view pane-idle" id="view-idle" aria-labelledby="idle-title" hidden>
-          <div class="idle-copy">
-            <h2 id="idle-title">Nessuna demo attiva</h2>
-            <p>Scegli una demo nella barra in alto.</p>
-          </div>
         </section>
       </main>
 

@@ -1,9 +1,9 @@
 {
-  "name": "cpsa-hands-dashboard",
+  "name": "cpsa-showcase-dashboard",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Dashboard web delle demo mani CPSA (Vite + TypeScript, nessuna dipendenza a runtime).",
+  "description": "Dashboard web dell'unica demo CPSA: cosa vede l'IA (Vite + TypeScript, nessuna dipendenza a runtime).",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
