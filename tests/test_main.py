@@ -478,3 +478,27 @@ def test_main_hands_the_calibration_file_to_the_pipeline(
 
     assert code == entry.EXIT_OK
     assert seen["calibration_store"].path == tmp_path / "cal.json"
+
+
+def test_main_hands_the_replay_directory_to_the_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_run(config: Any, **kwargs: Any) -> int:
+        seen["config"] = config
+        return entry.EXIT_OK
+
+    monkeypatch.setattr(entry, "run", fake_run)
+    shipped = Path(__file__).resolve().parents[1] / "config" / "showcase.yaml"
+    replay = tmp_path / "replay"
+    replay.mkdir()
+
+    code = entry.main(["--config", str(shipped), "--replay", str(replay)])
+
+    assert code == entry.EXIT_OK
+    assert seen["config"].camera.replay_dir == replay
+    # The cadence and the jitter keep the shipped defaults: a replay moves at
+    # 60 fps and changes scene ten times a second.
+    assert seen["config"].camera.fps == 60.0
+    assert seen["config"].camera.replay_hold_frames == 6

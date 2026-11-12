@@ -254,6 +254,69 @@ def test_the_two_nms_paths_agree(monkeypatch: pytest.MonkeyPatch) -> None:
         assert np.array_equal(got, want)
 
 
+def _reference_nms(
+    boxes: NDArray[np.float64],
+    scores: NDArray[np.float64],
+    classes: NDArray[np.intp],
+    iou_thr: float,
+    cap: int | None = None,
+) -> list[int]:
+    """The single-pass class-aware greedy NMS the per-class pass must reproduce."""
+
+    if cap is not None and scores.size > cap:
+        best = np.argsort(-scores, kind="stable")[:cap]
+        boxes, scores, classes = boxes[best], scores[best], classes[best]
+    remaining = np.ones(scores.size, dtype=np.bool_)
+    keep: list[int] = []
+    for position in np.argsort(-scores, kind="stable"):
+        if not remaining[position]:
+            continue
+        keep.append(int(position))
+        remaining[position] = False
+        rest = np.flatnonzero(remaining)
+        if rest.size == 0:
+            break
+        overlap = yolox._iou(boxes[position], boxes[rest])
+        same_class = classes[rest] == classes[position]
+        remaining[rest[same_class & (overlap > iou_thr)]] = False
+    return sorted(keep)
+
+
+def test_the_per_class_nms_keeps_what_one_pass_over_the_frame_keeps() -> None:
+    """Suppressing class by class is the class-aware pass, only over smaller matrices."""
+    generator = np.random.default_rng(20261112)
+    for _ in range(30):
+        count = int(generator.integers(2, 70))
+        centres = generator.uniform(0.0, 320.0, size=(count, 2))
+        sides = generator.uniform(8.0, 140.0, size=(count, 2))
+        boxes = np.column_stack([centres - sides / 2.0, centres + sides / 2.0])
+        scores = generator.uniform(0.01, 1.0, size=count)
+        classes = generator.integers(0, 5, size=count).astype(np.intp)
+
+        actual = yolox._class_aware_nms(boxes, scores, classes, 0.45)
+
+        assert sorted(actual.tolist()) == _reference_nms(boxes, scores, classes, 0.45)
+
+
+def test_the_candidate_cap_keeps_the_best_scores_before_nms() -> None:
+    """A pathological frame cannot make the pairwise pass quadratic in the grid."""
+    count = 400
+    columns = np.arange(count, dtype=np.float64)
+    boxes = np.column_stack(
+        [columns * 10.0, np.zeros(count), columns * 10.0 + 5.0, np.full(count, 5.0)]
+    )
+    scores = (columns + 1.0) / count  # every box is its own object: nothing overlaps
+    classes = np.zeros(count, dtype=np.intp)
+
+    _boxes, kept_scores, _classes = yolox._finalize([boxes], [scores], [classes], 0.45)
+
+    assert kept_scores.size == MAX_DETECTIONS
+    assert np.array_equal(np.sort(kept_scores), np.sort(scores)[-MAX_DETECTIONS:])
+    # The cap sits above the output size: the last kept detection comes from the
+    # top candidates, never from the ones the cap dropped.
+    assert kept_scores.min() >= np.sort(scores)[-yolox._NMS_CANDIDATE_CAP]
+
+
 def test_detections_are_score_descending_and_capped() -> None:
     heads = _heads(sizes=((11, 11), (1, 1), (1, 1)), background=0.0)
     for row in range(11):

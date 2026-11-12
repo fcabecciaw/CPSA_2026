@@ -48,10 +48,10 @@ stops B, releases the camera and the DPU and unlinks the shared memory.
 
 | Module | Responsibility |
 |---|---|
-| `cpsa/camera.py` | V4L2 capture through `linuxpy`, node selection, controls, YUYV→RGB (`cv2`). |
+| `cpsa/camera.py` | V4L2 capture through `linuxpy`, node selection, controls, YUYV→RGB (`cv2`); the replay source for an fps measurement without the camera. |
 | `cpsa/dpu.py` | VART graph introspection: subgraphs, tensor shapes and fix points, LUT quantization. |
 | `cpsa/yolox.py` | YOLOX-nano detector: preprocessing, `submit`/`wait` pipelining, int8 decode, COCO labels. |
-| `cpsa/yolov5.py` | YOLOv5-nano (640x640) evaluation: same seams, YOLOv5 anchors/exp decode, not wired into the pipeline. |
+| `cpsa/yolov5.py` | YOLOv5-nano (640x640) detector: same seams, YOLOv5 anchors/exp decode, selectable live as `model.kind: yolov5`. |
 | `cpsa/overlay.py` | Boxes and tags on the frame. |
 | `cpsa/channel.py` | The frame channel and the message channel between the processes. |
 | `cpsa/pipeline.py` | The loop: frame cadence, publishing, camera recovery, stage timings. |
@@ -89,9 +89,15 @@ uv run cpsa-showcase --config config/showcase.yaml    # or: .venv/bin/cpsa-showc
 ```
 
 The dashboard is at `http://<board>:8080/`. Options: `--config PATH`,
-`--version`. Exit codes: `0` orderly stop, `1` unexpected failure, `2` startup
-failure (unreadable configuration, missing model or camera) after publishing
-`status` with `state: "error"`; `journalctl -u cpsa-showcase` explains it.
+`--calibration PATH`, `--replay DIR`, `--version`. Exit codes: `0` orderly
+stop, `1` unexpected failure, `2` startup failure (unreadable configuration,
+missing model or camera, unreadable replay directory) after publishing `status`
+with `state: "error"`; `journalctl -u cpsa-showcase` explains it.
+
+`--replay DIR` (or `camera.replay_dir` in the configuration) replaces the camera
+with a loop of the JPG/PNG images of `DIR`, for an fps measurement with nobody in
+front of the booth: see [Measuring the fps without the
+camera](#measuring-the-fps-without-the-camera).
 
 ## Configuration
 
@@ -99,10 +105,12 @@ One file, `config/showcase.yaml`, with six sections and no unknown keys:
 
 ```yaml
 camera:    # device (auto or /dev/videoN), match, width, height, fps, exposure,
-           # gain, white_balance, backlight_compensation, saturation, power_line_hz
+           # gain, white_balance, backlight_compensation, saturation, power_line_hz,
+           # mirror, replay_dir, replay_hold_frames, replay_jitter_px
 tracker:   # enabled, iou_match, alpha, fast_alpha, deadband_iou, min_hits, max_misses,
            # still: enabled, motion_thr, force_every_s
-model:     # path, conf_thr, iou_thr, zoom, zoom_center, alternate
+model:     # path, kind (yolox | yolov5), yolov5_path, conf_thr, iou_thr, class_conf,
+           # object_conf, zoom, zoom_center, alternate
 labels:    # it | en
 web:       # host, port, video_fps, jpeg_quality, static_dir
 log:       # level
@@ -159,34 +167,51 @@ On the board, with the services stopped:
 ```sh
 sudo systemctl stop cpsa-showcase
 uv run python scripts/profile_showcase.py --model models/yolox_nano.xmodel
+uv run python scripts/profile_showcase.py --yolov5-model models/yolov5_nano.xmodel
 ```
 
 That prints the per-stage cost (preprocess, DPU, decode, draw, JPEG) against the
-16.7 ms frame budget.
+16.7 ms frame budget. `--busy` measures the two synthetic decode lines on a
+crowded frame (150 planted objects in clusters) instead of a near-empty one, so
+the class-aware NMS is measured with the work a crowd in front of the booth
+gives it.
 
-## YOLOv5-nano (evaluation)
+### Measuring the fps without the camera
 
-`src/cpsa/yolov5.py` is a standalone evaluation of the model-zoo YOLOv5-nano at
-its native 640x640 (`4.6 G` float ops against YOLOX-nano's `1.0 G` at 416): same
+The fps of the whole app can be measured with nobody in front of the camera, on
+a loop of photos (real COCO validation images with people and objects are
+enough). Keep them out of git under `build/replay`, then on the board:
+
+```sh
+scripts/measure_replay.sh ~/cpsa/build/replay 15
+```
+
+The script stops `cpsa-showcase.service` (the DPU stays loaded by
+`cpsa-dpu.service`), runs `cpsa-showcase --config config/showcase.yaml --replay
+DIR` for 15 s per case, switches the view and the object detector over the
+WebSocket (`model.set`, `calibration.set`) and prints the status fps and the
+stage log of each case, then restores the service. Every image is held for
+`camera.replay_hold_frames` frames (6, so ten scene changes per second at 60
+fps) and shifted by up to `camera.replay_jitter_px` pixels (2), so the still gate
+keeps inferring instead of freezing the measurement.
+
+## YOLOv5-nano
+
+`src/cpsa/yolov5.py` runs the model-zoo YOLOv5-nano at its native 640x640
+(`4.6 G` float ops against YOLOX-nano's `1.0 G` at 416): same
 preprocessing/`submit`/`wait`/int8-prefilter seams, YOLOv5's anchors and
 `sigmoid(t) * 2` decode, and the zoo's per-cell, multi-label post-processing.
-It is **not wired into the pipeline or the configuration**, and the YOLOX
-detector stays the one the showcase runs.
+`model.kind: yolov5` starts on it, and the dashboard's Calibrazione card
+switches the loaded detector live; the YOLOX zoom and alternation do not apply,
+because YOLOv5 always sees the whole frame. A 640x480 frame needs no resize for
+the square input (the letterbox only pads), so its rows are quantized straight
+into the DPU input, and the decode thresholds the int8 class logits before it
+takes their sigmoid.
 
 The DPU artifact comes from `tools/vitis/zoo_yolov5_nano.sh`; the reference
 check (`tools/vitis/yolov5_reference.py`) is described in
 [`tools/vitis/README.md`](tools/vitis/README.md), together with the zoo
-packaging constraint that forces the prebuilt route. On the board, with the
-service stopped:
-
-```sh
-sudo systemctl stop cpsa-showcase
-uv run python scripts/profile_showcase.py --yolov5-model models/yolov5_nano.xmodel
-```
-
-Without `--yolov5-model` the `yolov5` lines measure the host preprocess and
-decode for real and report the DPU stage as an estimate; the graph has not been
-timed on the board.
+packaging constraint that forces the prebuilt route.
 
 ## Building the model
 

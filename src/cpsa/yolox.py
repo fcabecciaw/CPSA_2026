@@ -98,6 +98,14 @@ MAX_DETECTIONS = 100
 MAX_CLASSES_PER_CELL = 3
 
 _NMS_MATRIX_CANDIDATES = 512
+
+_NMS_CANDIDATE_CAP = 300
+"""Candidates with the best scores kept before NMS.
+
+A real frame yields a few dozen candidates, so the cap only trips on a
+pathological head (a busy texture read as hundreds of objects); it bounds the
+pairwise pass there without changing the small frames the showcase sees.
+"""
 """Candidate count up to which the NMS computes its overlaps as one matrix."""
 
 _MIN_CHANNELS = 6
@@ -245,37 +253,47 @@ def _class_aware_nms(
 ) -> NDArray[np.intp]:
     """Greedy per-class suppression: overlapping boxes of different classes both survive.
 
-    A frame's candidate count is small (a few dozen, at most three per cell), so
-    the overlaps are computed once as a matrix and the greedy pass only flips
-    booleans; beyond :data:`_NMS_MATRIX_CANDIDATES` the matrix would cost more
-    memory than the frame allows and the per-row scan is used instead.
+    Suppression never crosses classes, so each class is passed on its own: the
+    survivor set is exactly the one of the class-aware pass over the frame (the
+    score order inside a class is unchanged) and the pairwise overlap stays
+    ``sum(n_c ** 2)`` instead of ``n ** 2``. A class cannot contribute more than
+    :data:`MAX_DETECTIONS` survivors to the capped output, so its pass stops
+    there. Within one matrix-sized class the overlaps are computed once and the
+    pass only flips booleans; beyond :data:`_NMS_MATRIX_CANDIDATES` a per-row
+    scan is used instead.
     """
 
-    order = np.argsort(-scores, kind="stable").astype(np.intp)
-    if order.size <= 1:
-        return order
+    if scores.size <= 1:
+        return np.argsort(-scores, kind="stable").astype(np.intp)
     keep: list[int] = []
-    if order.size <= _NMS_MATRIX_CANDIDATES:
-        overlap = _pairwise_iou(boxes)
+    for class_id in np.unique(class_ids):
+        members = np.flatnonzero(class_ids == class_id)
+        order = members[np.argsort(-scores[members], kind="stable")]
         remaining = np.ones(order.size, dtype=np.bool_)
-        for best in order:
-            if not remaining[best]:
+        kept = 0
+        if order.size <= _NMS_MATRIX_CANDIDATES:
+            overlap = _pairwise_iou(boxes[order])
+            for position in range(order.size):
+                if not remaining[position]:
+                    continue
+                keep.append(int(order[position]))
+                kept += 1
+                remaining[position] = False
+                remaining[overlap[position] > iou_thr] = False
+                if kept >= MAX_DETECTIONS:
+                    break
+            continue
+        for position in range(order.size):
+            if not remaining[position]:
                 continue
-            keep.append(int(best))
-            remaining[best] = False
-            remaining[(overlap[best] > iou_thr) & (class_ids == class_ids[best])] = False
-        return np.asarray(keep, dtype=np.intp)
-
-    rest = order
-    while rest.size:
-        best = int(rest[0])
-        keep.append(best)
-        rest = rest[1:]
-        if rest.size == 0:
-            break
-        same_class = class_ids[rest] == class_ids[best]
-        overlap = _iou(boxes[best], boxes[rest])
-        rest = rest[~(same_class & (overlap > iou_thr))]
+            keep.append(int(order[position]))
+            kept += 1
+            remaining[position] = False
+            rest = np.flatnonzero(remaining)
+            overlap = _iou(boxes[order[position]], boxes[order[rest]])
+            remaining[rest[overlap > iou_thr]] = False
+            if kept >= MAX_DETECTIONS or rest.size == 0:
+                break
     return np.asarray(keep, dtype=np.intp)
 
 
@@ -302,6 +320,11 @@ def _finalize(
             np.zeros(0, dtype=np.float64),
             np.zeros(0, dtype=np.intp),
         )
+    if candidate_scores.size > _NMS_CANDIDATE_CAP:
+        best = np.argsort(-candidate_scores, kind="stable")[:_NMS_CANDIDATE_CAP]
+        candidates = candidates[best]
+        candidate_scores = candidate_scores[best]
+        candidate_classes = candidate_classes[best]
 
     keep = _class_aware_nms(candidates, candidate_scores, candidate_classes, iou_thr)
     keep = keep[np.argsort(-candidate_scores[keep], kind="stable")][:MAX_DETECTIONS]

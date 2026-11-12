@@ -118,6 +118,13 @@ class CameraConfig:
     0..4 and ``saturation`` the V4L2 saturation 0..255. All of them are applied
     at every open: the ISP's own automatic adjustments are what made the booth
     image drift.
+
+    ``replay_dir`` replaces the V4L2 node with :class:`cpsa.camera.ReplayCamera`,
+    which loops the images of that directory at ``fps``: the fps of the whole
+    app is then measurable on the board with nobody in front of the camera.
+    ``replay_hold_frames`` frames are shown per image and every frame is shifted
+    by up to ``replay_jitter_px`` pixels, so the scene keeps changing for the
+    still gate at roughly ``fps / replay_hold_frames`` changes per second.
     """
 
     device: str
@@ -132,6 +139,9 @@ class CameraConfig:
     saturation: int
     power_line_hz: int
     mirror: bool = True
+    replay_dir: Path | None = None
+    replay_hold_frames: int = 6
+    replay_jitter_px: int = 2
 
 
 @dataclass(frozen=True)
@@ -373,9 +383,18 @@ def _camera_config(camera: _Section) -> CameraConfig:
         saturation=camera.integer("saturation", *SATURATION_RANGE),
         power_line_hz=camera.power_line_hz("power_line_hz"),
         mirror=camera.optional_boolean("mirror", True),
+        replay_dir=_optional_path(camera, "replay_dir"),
+        replay_hold_frames=camera.optional_integer("replay_hold_frames", 6, 1, 600),
+        replay_jitter_px=camera.optional_integer("replay_jitter_px", 2, 0, 64),
     )
     camera.reject_unknown()
     return config
+
+
+def _optional_path(section: _Section, name: str) -> Path | None:
+    """Return the path at ``name``, or ``None`` when the key is absent."""
+    text = section.optional_text(name, "")
+    return Path(text).expanduser() if text else None
 
 
 def _tracker_config(tracker: _Section) -> TrackerConfig:
@@ -605,6 +624,12 @@ class _Section:
                 self._key(name), f"expected an integer between {minimum} and {maximum}"
             )
         return value
+
+    def optional_integer(self, name: str, default: int, minimum: int, maximum: int) -> int:
+        """Return the integer at ``name`` within ``[minimum, maximum]``, or ``default``."""
+        if name not in self._data:
+            return default
+        return self.integer(name, minimum, maximum)
 
     def boolean(self, name: str) -> bool:
         value = self._get(name)

@@ -502,16 +502,27 @@ class QuantizedYolov5Decoder:
             if index.size == 0:
                 continue
             survivors = slots[index]
-            qualified = np.any(np.any(survivors[:, :, _CLASS_START:] >= gates, axis=2), axis=1)
+            # The float sigmoid runs on the (candidate, class) pairs that pass
+            # their int8 gate, not on every class of every survivor: the other
+            # logits can never reach their threshold, and the scan that finds
+            # them is a contiguous byte compare. ``0.0`` stands in for those
+            # classes, and no threshold is below it, so they stay unqualified.
+            class_logits = survivors[:, :, _CLASS_START:]
+            above = class_logits >= gates
+            qualified = above.any(axis=2).any(axis=1)
             if not qualified.any():
                 continue
             index = index[qualified]
             survivors = survivors[qualified]
+            above = above[qualified]
 
             factor = layout.dequant_factor
             regression = _sigmoid(survivors[:, :, :_BOX_CHANNELS].astype(np.float64) * factor)
             objectness = _sigmoid(survivors[:, :, _OBJECTNESS].astype(np.float64) * factor)
-            class_scores = _sigmoid(survivors[:, :, _CLASS_START:].astype(np.float64) * factor)
+            class_scores = np.zeros(above.shape, dtype=np.float64)
+            class_scores[above] = _sigmoid(
+                survivors[:, :, _CLASS_START:][above].astype(np.float64) * factor
+            )
             cell_scores = (objectness[:, :, None] * class_scores).reshape(
                 index.size * _ANCHORS_PER_CELL, layout.classes
             )
@@ -671,6 +682,16 @@ def prepare_input_into(
         height, width, out_height, out_width
     )
     pad_quantized = lut[YOLOV5_PAD_VALUE]
+    if scale == 1.0 and left == 0 and image.flags["C_CONTIGUOUS"]:
+        # A 4:3 frame letterboxes to the full width of the 640x640 input at
+        # scale 1.0: the source rows go straight into their place in the DPU
+        # buffer, so the frame pays the LUT and no resize copy at all. The pad
+        # rows never change, so they are quantized only when the geometry does.
+        if fill_pad:
+            out[:top].fill(pad_quantized)
+            out[top + height :].fill(pad_quantized)
+        _quantize_into(image, lut, out[top : top + height])
+        return scale, (float(left), float(top))
     resized = np.asarray(
         cv2.resize(image, (resized_width, resized_height), interpolation=cv2.INTER_LINEAR),
         dtype=np.uint8,

@@ -101,6 +101,38 @@ and `full`/`zoom` the share of the whole-frame and centre-crop passes.
 The dashboard is at `http://<board>:8080/`. The video pane is
 `/video.mjpeg`; nothing is encoded until a browser connects.
 
+### Measuring the fps without the camera
+
+Nobody has to stand in front of the booth: the app can loop a directory of
+photos instead of the camera. Copy a few real COCO validation images with people
+and objects to `~/cpsa/build/replay` (the directory is git-ignored, and the
+images are not part of the deployment), then:
+
+```sh
+cd ~/cpsa
+scripts/measure_replay.sh build/replay 15
+```
+
+The script stops `cpsa-showcase.service` (the DPU stays loaded by
+`cpsa-dpu.service`), starts
+
+```sh
+.venv/bin/cpsa-showcase --config config/showcase.yaml --replay build/replay
+```
+
+and reports, for the YOLOX and YOLOv5 object views and the MoveNet skeleton
+view, the `status.fps` of the app, the last `showcase stages over ...` line of
+each case and the stage means it carries. It switches view and detector over the
+WebSocket, so it measures the deployed app, not a variant, and it restarts the
+service on exit (also on Ctrl-C). The app's log of the run is left in
+`build/replay-measure.log`.
+
+Each image is held for `camera.replay_hold_frames` frames and shifted by up to
+`camera.replay_jitter_px` pixels, so the scene changes ten times a second at
+60 fps: the still gate keeps running the detector instead of freezing the
+measurement. Set both in `config/showcase.yaml` to change the rhythm, or pass
+`--replay DIR` to a manual `cpsa-showcase` run to measure by hand.
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
@@ -110,7 +142,7 @@ The dashboard is at `http://<board>:8080/`. The video pane is
 | `/health` reports `errors: ["dpu_error"]` | VART could not load the graph: `xdputil query` must report `DPUCZDX8G_ISA1_B4096` with fingerprint `0x101000016010407`. A stale `/tmp/DPU_0` lock file, or a unit started before `cpsa-dpu.service`, are the usual causes. |
 | `cpsa-showcase` exits with code 2 | Startup failure: the journal names the reason (`cannot start the showcase: <code>: <message>`). The process published `status` with `state: "error"` before exiting, so `/health` reports the same. |
 | The deploy fails at step 4 | `xir`/`vart` do not import from `.venv`: the VART bindings must be in the system dist-packages, and the venv must be created with `--system-site-packages` (the script rebuilds one that was not). |
-| fps collapses or the video stutters | Something else is using the DPU or the camera: `systemctl status cpsa-dpu`, `ps aux \| grep cpsa`. Run `scripts/profile_showcase.py` with the unit stopped to see which stage is slow. |
+| fps collapses or the video stutters | Something else is using the DPU or the camera: `systemctl status cpsa-dpu`, `ps aux \| grep cpsa`. Run `scripts/profile_showcase.py` with the unit stopped to see which stage is slow, and `scripts/measure_replay.sh build/replay` to measure the whole app from photos instead of the camera. |
 | The board is unreachable after a power cut | `cpsa-showcase` waits for `cpsa-dpu.service`; if the DFX manager did not come up, `systemctl restart dfx-mgr` and then `systemctl restart cpsa-showcase`. |
 
 ## Undeploying

@@ -270,11 +270,17 @@ def config(
     publish_hz: float = 30.0,
     zoom: float = 1.0,
     alternate: bool = False,
+    kind: str = "yolox",
 ) -> ShowcaseConfig:
     model = tmp_path / "yolox_nano.xmodel"
     model.write_bytes(b"fake xmodel")
     movenet_model = tmp_path / "movenet.xmodel"
     movenet_model.write_bytes(b"fake movenet xmodel")
+    # Only a YOLOv5 run installs the YOLOv5 file, so the calibration tests keep
+    # reporting YOLOX as the only installed detector.
+    yolov5_model = tmp_path / "yolov5_nano.xmodel"
+    if kind == "yolov5":
+        yolov5_model.write_bytes(b"fake yolov5 xmodel")
     return ShowcaseConfig(
         camera=CameraConfig(
             device="auto",
@@ -296,6 +302,8 @@ def config(
             iou_thr=0.45,
             zoom=zoom,
             alternate=alternate,
+            kind=kind,
+            yolov5_path=yolov5_model,
         ),
         movenet=MovenetConfig(
             path=movenet_model,
@@ -327,6 +335,7 @@ def build(
     publish_hz: float = 30.0,
     zoom: float = 1.0,
     alternate: bool = False,
+    kind: str = "yolox",
     detector_factory: Callable[[ModelConfig], object] | None = None,
     pose_factory: Callable[[MovenetConfig], FakePoseDetector] | None = None,
     calibration_store: CalibrationStore | None = None,
@@ -343,6 +352,7 @@ def build(
             publish_hz=publish_hz,
             zoom=zoom,
             alternate=alternate,
+            kind=kind,
         ),
         channel=channel,
         messages=sink,  # type: ignore[arg-type]
@@ -2020,3 +2030,58 @@ def test_a_reset_restores_the_yaml_thresholds(tmp_path: Path) -> None:
     assert detector.tables[0][62] == 0.8
     assert detector.tables[-1][62] == 0.35  # conf_thr of the test config
     assert pipeline.calibration.object_conf == 0.35
+
+
+def test_a_replay_directory_starts_the_camera_of_the_app(tmp_path: Path) -> None:
+    import cv2
+
+    replay = tmp_path / "replay"
+    replay.mkdir()
+    assert cv2.imwrite(str(replay / "frame.png"), np.full((HEIGHT, WIDTH, 3), 90, np.uint8))
+    settings = config(tmp_path)
+    sink = Sink()
+    channel = FrameChannel.create(WIDTH, HEIGHT)
+    detector = FakeDetector([PERSON])
+    pipeline = Pipeline(
+        replace(settings, camera=replace(settings.camera, replay_dir=replay)),
+        channel=channel,
+        messages=sink,  # type: ignore[arg-type]
+        detector_factory=lambda model: detector,
+        movenet_factory=lambda movenet: FakePoseDetector(),
+    )
+    try:
+        with RunningPipeline(pipeline):
+            # No camera_factory: the pipeline builds the source from the config.
+            wait_until(lambda: sink.topics("showcase.state"))
+            frame = channel.read()
+    finally:
+        channel.close()
+        channel.unlink()
+
+    assert detector.calls.count("submit") >= 1
+    assert frame is not None
+    assert any(status["camera"] == "ok" for status in sink.topics("status"))
+
+
+def test_the_yolov5_view_overlaps_the_dpu_without_a_pass_schedule(tmp_path: Path) -> None:
+    """The 640x640 detector always sees the whole frame, and still pipelines.
+
+    Its ``submit`` takes the pass the loop would give YOLOX and ignores it, so
+    the same loop must keep two jobs in flight: frame N is on the DPU while
+    frame N-1 is decoded, tracked and drawn.
+    """
+    detector = FakeDetector([PERSON])
+    pipeline, camera, sink, channel = build(tmp_path, detector=detector, kind="yolov5")
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            feed(camera, 5)
+            wait_until(lambda: detector.calls.count("wait") >= 2)
+    finally:
+        channel.close()
+        channel.unlink()
+
+    assert detector.calls[:3] == ["submit", "submit", "wait"]
+    assert detector.calls.count("submit") >= detector.calls.count("wait") >= 2
+    # YOLOv5 has no zoom and no class split: every submit carried no pass.
+    assert set(detector.passes) == {None}

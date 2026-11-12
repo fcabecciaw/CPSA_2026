@@ -13,6 +13,11 @@ paths are used unchanged.
 The capture thread hands out :class:`VideoFrame` objects that keep the raw YUYV
 bytes; the conversion to ``(H, W, 3)`` RGB runs in the pipeline loop with
 :func:`cv2.cvtColor`, the fastest conversion on the KV260's Cortex-A53.
+
+:class:`ReplayCamera` is the same source over a directory of photos instead of
+the V4L2 node (``camera.replay_dir`` / ``--replay DIR``): it loops the images at
+``camera.fps`` with a small per-frame jitter, so the fps of the whole app can be
+measured on the board with nobody in front of the camera.
 """
 
 from __future__ import annotations
@@ -40,9 +45,11 @@ __all__ = [
     "AUTO",
     "DEPTH_FOURCC",
     "DEFAULT_MATCH",
+    "REPLAY_SUFFIXES",
     "RGB_FOURCC",
     "CameraError",
     "CameraNotFound",
+    "ReplayCamera",
     "UvcCamera",
     "VideoFrame",
     "VideoNode",
@@ -568,6 +575,259 @@ class UvcCamera:
                 "falling back to time.monotonic() at dequeue"
             )
         return time.monotonic()
+
+
+REPLAY_SUFFIXES = (".jpg", ".jpeg", ".png", ".bmp")
+"""Image suffixes :class:`ReplayCamera` loops, matched case-insensitively."""
+
+
+def replay_images(directory: Path) -> list[Path]:
+    """Return the replay images of ``directory``, sorted by file name.
+
+    Raises:
+        CameraError: If ``directory`` is not a readable directory.
+    """
+
+    if not directory.is_dir():
+        raise CameraError(f"replay directory not found: {directory}")
+    return sorted(
+        path
+        for path in directory.iterdir()
+        if path.is_file() and path.suffix.casefold() in REPLAY_SUFFIXES
+    )
+
+
+def _letterbox_rgb(image: NDArray[np.uint8], width: int, height: int) -> NDArray[np.uint8]:
+    """Letterbox one RGB frame into ``width`` x ``height``, centred on black."""
+
+    source_height, source_width = image.shape[:2]
+    scale = min(width / source_width, height / source_height)
+    resized_width = max(1, min(width, int(round(source_width * scale))))
+    resized_height = max(1, min(height, int(round(source_height * scale))))
+    if (resized_width, resized_height) != (source_width, source_height):
+        image = np.asarray(
+            cv2.resize(image, (resized_width, resized_height), interpolation=cv2.INTER_AREA),
+            dtype=np.uint8,
+        )
+    canvas = np.zeros((height, width, 3), dtype=np.uint8)
+    top = (height - resized_height) // 2
+    left = (width - resized_width) // 2
+    canvas[top : top + resized_height, left : left + resized_width] = image
+    return canvas
+
+
+def _pad_for_jitter(frame: NDArray[np.uint8], jitter: int) -> NDArray[np.uint8]:
+    """Pad a frame by ``jitter`` pixels of edge pixels, so a shift has no wrap."""
+
+    if jitter <= 0:
+        return frame
+    padded = np.pad(frame, ((jitter, jitter), (jitter, jitter), (0, 0)), mode="edge")
+    return np.ascontiguousarray(padded)
+
+
+def _replay_offset(seq: int, jitter: int) -> tuple[int, int]:
+    """Deterministic ``(dy, dx)`` shift of frame ``seq``, each within ±``jitter``.
+
+    A hash of the sequence number instead of a random generator keeps the replay
+    reproducible across runs and testable.
+    """
+
+    if jitter <= 0:
+        return 0, 0
+    span = 2 * jitter + 1
+    return (seq * 13 + 5) % span - jitter, (seq * 7 + 3) % span - jitter
+
+
+def _load_replay_frames(config: CameraConfig) -> tuple[NDArray[np.uint8], ...]:
+    """Decode, mirror, letterbox and pad the images of ``config.replay_dir``.
+
+    Raises:
+        CameraError: If the directory is missing or holds no usable image.
+    """
+
+    directory = config.replay_dir
+    if directory is None:  # pragma: no cover - the pipeline only builds a replay camera then
+        raise CameraError("the replay camera needs camera.replay_dir or --replay DIR")
+    paths = replay_images(directory)
+    if not paths:
+        raise CameraError(f"{directory}: no {'/'.join(REPLAY_SUFFIXES)} images to replay")
+    frames: list[NDArray[np.uint8]] = []
+    for path in paths:
+        bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if bgr is None:
+            logger.warning("skipping the unreadable replay image %s", path)
+            continue
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        if config.mirror:
+            rgb = cv2.flip(rgb, 1)
+        letterboxed = _letterbox_rgb(np.asarray(rgb, dtype=np.uint8), config.width, config.height)
+        frames.append(_pad_for_jitter(letterboxed, config.replay_jitter_px))
+    if not frames:
+        raise CameraError(f"{directory}: no replay image could be decoded")
+    logger.info(
+        "replay source: %d images from %s at %g fps, %d frames each",
+        len(frames),
+        directory,
+        config.fps,
+        config.replay_hold_frames,
+    )
+    return tuple(frames)
+
+
+class ReplayCamera:
+    """A camera stand-in that loops a directory of images at ``camera.fps``.
+
+    The board's fps measurement must not depend on somebody standing in front of
+    the camera: with ``camera.replay_dir`` (or ``--replay DIR``) the app captures
+    from sorted JPG/PNG photos instead of the V4L2 node, through the same
+    :class:`VideoFrame` interface and with monotonic timestamps, so the chain
+    after capture (detector, tracker, still gate, overlay, shared memory, web
+    server, status fps, stage log) runs unchanged.
+
+    Images are decoded, mirrored and letterboxed to the configured geometry once,
+    at :meth:`start`; a frame holds its image for ``replay_hold_frames`` frames
+    and shifts it by up to ``replay_jitter_px`` pixels. With the defaults that is
+    10 scene changes per second at 60 fps, the rhythm of people moving in the
+    booth, which keeps the still gate inferring.
+
+    Args:
+        config: Camera settings; ``replay_dir`` is required.
+    """
+
+    def __init__(self, config: CameraConfig) -> None:
+        self._config = config
+        self._lifecycle = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._running = False
+        self._frames: tuple[NDArray[np.uint8], ...] = ()
+
+    @property
+    def config(self) -> CameraConfig:
+        """The settings this replay runs with."""
+        return self._config
+
+    @property
+    def running(self) -> bool:
+        """True while the delivery thread is active."""
+        return self._running and not self._stop.is_set()
+
+    @property
+    def image_count(self) -> int:
+        """How many images are being looped."""
+        return len(self._frames)
+
+    def start(
+        self,
+        on_frame: Callable[[VideoFrame], None],
+        on_error: Callable[[Exception], None] | None = None,
+    ) -> None:
+        """Load the images and deliver frames from one thread at ``fps``.
+
+        Raises:
+            CameraError: If the directory is missing, holds no usable image, or
+                the delivery thread cannot start.
+            RuntimeError: If this camera is already running.
+        """
+
+        with self._lifecycle:
+            if self._running:
+                raise RuntimeError("the camera is already started")
+            self._frames = _load_replay_frames(self._config)
+            self._stop = threading.Event()
+            self._thread = threading.Thread(
+                target=self._deliver,
+                args=(on_frame, on_error),
+                name="cpsa-replay",
+                daemon=True,
+            )
+            self._running = True
+            try:
+                self._thread.start()
+            except Exception as exc:
+                self._running = False
+                self._frames = ()
+                raise CameraError(f"cannot start the replay thread: {exc}") from exc
+
+    def stop(self) -> None:
+        """Stop delivery and join the thread."""
+        with self._lifecycle:
+            if not self._running:
+                return
+            self._stop.set()
+            thread = self._thread
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=2.0)
+                if thread.is_alive():
+                    logger.warning("%s did not stop within 2 s", thread.name)
+            self._thread = None
+            self._running = False
+
+    def _deliver(
+        self,
+        on_frame: Callable[[VideoFrame], None],
+        on_error: Callable[[Exception], None] | None,
+    ) -> None:
+        """Deliver one frame per period, holding each image for a few frames."""
+        frames = self._frames
+        if not frames:  # pragma: no cover - start always loads them
+            return
+        period = 1.0 / self._config.fps
+        hold = max(1, self._config.replay_hold_frames)
+        jitter = self._config.replay_jitter_px
+        seq = 0
+        due = time.monotonic()
+        while not self._stop.is_set():
+            try:
+                now = time.monotonic()
+                if now < due:
+                    self._stop.wait(min(due - now, period))
+                    continue
+                image = frames[(seq // hold) % len(frames)]
+                dy, dx = _replay_offset(seq, jitter)
+                on_frame(self._frame(seq, image, dy, dx))
+                seq += 1
+                due += period
+                # A slow consumer never builds credit for a burst of frames.
+                if due < time.monotonic():
+                    due = time.monotonic() + period
+            except Exception as exc:
+                if self._stop.is_set():
+                    return
+                logger.exception("the replay source stopped by an error")
+                if on_error is not None:
+                    try:
+                        on_error(exc)
+                    except Exception:
+                        logger.exception("camera error callback failed")
+                return
+
+    def _frame(
+        self,
+        seq: int,
+        image: NDArray[np.uint8],
+        dy: int,
+        dx: int,
+    ) -> VideoFrame:
+        """Build one frame whose decode is the shifted view of the padded image."""
+        height = self._config.height
+        width = self._config.width
+        # ``image`` is padded by the jitter, so the view starts at the pad and
+        # never uses a negative slice index.
+        pad = max(0, self._config.replay_jitter_px)
+        top = pad + dy
+        left = pad + dx
+
+        def decode() -> NDArray[np.uint8]:
+            return np.ascontiguousarray(image[top : top + height, left : left + width])
+
+        return VideoFrame(
+            seq=seq,
+            t=time.monotonic(),
+            width=width,
+            height=height,
+            decode=decode,
+        )
 
 
 def _close_quietly(stream: _Stream) -> None:

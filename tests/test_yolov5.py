@@ -327,6 +327,36 @@ def _planted_heads(
     return heads
 
 
+def _crowded_heads(planted: int = 150, seed: int = 7) -> list[NDArray[np.int8]]:
+    """The compiled graph's heads with ``planted`` object slots in loose clusters.
+
+    Eight slots share neighbouring cells, so boxes of one class overlap the way
+    a crowd's do and the class-aware NMS has real work; half of the slots carry
+    a bottle and every fifth a cup, the multi-label path.
+    """
+
+    generator = np.random.default_rng(seed)
+    heads = [np.full(shape, -128, dtype=np.int8) for shape in QUANTIZED_SHAPES]
+    for index in range(planted):
+        # Two thirds of the crowd on the fine 80x80 head, like a real frame.
+        which = 0 if index < 100 else (1 if index < 135 else 2)
+        height, width, _ = QUANTIZED_SHAPES[which]
+        head = heads[which]
+        cluster = index // 8
+        row = min((cluster * 37) % max(height - 4, 1) + int(generator.integers(0, 3)), height - 1)
+        column = min((cluster * 53) % max(width - 4, 1) + int(generator.integers(0, 3)), width - 1)
+        base = (index % 3) * SLOT
+        head[row, column, base : base + 4] = generator.integers(-30, 30, size=4, dtype=np.int8)
+        head[row, column, base + OBJECTNESS] = generator.integers(90, 127)
+        head[row, column, base + CLASSES : base + SLOT] = generator.integers(-110, -30, size=80)
+        head[row, column, base + CLASSES + PERSON] = generator.integers(90, 127)
+        if index % 2 == 0:
+            head[row, column, base + CLASSES + BOTTLE] = generator.integers(50, 110)
+        if index % 5 == 0:
+            head[row, column, base + CLASSES + 41] = generator.integers(40, 90)  # cup
+    return heads
+
+
 @pytest.mark.parametrize("conf_thr", [0.0, 0.05, 0.35, 0.9, 1.0])
 def test_the_quantized_decoder_matches_the_float_decode(conf_thr: float) -> None:
     heads = _quantized_heads()
@@ -458,6 +488,56 @@ def test_prepare_input_into_skips_the_pad_only_when_asked() -> None:
 
     assert int(view[0, 0, 0]) == 7
     assert int(view[80, 0, 0]) == lut[0]
+
+
+def test_a_640x480_frame_is_written_without_a_resize(monkeypatch: pytest.MonkeyPatch) -> None:
+    """At scale 1.0 the source rows land in the graph input as they are.
+
+    The letterbox of a 4:3 frame into 640x640 keeps every pixel, so resizing it
+    would only copy 921 KB of memory a frame. The pad rows still change with the
+    geometry, so they are quantized when the frame size changes.
+    """
+
+    import cv2
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    frame[..., 0] = np.arange(640, dtype=np.uint8)[None, :]
+    frame[..., 1] = np.arange(480, dtype=np.uint8)[:, None]
+    lut = input_quantization_lut_scaled(6, YOLOV5_INPUT_SCALE)
+    view = np.full((*YOLOV5_INPUT_SIZE, 3), 7, dtype=np.int8)
+    expected = np.full((*YOLOV5_INPUT_SIZE, 3), lut[YOLOV5_PAD_VALUE], dtype=np.int8)
+    cv2.LUT(frame, lut.view(np.uint8), dst=expected[80:560].view(np.uint8))
+
+    def no_resize(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a 640x480 frame was resized")
+
+    monkeypatch.setattr(cv2, "resize", no_resize)
+    scale, pad = prepare_input_into(frame, YOLOV5_INPUT_SIZE, lut, view)
+
+    assert scale == pytest.approx(1.0)
+    assert pad == pytest.approx((0.0, 80.0))
+    assert np.array_equal(view, expected)
+
+
+def test_a_strided_frame_goes_through_the_general_letterbox() -> None:
+    """A non-contiguous source cannot be quantized in place: it is letterboxed."""
+    import cv2
+
+    frame = np.zeros((480, 700, 3), dtype=np.uint8)
+    frame[..., 0] = np.arange(700, dtype=np.uint8)[None, :]
+    frame[..., 2] = 200
+    source = frame[:, :640]  # a view: the row stride no longer matches the width
+    assert not source.flags["C_CONTIGUOUS"]
+    lut = input_quantization_lut_scaled(6, YOLOV5_INPUT_SCALE)
+    view = np.empty((*YOLOV5_INPUT_SIZE, 3), dtype=np.int8)
+    reference = np.empty((*YOLOV5_INPUT_SIZE, 3), dtype=np.int8)
+
+    prepare_input_into(source, YOLOV5_INPUT_SIZE, lut, view)
+    cv2.LUT(np.ascontiguousarray(source), lut.view(np.uint8), dst=reference[80:560].view(np.uint8))
+    reference[:80] = lut[YOLOV5_PAD_VALUE]
+    reference[560:] = lut[YOLOV5_PAD_VALUE]
+
+    assert np.array_equal(view, reference)
 
 
 def test_prepare_input_into_rejects_a_mismatched_view() -> None:
@@ -939,3 +1019,81 @@ def test_live_class_thresholds_apply_to_the_next_decode_without_a_reload(
     with pytest.raises(ValueError):
         detector.set_class_thresholds({0: 1.5})
     assert detector.class_thresholds == {0: 0.1}
+
+
+def test_a_crowded_frame_decodes_like_the_float_path() -> None:
+    """150 planted objects in clusters: the int8 path keeps the float result."""
+    heads = _crowded_heads()
+    decoder = QuantizedYolov5Decoder(QUANTIZED_SHAPES, STRIDES, QUANTIZED_FIX_POINTS)
+    overrides = class_thresholds(0.35, class_conf={"person": 0.40}, object_conf=0.25)
+
+    actual = decoder.decode(heads, 0.35, 0.45, overrides)
+
+    expected = decode_yolov5(
+        [
+            head.astype(np.float64) * 2.0**-fix_point
+            for head, fix_point in zip(heads, QUANTIZED_FIX_POINTS, strict=True)
+        ],
+        STRIDES,
+        conf_thr=0.35,
+        iou_thr=0.45,
+        logits=True,
+        class_thr=overrides,
+    )
+    for got, want in zip(actual, expected, strict=True):
+        assert np.array_equal(got, want)
+    # The crowd really fills the frame: the prefilter kept enough candidates for
+    # the class-aware NMS and its per-class matrices to be the work of a frame.
+    assert decoder.last_candidate_count > 150
+    assert actual[1].size == 100
+
+
+@pytest.mark.benchmark
+def test_a_crowded_frame_decodes_well_inside_the_decode_budget() -> None:
+    """Host micro-benchmark of the crowded decode, the busiest the NMS gets.
+
+    The board estimate is this host number times the board's slower cores; the
+    profile script reports the same heads on the board with ``--busy``.
+    """
+
+    heads = _crowded_heads()
+    decoder = QuantizedYolov5Decoder(QUANTIZED_SHAPES, STRIDES, QUANTIZED_FIX_POINTS)
+    overrides = class_thresholds(0.35, class_conf={"person": 0.40}, object_conf=0.25)
+    for _ in range(30):
+        decoder.decode(heads, 0.35, 0.45, overrides)
+
+    # The host is shared with the other booth processes: the fastest frame is
+    # the honest estimate of the work one decode costs.
+    samples = []
+    for _ in range(100):
+        started = time.perf_counter()
+        decoder.decode(heads, 0.35, 0.45, overrides)
+        samples.append((time.perf_counter() - started) * 1000.0)
+    per_frame_ms = min(samples)
+
+    assert per_frame_ms < 2.0, f"{per_frame_ms:.3f} ms per frame for the crowded decode"
+
+
+def test_a_crowded_frame_hands_the_tracker_only_post_nms_detections() -> None:
+    """The tracker and the still gate see the capped survivors, never candidates.
+
+    ``Yolov5Detector.wait`` returns exactly what :meth:`QuantizedYolov5Decoder.decode`
+    returns, so this is the list the loop tracks: at most
+    :data:`~cpsa.yolox.MAX_DETECTIONS` boxes, none of two of one class above the
+    NMS threshold.
+    """
+    from cpsa.yolox import MAX_DETECTIONS, _iou
+
+    heads = _crowded_heads()
+    decoder = QuantizedYolov5Decoder(QUANTIZED_SHAPES, STRIDES, QUANTIZED_FIX_POINTS)
+    overrides = class_thresholds(0.35, class_conf={"person": 0.40}, object_conf=0.25)
+
+    boxes, scores, classes = decoder.decode(heads, 0.35, 0.45, overrides)
+
+    assert decoder.last_candidate_count > boxes.shape[0]
+    assert boxes.shape[0] == MAX_DETECTIONS
+    for first in range(boxes.shape[0]):
+        for second in range(first + 1, boxes.shape[0]):
+            if classes[first] != classes[second]:
+                continue
+            assert _iou(boxes[first], boxes[second][None, :])[0] <= 0.45

@@ -17,6 +17,9 @@ camera:                       # Intel RealSense F200 RGB node over V4L2
   saturation: 110             # V4L2 saturation 0..255 (camera default 128): calms the colour noise
   power_line_hz: 50           # anti-flicker: 0 (off), 50 or 60
   mirror: true                # flip left-right like a mirror before detection (labels stay readable)
+  # replay_dir: build/replay  # unset: V4L2 camera. A directory of JPG/PNG loops instead (--replay DIR)
+  # replay_hold_frames: 6     # frames per image: 6 at 60 fps = 10 scene changes per second
+  # replay_jitter_px: 2       # per-frame shift in pixels, so the still gate keeps inferring
 
 tracker:                      # detector boxes, stabilized so they stand still on screen
   enabled: true               # false: publish the raw detector boxes

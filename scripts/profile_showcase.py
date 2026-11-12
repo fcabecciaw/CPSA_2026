@@ -57,6 +57,13 @@ YOLOX run by the float-op ratio of the two graphs (4.6 G against 1.0 G) and says
 so in the note, so the view's budget figure is an estimate until the graph is
 run.
 
+``--busy`` measures the same two decode lines on a crowded frame instead of the
+near-empty one: :data:`BUSY_CANDIDATES` objects are planted in loose clusters
+(so same-class boxes overlap and the class-aware NMS has real work) and half of
+them carry a second class. The candidate count in the note is the one the int8
+prefilter kept, so a board run with ``--busy`` reports what a crowd in front of
+the booth costs.
+
 Exit status is 0 when the measurement ran; ``--target-ms`` only labels the
 PASS/FAIL column.
 """
@@ -173,6 +180,10 @@ def synthetic_boxes() -> list[tuple[float, float, float, float, int, float]]:
     ]
 
 
+YOLOX_HEAD_SHAPES = ((52, 52, 85), (26, 26, 85), (13, 13, 85))
+"""Output shapes of the compiled YOLOX-nano graph (``inspect_xmodel.py``)."""
+
+
 def synthetic_heads() -> list[NDArray[np.int8]]:
     """The three int8 heads of a realistic frame: background plus planted boxes.
 
@@ -184,7 +195,7 @@ def synthetic_heads() -> list[NDArray[np.int8]]:
     multi-label decode is for.
     """
 
-    shapes = ((52, 52, 85), (26, 26, 85), (13, 13, 85))
+    shapes = YOLOX_HEAD_SHAPES
     generator = np.random.default_rng(20261112)
     heads: list[NDArray[np.int8]] = []
     for height, width, channels in shapes:
@@ -240,6 +251,60 @@ def synthetic_yolov5_heads() -> list[NDArray[np.int8]]:
                 head[row, column, base + 5 + 39] = generator.integers(40, 100)  # bottle
         heads.append(head)
     return heads
+
+
+BUSY_CANDIDATES = 150
+"""Planted object slots of the ``--busy`` heads: a crowd in front of the booth."""
+
+
+def _planted_heads(
+    shapes: Sequence[tuple[int, int, int]],
+    *,
+    anchors: int,
+    seed: int = 20261112,
+) -> list[NDArray[np.int8]]:
+    """Int8 heads with :data:`BUSY_CANDIDATES` objects planted in clusters.
+
+    The background is the synthetic heads' (objectness at ``-128``, so the int8
+    prefilter still drops it); the planted cells sit in loose groups, so boxes of
+    the same class overlap the way a crowded frame's do and the class-aware NMS
+    has real work. Half the objects carry a second class (bottle or cup) and
+    every fifth a third, which is the multi-label path and the per-cell cap.
+    YOLOX heads are one slot per cell, YOLOv5 heads three, so ``anchors`` selects
+    the layout of the cell.
+    """
+
+    generator = np.random.default_rng(seed)
+    heads = [np.full(shape, -128, dtype=np.int8) for shape in shapes]
+    for index in range(BUSY_CANDIDATES):
+        # Two thirds of the crowd on the fine 80x80 (52x52) head.
+        which = 0 if index < 100 else (1 if index < 135 else 2)
+        height, width, _ = shapes[which]
+        head = heads[which]
+        # Eight objects share a cluster, at neighbouring cells: overlapping boxes.
+        cluster = index // 8
+        row = min((cluster * 37) % max(height - 4, 1) + int(generator.integers(0, 3)), height - 1)
+        column = min((cluster * 53) % max(width - 4, 1) + int(generator.integers(0, 3)), width - 1)
+        base = (index % anchors) * 85
+        head[row, column, base : base + 4] = generator.integers(-30, 30, size=4, dtype=np.int8)
+        head[row, column, base + 4] = generator.integers(90, 127)
+        head[row, column, base + 5 : base + 85] = generator.integers(-110, -30, size=80)
+        head[row, column, base + 5] = generator.integers(90, 127)  # person
+        if index % 2 == 0:
+            head[row, column, base + 5 + (39, 41, 73)[index % 3]] = generator.integers(50, 110)
+        if index % 5 == 0:
+            head[row, column, base + 5 + (39, 41, 73, 0)[index % 4]] = generator.integers(40, 90)
+    return heads
+
+
+def busy_yolox_heads() -> list[NDArray[np.int8]]:
+    """YOLOX-nano heads of a busy scene: 150 planted objects, same shapes as the graph."""
+    return _planted_heads(YOLOX_HEAD_SHAPES, anchors=1)
+
+
+def busy_yolov5_heads() -> list[NDArray[np.int8]]:
+    """YOLOv5-nano heads of a busy scene: 150 planted slots, three anchors per cell."""
+    return _planted_heads(YOLOV5_HEAD_SHAPES, anchors=3)
 
 
 MOVENET_ORDER = ("offsets", "regs", "centers", "heatmaps")
@@ -366,6 +431,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=FRAME_SIZE[1])
     parser.add_argument("--height", type=int, default=FRAME_SIZE[0])
     parser.add_argument("--target-ms", type=float, default=1000.0 / 60.0)
+    parser.add_argument(
+        "--busy",
+        action="store_true",
+        help=(
+            "measure the synthetic YOLOX and YOLOv5 decode on busy-scene heads "
+            f"({BUSY_CANDIDATES} planted objects) instead of an empty one"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -567,7 +640,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         report("submit+wait", round_trip, args.target_ms, note="preprocess+dpu+decode")
         print(f"decode: last frame kept {detector.last_candidate_count} int8 candidates")
     else:
-        heads = synthetic_heads()
+        heads = busy_yolox_heads() if args.busy else synthetic_heads()
+        scene = "busy scene, " if args.busy else ""
         decoder = QuantizedYoloxDecoder(
             [tuple(int(value) for value in head.shape) for head in heads],
             YOLOX_STRIDES,
@@ -580,7 +654,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 lambda: decoder.decode(heads, YOLOX_CONF_THR, YOLOX_IOU_THR, yolox_thresholds),
             ),
             args.target_ms,
-            note=f"int8 prefilter, {decoder.last_candidate_count} candidates",
+            note=f"int8 prefilter, {scene}{decoder.last_candidate_count} candidates",
         )
         dpu_ms = report(
             "dpu",
@@ -646,7 +720,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"yolov5 decode: last frame kept {yolov5_detector.last_candidate_count} int8 candidates"
         )
     else:
-        yolov5_heads = synthetic_yolov5_heads()
+        yolov5_heads = busy_yolov5_heads() if args.busy else synthetic_yolov5_heads()
+        yolov5_scene = "busy scene, " if args.busy else ""
         yolov5_decoder = QuantizedYolov5Decoder(
             [tuple(int(value) for value in head.shape) for head in yolov5_heads],
             YOLOV5_STRIDES,
@@ -661,7 +736,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
             ),
             args.target_ms,
-            note=f"int8 prefilter, {yolov5_decoder.last_candidate_count} candidates",
+            note=f"int8 prefilter, {yolov5_scene}{yolov5_decoder.last_candidate_count} candidates",
         )
         yolov5_dpu_ms = report(
             "yolov5 dpu",

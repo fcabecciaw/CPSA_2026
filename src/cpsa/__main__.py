@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -66,8 +67,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         _configure_logging("INFO")
         logger.error("%s", exc)
         return EXIT_START
+    if args.replay is not None:
+        config = replace(config, camera=replace(config.camera, replay_dir=args.replay))
     _configure_logging(config.log.level)
     logger.info("cpsa-showcase %s: config %s", __version__, args.config)
+    if config.camera.replay_dir is not None:
+        logger.info("replay source: %s (no V4L2 camera)", config.camera.replay_dir)
     return run(config, calibration_store=CalibrationStore(args.calibration))
 
 
@@ -297,6 +302,16 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         type=Path,
         default=DEFAULT_CALIBRATION_PATH,
         help=f"live-calibration overrides of the debug panel (default: {DEFAULT_CALIBRATION_PATH})",
+    )
+    parser.add_argument(
+        "--replay",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help=(
+            "loop the JPG/PNG images of DIR instead of the V4L2 camera, for an fps "
+            "measurement with nobody in front of the camera"
+        ),
     )
     parser.add_argument("--version", action="version", version=f"cpsa-showcase {__version__}")
     return parser.parse_args(argv)

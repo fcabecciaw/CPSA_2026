@@ -74,7 +74,7 @@ from cpsa.calibration import (
     available_detectors,
     parse_update,
 )
-from cpsa.camera import CameraError, CameraNotFound, UvcCamera, VideoFrame
+from cpsa.camera import CameraError, CameraNotFound, ReplayCamera, UvcCamera, VideoFrame
 from cpsa.channel import CommandChannel, FrameChannel, MessageChannel
 from cpsa.config import CameraConfig, ModelConfig, MovenetConfig, ShowcaseConfig
 from cpsa.keypoints import KeypointStabilizer
@@ -1389,7 +1389,9 @@ def _default_movenet(config: MovenetConfig) -> PoseDetector:
 
 
 def _default_camera(config: CameraConfig) -> Camera:
-    """Build the UVC camera of F-K3."""
+    """Build the UVC camera of F-K3, or the replay source when one is configured."""
+    if config.replay_dir is not None:
+        return ReplayCamera(config)
     return UvcCamera(config)
 
 

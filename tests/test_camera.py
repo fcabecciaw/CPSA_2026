@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import statistics
 import threading
 import time
 from collections.abc import Sequence
+from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -13,6 +16,8 @@ import pytest
 from cpsa.camera import (
     DEPTH_FOURCC,
     RGB_FOURCC,
+    CameraError,
+    ReplayCamera,
     UvcCamera,
     VideoNode,
     _Captured,
@@ -440,3 +445,154 @@ def test_live_controls_on_a_stopped_camera_only_update_its_settings() -> None:
 
     assert stream.controls == {}
     assert camera.config.saturation == 90
+
+
+# --------------------------------------------------------------------------- #
+# The replay source: the board measures fps without anybody in front of it
+# --------------------------------------------------------------------------- #
+
+
+def write_image(path: Path, image: np.ndarray) -> None:
+    """Write one RGB test image as a PNG (the replay source reads it back)."""
+    import cv2
+
+    assert cv2.imwrite(str(path), image[:, :, ::-1])  # OpenCV writes BGR
+
+
+def replay_config(tmp_path: Path, **overrides: object) -> tuple[CameraConfig, Path]:
+    """A camera config whose source is ``tmp_path/replay``, plus the directory."""
+    directory = tmp_path / "replay"
+    directory.mkdir(exist_ok=True)
+    settings: dict[str, object] = {
+        "fps": 100.0,
+        "replay_dir": directory,
+        "replay_hold_frames": 2,
+        "replay_jitter_px": 0,
+    }
+    settings.update(overrides)
+    return camera_config(**settings), directory
+
+
+def collect(camera: ReplayCamera, count: int, timeout: float = 3.0) -> list[np.ndarray]:
+    """Start the camera, decode ``count`` frames and stop it."""
+    frames: list[np.ndarray] = []
+    camera.start(lambda frame: frames.append(frame.decode()))
+    try:
+        deadline = time.monotonic() + timeout
+        while len(frames) < count:
+            assert time.monotonic() < deadline, "the replay source delivered too few frames"
+            time.sleep(0.002)
+    finally:
+        camera.stop()
+    return frames[:count]
+
+
+def test_the_replay_source_loops_the_images_in_name_order(tmp_path: Path) -> None:
+    config, directory = replay_config(tmp_path)
+    for name, value in (("b.png", 10), ("a.png", 200), ("c.png", 120)):
+        write_image(directory / name, np.full((4, 8, 3), value, dtype=np.uint8))
+
+    frames = collect(ReplayCamera(config), 8)
+
+    # Sorted by name: a, b, c; each image held two frames.
+    values = [int(frame[0, 0, 0]) for frame in frames]
+    assert values[:6] == [200, 200, 10, 10, 120, 120]
+    assert values[6:] == [200, 200]  # it loops
+
+
+def test_the_replay_source_letterboxes_and_mirrors_like_the_camera(tmp_path: Path) -> None:
+    config, directory = replay_config(tmp_path, replay_hold_frames=60)
+    square = np.full((8, 8, 3), 90, dtype=np.uint8)
+    square[:, :4] = 200  # the left half: the mirror has to move it right
+    write_image(directory / "square.png", square)
+
+    plain = collect(ReplayCamera(config), 1)[0]
+    mirrored = collect(ReplayCamera(replace(config, mirror=False)), 1)[0]
+
+    assert plain.shape == (4, 8, 3)
+    # 8x8 into 8x4: a 4x4 image centred, so two black columns on each side.
+    assert (plain[:, :2] == 0).all() and (plain[:, 6:] == 0).all()
+    # Mirror (the default): 8x8 flipped first, so the marker ends on the right.
+    assert (plain[:, 4:6] == 200).all() and (plain[:, 2:4] == 90).all()
+    # No mirror: the marker stays on the left of the letterbox.
+    assert (mirrored[:, 2:4] == 200).all() and (mirrored[:, 4:6] == 90).all()
+
+
+def test_the_replay_source_jitters_every_frame_by_a_few_pixels(tmp_path: Path) -> None:
+    config, directory = replay_config(tmp_path, replay_jitter_px=2, replay_hold_frames=60)
+    image = np.full((4, 8, 3), 10, dtype=np.uint8)
+    image[1:3, 2:6] = 90  # a block whose position the decode reveals
+    write_image(directory / "block.png", image)
+
+    frames = collect(ReplayCamera(config), 12)
+
+    tops = {
+        (
+            int(np.flatnonzero((frame[:, :, 0] == 90).any(axis=1))[0]),
+            int(np.flatnonzero((frame[:, :, 0] == 90).any(axis=0))[0]),
+        )
+        for frame in frames
+    }
+    assert len(tops) > 1  # the scene moves, so the still gate keeps inferring
+    for row, column in tops:
+        assert abs(row - 1) <= 2 and abs(column - 2) <= 2
+
+
+@pytest.mark.benchmark
+def test_the_replay_source_keeps_the_camera_cadence(tmp_path: Path) -> None:
+    config, directory = replay_config(tmp_path, fps=100.0, replay_hold_frames=1)
+    write_image(directory / "one.png", np.full((4, 8, 3), 40, dtype=np.uint8))
+    stamps: list[float] = []
+    camera = ReplayCamera(config)
+
+    camera.start(lambda frame: stamps.append(frame.t))
+    try:
+        deadline = time.monotonic() + 3.0
+        while len(stamps) < 8:
+            assert time.monotonic() < deadline, "the replay source delivered too few frames"
+            time.sleep(0.002)
+    finally:
+        camera.stop()
+
+    gaps = [later - earlier for earlier, later in zip(stamps, stamps[1:], strict=False)]
+    assert statistics.median(gaps) == pytest.approx(0.01, rel=0.5)
+    assert all(later > earlier for earlier, later in zip(stamps, stamps[1:], strict=False))
+
+
+def test_the_replay_source_needs_a_directory_of_images(tmp_path: Path) -> None:
+    missing = ReplayCamera(camera_config(replay_dir=tmp_path / "missing"))
+    with pytest.raises(CameraError, match="not found"):
+        missing.start(lambda frame: None)
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    (empty / "notes.txt").write_text("not an image", encoding="utf-8")
+    with pytest.raises(CameraError, match="no .*images"):
+        ReplayCamera(camera_config(replay_dir=empty)).start(lambda frame: None)
+
+
+def test_an_unreadable_replay_image_is_skipped(tmp_path: Path) -> None:
+    config, directory = replay_config(tmp_path, replay_hold_frames=60)
+    (directory / "broken.png").write_bytes(b"not a png")
+    write_image(directory / "good.png", np.full((4, 8, 3), 70, dtype=np.uint8))
+
+    image = collect(ReplayCamera(config), 1)[0]
+
+    assert (image == 70).all()
+
+
+def test_the_replay_source_starts_once_and_stops_cleanly(tmp_path: Path) -> None:
+    config, directory = replay_config(tmp_path)
+    write_image(directory / "one.png", np.full((4, 8, 3), 40, dtype=np.uint8))
+    camera = ReplayCamera(config)
+    camera.start(lambda frame: None)
+    try:
+        assert camera.running
+        assert camera.image_count == 1
+        with pytest.raises(RuntimeError):
+            camera.start(lambda frame: None)
+    finally:
+        camera.stop()
+
+    assert not camera.running
+    camera.stop()  # idempotent

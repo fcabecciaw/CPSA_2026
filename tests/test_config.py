@@ -81,6 +81,22 @@ def test_the_camera_mirrors_by_default_and_can_be_turned_off(tmp_path: Path) -> 
     assert load(custom).camera.mirror is False
 
 
+def test_the_camera_has_no_replay_source_unless_one_is_configured() -> None:
+    shipped = load(SHIPPED)
+    assert shipped.camera.replay_dir is None
+    assert shipped.camera.replay_hold_frames == 6
+    assert shipped.camera.replay_jitter_px == 2
+
+    data = document()
+    data["camera"]["replay_dir"] = "build/replay"  # type: ignore[index]
+    data["camera"]["replay_hold_frames"] = 3  # type: ignore[index]
+    data["camera"]["replay_jitter_px"] = 0  # type: ignore[index]
+    camera = parse(data).camera
+    assert camera.replay_dir == Path("build/replay")
+    assert camera.replay_hold_frames == 3
+    assert camera.replay_jitter_px == 0
+
+
 def test_the_shipped_configuration_parses_and_names_the_machine() -> None:
     config = load(SHIPPED)
 
@@ -306,6 +322,9 @@ def test_a_missing_key_is_named(section: str, key: str) -> None:
         ("camera", "saturation", 256),
         ("camera", "power_line_hz", 30),
         ("camera", "device", ""),
+        ("camera", "replay_hold_frames", 0),
+        ("camera", "replay_hold_frames", "six"),
+        ("camera", "replay_jitter_px", -1),
         ("tracker", "enabled", "yes"),
         ("tracker", "iou_match", 1.5),
         ("tracker", "alpha", -0.1),
