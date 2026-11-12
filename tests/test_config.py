@@ -34,6 +34,7 @@ DOCUMENT = {
         "deadband_iou": 0.9,
         "min_hits": 2,
         "max_misses": 6,
+        "still": {"enabled": True, "motion_thr": 1.0, "force_every_s": 0.5},
     },
     "model": {"path": "models/yolox_nano.xmodel", "conf_thr": 0.35, "iou_thr": 0.45},
     "movenet": {
@@ -117,6 +118,9 @@ def test_the_shipped_configuration_parses_and_names_the_machine() -> None:
     assert config.tracker.deadband_iou == 0.9
     assert config.tracker.min_hits == 2
     assert config.tracker.max_misses == 6
+    assert config.tracker.still.enabled is True
+    assert config.tracker.still.motion_thr == 1.0
+    assert config.tracker.still.force_every_s == 0.5
     assert config.web.port == 8080
     assert config.web.video_fps == 60.0
     assert config.web.jpeg_quality == 70
@@ -334,6 +338,59 @@ def test_the_tracker_can_be_disabled() -> None:
     data["tracker"]["enabled"] = False  # type: ignore[index]
 
     assert parse(data).tracker.enabled is False
+
+
+def test_the_still_gate_is_on_by_default_and_can_be_disabled() -> None:
+    data = document()
+    data["tracker"]["still"]["enabled"] = False  # type: ignore[index]
+
+    assert parse(data).tracker.still.enabled is False
+
+
+def test_a_missing_still_key_is_named() -> None:
+    data = document()
+    del data["tracker"]["still"]["force_every_s"]  # type: ignore[index]
+
+    with pytest.raises(ConfigError) as excinfo:
+        parse(data)
+    assert excinfo.value.key == "tracker.still.force_every_s"
+
+
+def test_a_missing_still_block_is_named() -> None:
+    data = document()
+    del data["tracker"]["still"]  # type: ignore[index]
+
+    with pytest.raises(ConfigError) as excinfo:
+        parse(data)
+    assert excinfo.value.key == "tracker.still"
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        ("enabled", "yes"),
+        ("motion_thr", 0),
+        ("motion_thr", -1),
+        ("force_every_s", 0),
+        ("force_every_s", "half"),
+    ],
+)
+def test_an_invalid_still_value_is_named(key: str, value: object) -> None:
+    data = document()
+    data["tracker"]["still"][key] = value  # type: ignore[index]
+
+    with pytest.raises(ConfigError) as excinfo:
+        parse(data)
+    assert excinfo.value.key == f"tracker.still.{key}"
+
+
+def test_an_unknown_still_key_is_rejected() -> None:
+    data = document()
+    data["tracker"]["still"]["frames"] = 3  # type: ignore[index]
+
+    with pytest.raises(ConfigError) as excinfo:
+        parse(data)
+    assert excinfo.value.key == "tracker.still.frames"
 
 
 def test_labels_are_italian_or_english() -> None:

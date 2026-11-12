@@ -26,6 +26,10 @@ tracker:                      # detector boxes, stabilized so they stand still o
   deadband_iou: 0.9           # the displayed box moves only below this IoU with the filtered one
   min_hits: 2                 # consecutive frames before a low-score track is shown
   max_misses: 6               # missed frames a shown track survives before it is dropped
+  still:                      # keep a scene that does not move off the DPU
+    enabled: true             # false: infer on every frame, as before
+    motion_thr: 1.0           # grey levels of the 80x60 frame diff that count as motion
+    force_every_s: 0.5        # a full detection at least this often, to find new still objects
 
 model:                        # YOLOX-nano from the Vitis AI model zoo, COCO-80
   path: models/yolox_nano.xmodel  # compiled KV260 xmodel (deploy.sh --model)

@@ -91,7 +91,9 @@ The journal carries the startup lines
 (`cpsa-showcase 0.1.0: config config/showcase.yaml`, `serving on
 http://0.0.0.0:8080`), the per-stage timing line every five seconds
 (`showcase stages over <n> frames: camera=… preprocess=… dpu=… decode=…
-movenet_dpu=… movenet_decode=… draw=… total=… total_fps=…`) and one line per camera stop and reopen.
+motion=… track=… draw=… total=… skipped=…% total_fps=…`) and one line per
+camera stop and reopen. `motion` is the still gate's grey 80x60 difference and
+`skipped` the share of frames that ran without the detector.
 
 The dashboard is at `http://<board>:8080/`. The video pane is
 `/video.mjpeg`; nothing is encoded until a browser connects.

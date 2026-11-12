@@ -62,6 +62,7 @@ def test_the_package_is_the_one_flat_tree() -> None:
         "config",
         "dpu",
         "keypoints",
+        "motion",
         "movenet",
         "overlay",
         "pipeline",

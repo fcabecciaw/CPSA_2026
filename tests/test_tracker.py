@@ -9,12 +9,14 @@ from typing import Any
 import pytest
 import yaml
 
-from cpsa.config import ConfigError, TrackerConfig, load, parse
+from cpsa.config import ConfigError, StillConfig, TrackerConfig, load, parse
 from cpsa.tracker import BIRTH_SCORE, Tracker
 from cpsa.yolox import Detection
 
 ROOT = Path(__file__).resolve().parents[1]
 SHIPPED = ROOT / "config" / "showcase.yaml"
+
+STILL = StillConfig(enabled=True, motion_thr=1.0, force_every_s=0.5)
 
 
 def tracker_config(**overrides: object) -> TrackerConfig:
@@ -26,6 +28,7 @@ def tracker_config(**overrides: object) -> TrackerConfig:
         "deadband_iou": 0.9,
         "min_hits": 2,
         "max_misses": 6,
+        "still": STILL,
     }
     settings.update(overrides)
     return TrackerConfig(**settings)  # type: ignore[arg-type]
@@ -156,14 +159,41 @@ def test_the_shown_score_is_an_ema() -> None:
     assert output[0].score == pytest.approx(0.9 + 0.35 * (0.5 - 0.9))
 
 
-def test_tracks_only_match_the_same_class() -> None:
+def test_a_different_class_in_the_same_box_keeps_the_track() -> None:
+    """The label is the track's business: a re-labelled detection is voted on."""
     tracker = Tracker(tracker_config())
-    tracker.update([detection(100, 100, 200, 200, class_id=0)])
+    person = detection(100, 100, 200, 200, class_id=0, score=0.9)
+    bottle = detection(100, 100, 200, 200, class_id=39, score=0.9)
 
-    output = tracker.update([detection(100, 100, 200, 200, class_id=2)])
+    tracker.update([person], now=0.0)
+    first = tracker.update([bottle], now=0.02)
 
-    assert {item.class_id for item in output} == {0, 2}
-    assert tracker.tracks == 2
+    # The track survives the class change; the label waits for the vote.
+    assert tracker.tracks == 1
+    assert [item.class_id for item in first] == [0]
+
+    for step in range(1, 45):
+        output = tracker.update([bottle], now=0.02 + 0.02 * step)
+
+    assert tracker.tracks == 1
+    assert [item.class_id for item in output] == [39]
+
+
+def test_a_class_flicker_never_kills_the_track() -> None:
+    """90 frames of cup/bowl noise on one box stay one track with one label."""
+    tracker = Tracker(tracker_config())
+    cup, bowl = 41, 45
+
+    labels = [
+        tracker.update(
+            [detection(100, 100, 200, 200, class_id=cup if index % 2 else bowl, score=0.9)],
+            now=index * (1.0 / 60.0),
+        )[0].class_id
+        for index in range(90)
+    ]
+
+    assert tracker.tracks == 1
+    assert set(labels) == {bowl}
 
 
 def test_a_bottle_held_inside_a_person_box_keeps_its_track() -> None:
@@ -185,15 +215,15 @@ def test_a_bottle_held_inside_a_person_box_keeps_its_track() -> None:
 def test_a_bottle_never_takes_over_the_person_track() -> None:
     tracker = Tracker(tracker_config())
     person = detection(100, 100, 340, 440, score=0.9, class_id=0)
-    tracker.update([person])
-    tracker.update([person])
+    tracker.update([person], now=0.0)
+    tracker.update([person], now=1 / 60)
 
     # The person leaves, a bottle appears in the same box: the person's track
     # must survive its misses, not be relabelled as the bottle.
-    output = tracker.update([detection(100, 100, 340, 440, score=0.8, class_id=39)])
+    output = tracker.update([detection(100, 100, 340, 440, score=0.8, class_id=39)], now=2 / 60)
 
-    assert tracker.tracks == 2
-    assert sorted(item.class_id for item in output) == [0, 39]
+    assert tracker.tracks == 1
+    assert [item.class_id for item in output] == [0]
 
 
 def test_a_disabled_tracker_returns_the_raw_boxes() -> None:
@@ -201,6 +231,98 @@ def test_a_disabled_tracker_returns_the_raw_boxes() -> None:
     detections = [detection(1, 2, 3, 4, score=0.7)]
 
     assert tracker.update(detections) == detections
+
+
+# --------------------------------------------------------------------------- #
+# Settled tracks: a box that has not moved for a second
+# --------------------------------------------------------------------------- #
+
+
+def settled_tracker(*, seconds: float = 1.2) -> Tracker:
+    """A tracker holding one settled person box of 100x100 at ``(100, 100)``."""
+    tracker = Tracker(tracker_config())
+    person = detection(100, 100, 200, 200, score=0.8, class_id=0)
+    for step in range(int(round(seconds / 0.05))):
+        tracker.update([person], now=0.05 * step)
+    return tracker
+
+
+def test_a_box_that_held_for_a_second_settles() -> None:
+    """A jitter the normal deadband follows no longer moves a settled box."""
+    jitter = (108.0, 100.0, 208.0, 200.0)  # 8 px: past 4% of the diagonal, inside 8%
+    person = detection(100, 100, 200, 200, score=0.8, class_id=0)
+
+    fresh = Tracker(tracker_config())
+    fresh.update([person], now=0.0)
+    moving = [
+        shown_box(fresh.update([detection(*jitter, score=0.8)], now=0.02 * step))
+        for step in range(1, 6)
+    ]
+
+    settled = settled_tracker()
+    still = [
+        shown_box(settled.update([detection(*jitter, score=0.8)], now=1.2 + 0.02 * step))
+        for step in range(1, 6)
+    ]
+
+    assert moving[-1] != person.box
+    assert set(still) == {person.box}
+
+
+def test_a_settled_box_follows_only_a_sustained_move() -> None:
+    tracker = settled_tracker()
+    truth = (145.0, 100.0, 245.0, 200.0)  # 45 px: still matched, far outside the settled deadband
+
+    boxes = [
+        shown_box(tracker.update([detection(*truth, score=0.8)], now=1.2 + 0.02 * step))
+        for step in range(1, 6)
+    ]
+
+    assert boxes[:2] == [(100.0, 100.0, 200.0, 200.0)] * 2
+    assert boxes[2] == pytest.approx(truth, abs=15.0)
+
+
+def test_a_one_frame_glitch_never_moves_a_settled_box() -> None:
+    tracker = settled_tracker()
+    tracker.update([detection(130.0, 100.0, 230.0, 200.0, score=0.8)], now=1.2)
+    tracker.update([detection(100.0, 100.0, 200.0, 200.0, score=0.8)], now=1.22)
+
+    box = shown_box(tracker.update([detection(100.0, 100.0, 200.0, 200.0, score=0.8)], now=1.24))
+
+    assert box == (100.0, 100.0, 200.0, 200.0)
+
+
+def test_a_settled_box_survives_thirty_missed_frames() -> None:
+    tracker = settled_tracker()
+
+    for step in range(30):
+        assert tracker.update([], now=1.2 + 0.02 * step)
+
+    assert tracker.tracks == 1
+    assert tracker.update([], now=2.0) == []
+
+
+def test_a_settled_score_is_quantized_to_five_percent() -> None:
+    tracker = settled_tracker()
+    output = tracker.update([detection(100, 100, 200, 200, score=0.79, class_id=0)], now=1.6)
+
+    score = output[0].score
+    assert score == pytest.approx(round(score * 20) / 20)
+    assert score == pytest.approx(0.80)
+
+
+def test_a_settled_score_is_a_slow_ema() -> None:
+    tracker = settled_tracker(seconds=1.2)
+    before = settled_tracker(seconds=1.2).update([], now=1.3)[0].score
+
+    # 20 frames of score 0.4 move the slow EMA by a fifth of the way at most.
+    for step in range(20):
+        output = tracker.update(
+            [detection(100, 100, 200, 200, score=0.4, class_id=0)], now=1.2 + 0.02 * step
+        )
+
+    assert output[0].score < before - 0.1
+    assert output[0].score > 0.4
 
 
 # --------------------------------------------------------------------------- #
@@ -252,6 +374,7 @@ def test_the_shipped_tracker_configuration_is_valid() -> None:
         deadband_iou=0.9,
         min_hits=2,
         max_misses=6,
+        still=STILL,
     )
 
 

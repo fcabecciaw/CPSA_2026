@@ -24,6 +24,15 @@ The detectors expose that split as ``submit``/``wait``; a detector with only
 The camera slot keeps only the newest frame, so a slow frame is dropped, never
 queued.
 
+A booth stands still for minutes at a time, so the YOLOX view has a motion gate
+in front of the DPU: the loop compares each frame's 80x60 grey image with the
+one it last inferred, and while nothing moves it draws the previous boxes again
+instead of preprocess, DPU and decode (:class:`~cpsa.motion.StillGate`). The
+tracker's boxes and the published objects are reused untouched, so a still
+scene costs the camera conversion, the motion check and the draw only; a full
+detection still runs at least every ``tracker.still.force_every_s`` seconds, so
+a new object that appears without moving the frame cannot go unnoticed.
+
 The loop also owns the process status: ``status`` once per second and on change
 (state, camera, errors, ``active_model``, ``switching``) into the message
 channel, ``showcase.state`` at most ten times per second while YOLOX is loaded,
@@ -52,6 +61,7 @@ from cpsa.camera import CameraError, CameraNotFound, UvcCamera, VideoFrame
 from cpsa.channel import CommandChannel, FrameChannel, MessageChannel
 from cpsa.config import CameraConfig, ModelConfig, MovenetConfig, ShowcaseConfig
 from cpsa.keypoints import KeypointStabilizer
+from cpsa.motion import StillGate
 from cpsa.movenet import DpuMovenet, MovenetPose
 from cpsa.overlay import draw_overlay, draw_skeleton
 from cpsa.tracker import Tracker
@@ -255,6 +265,12 @@ class Pipeline:
             tuple(labels) if labels is not None else labels_for(config.labels)
         )
         self._tracker = Tracker(config.tracker)
+        still = config.tracker.still
+        self._still: StillGate | None = (
+            StillGate(still.motion_thr, still.force_every_s) if still.enabled else None
+        )
+        self._last_objects: list[protocol.ShowcaseObject] = []
+        """The objects last decoded from the DPU; a skipped frame publishes them."""
         self._stabilizer = KeypointStabilizer(config.movenet.smoothing)
         self._lock = threading.Lock()
         self._slot = _LatestSlot()
@@ -340,6 +356,7 @@ class Pipeline:
             self._camera_error = None
             self._status_key = None
             self._tracker.reset()
+            self._reset_still()
             self._active_model = active
             self._requested_model = None
             self._switching = False
@@ -379,6 +396,12 @@ class Pipeline:
             self._last_dpu_ms = None
         _release_quietly(camera)
         self._release_runner(runner)
+
+    def _reset_still(self) -> None:
+        """Forget the still gate's reference frame, as a new camera or model needs."""
+        if self._still is not None:
+            self._still.reset()
+        self._last_objects = []
 
     def status(self) -> dict[str, Any]:
         """Return the F-K1 ``status`` payload for the current instant."""
@@ -540,6 +563,18 @@ class Pipeline:
         rgb = frame.decode()
         camera_ms = (time.perf_counter() - started) * 1000.0
 
+        if model == "yolox" and self._still is not None:
+            motion_started = time.perf_counter()
+            infer = self._still.update(rgb, time.monotonic())
+            motion_ms = (time.perf_counter() - motion_started) * 1000.0
+            if not infer:
+                # The scene has not moved: the boxes of the last inference are
+                # still the truth, so frame N-1 is finished and frame N is drawn
+                # from them without touching the DPU.
+                self._finish_quietly(pending)
+                self._finish_still(frame.width, frame.height, rgb, started, camera_ms, motion_ms)
+                return None
+
         submit = getattr(runner, "submit", None)
         wait = getattr(runner, "wait", None)
         if not callable(submit) or not callable(wait):
@@ -570,16 +605,19 @@ class Pipeline:
             model=model,
             t=frame.t,
         )
-        if pending is not None:
-            # A failure while finishing frame N-1 must not cost frame N its
-            # token, or the slot would stay busy for ever.
-            try:
-                self._finish_pending(pending)
-            except Exception:
-                logger.exception("the detector failed on frame %d", pending.seq)
-                self._frame_error = True
-                self._note_error("dpu_error")
+        self._finish_quietly(pending)
         return current
+
+    def _finish_quietly(self, pending: _PendingFrame | None) -> None:
+        """Finish a frame in flight; a failure costs an error, never its token."""
+        if pending is None:
+            return
+        try:
+            self._finish_pending(pending)
+        except Exception:
+            logger.exception("the detector failed on frame %d", pending.seq)
+            self._frame_error = True
+            self._note_error("dpu_error")
 
     def _finish_pending(self, pending: _PendingFrame) -> None:
         """Wait for, draw and publish a frame the DPU has been working on."""
@@ -637,6 +675,74 @@ class Pipeline:
             track_ms = (time.perf_counter() - track_started) * 1000.0
             objects = _objects(tracked, self._labels)
 
+        stage = runner.stage_ms
+        self._render(
+            width=width,
+            height=height,
+            rgb=rgb,
+            model=model,
+            objects=objects,
+            pose=pose,
+            started=started,
+            camera_ms=camera_ms,
+            track_ms=track_ms,
+            stage=stage,
+            dpu_ms=stage.get("dpu"),
+            skipped=False,
+        )
+
+    def _finish_still(
+        self,
+        width: int,
+        height: int,
+        rgb: NDArray[np.uint8],
+        started: float,
+        camera_ms: float,
+        motion_ms: float,
+    ) -> None:
+        """Draw the last inferred boxes on a frame the still gate kept off the DPU.
+
+        The tracker is not touched: its boxes, labels and scores are the ones the
+        last real inference produced, so the overlay and the published objects
+        are the same pixels and the same counts as that frame. Only the frame
+        itself is new, which is what keeps the video live while nothing moves.
+        """
+
+        with self._lock:
+            last_dpu = self._last_dpu_ms
+        self._render(
+            width=width,
+            height=height,
+            rgb=rgb,
+            model="yolox",
+            objects=self._last_objects,
+            pose=None,
+            started=started,
+            camera_ms=camera_ms,
+            track_ms=0.0,
+            stage={"motion": motion_ms},
+            dpu_ms=last_dpu,
+            skipped=True,
+        )
+
+    def _render(
+        self,
+        *,
+        width: int,
+        height: int,
+        rgb: NDArray[np.uint8],
+        model: str,
+        objects: Sequence[protocol.ShowcaseObject],
+        pose: MovenetPose | None,
+        started: float,
+        camera_ms: float,
+        track_ms: float,
+        stage: Mapping[str, float],
+        dpu_ms: float | None,
+        skipped: bool,
+    ) -> None:
+        """Draw the overlay, publish the video and the states, record the timings."""
+
         draw_started = time.perf_counter()
         if pose is not None:
             overlay = draw_skeleton(rgb, pose.keypoints.tolist())
@@ -644,13 +750,13 @@ class Pipeline:
             overlay = draw_overlay(rgb, objects)
         draw_ms = (time.perf_counter() - draw_started) * 1000.0
         total_ms = (time.perf_counter() - started) * 1000.0
-        stage = runner.stage_ms
-        dpu_ms = stage.get("dpu")
         self._channel.write(overlay)
         now = time.monotonic()
         with self._lock:
             self._processed.append(time.perf_counter())
             self._last_dpu_ms = None if dpu_ms is None else float(dpu_ms)
+            if model == "yolox" and not skipped:
+                self._last_objects = list(objects)
             stamps = tuple(self._processed)
             last_dpu = self._last_dpu_ms
             publish_state = model == "yolox" and now - self._last_state >= STATE_PERIOD_S
@@ -666,9 +772,11 @@ class Pipeline:
                 "preprocess": stage.get("preprocess", 0.0),
                 "dpu": stage.get("dpu", 0.0),
                 "decode": stage.get("decode", 0.0),
+                "motion": stage.get("motion", 0.0),
                 "track": track_ms,
                 "draw": draw_ms,
                 "total": total_ms,
+                "skipped": 1.0 if skipped else 0.0,
             },
             stamps,
         )
@@ -784,6 +892,7 @@ class Pipeline:
             self._last_pose = 0.0
             if loaded == "yolox":
                 self._tracker.reset()
+                self._reset_still()
             self._stabilizer.reset()
         if failed:
             # Stays in ``status.errors`` until a swap succeeds: frames keep
@@ -916,15 +1025,18 @@ class Pipeline:
             self._timing_since = time.monotonic()
         logger.info(
             "showcase stages over %d frames: camera=%.2f preprocess=%.2f dpu=%.2f "
-            "decode=%.2f track=%.2f draw=%.2f total=%.2f total_fps=%.1f",
+            "decode=%.2f motion=%.3f track=%.2f draw=%.2f total=%.2f skipped=%.0f%% "
+            "total_fps=%.1f",
             counted,
             means.get("camera", 0.0),
             means.get("preprocess", 0.0),
             means.get("dpu", 0.0),
             means.get("decode", 0.0),
+            means.get("motion", 0.0),
             means.get("track", 0.0),
             means.get("draw", 0.0),
             means.get("total", 0.0),
+            100.0 * means.get("skipped", 0.0),
             _rate(stamps),
         )
 

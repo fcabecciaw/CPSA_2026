@@ -36,6 +36,12 @@ other class at 0.25) on int8 heads whose object cells half hold a second class
 above threshold, so the line reports the multi-label decode and its class-aware
 NMS -- the stage that keeps a bottle held in front of a person detectable.
 
+``motion`` is the still gate in front of the YOLOX DPU
+(:class:`~cpsa.motion.StillGate`): one grey conversion, one 80x60 area resize
+and one absolute difference per frame. While the scene does not move the loop
+pays ``camera + motion + draw`` per frame instead of the whole YOLOX loop, plus
+a full detection every ``tracker.still.force_every_s`` seconds.
+
 Exit status is 0 when the measurement ran; ``--target-ms`` only labels the
 PASS/FAIL column.
 """
@@ -84,6 +90,9 @@ bottle held in front of it."""
 
 SKELETON_DRAW_TARGET_MS = 1.5
 """Board target of the MoveNet overlay: the dimmed frame plus the neon skeleton."""
+
+MOTION_TARGET_MS = 0.3
+"""Board target of the still gate's motion score: grey 80x60 diff of the frame."""
 
 JPEG_QUALITY = 70
 
@@ -300,6 +309,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     from cpsa.config import SmoothingConfig
     from cpsa.dpu import OutputTensor, input_quantization_lut_scaled
     from cpsa.keypoints import KeypointStabilizer
+    from cpsa.motion import StillGate
     from cpsa.movenet import (
         MOVENET_INPUT_SCALE,
         MOVENET_INPUT_SIZE,
@@ -372,6 +382,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         draw_overlay(frame, objects)
 
     draw_ms = report("draw", timed(args.runs, draw), args.target_ms)
+
+    # The still gate runs on every YOLOX frame: the 640x480 RGB frame becomes an
+    # 80x60 grey image and is differenced against the last inferred one. The
+    # frame never changes here, so every measurement is the still path.
+    gate = StillGate(1.0, 0.5)
+
+    def motion() -> None:
+        gate.update(frame, time.monotonic())
+
+    motion_ms = report(
+        "motion",
+        timed(args.runs, motion),
+        MOTION_TARGET_MS,
+        note="still gate: grey 80x60 area diff",
+    )
 
     overlay = draw_overlay(frame, objects)
 
@@ -651,6 +676,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"MoveNet person crop: pre={movenet_crop_preprocess_ms:.2f} ms "
         f"(whole frame {movenet_preprocess_ms:.2f}), lock={movenet_lock_ms:.2f}, "
         f"stabilize={movenet_stabilize_ms:.2f}"
+    )
+    print(
+        f"still frame: camera+motion+draw="
+        f"{camera_cv2 + motion_ms + draw_ms:.2f} ms per skipped frame "
+        f"(full YOLOX loop {yolox_loop_ms:.2f} ms)"
     )
     print(
         f"web encoder thread: jpeg={jpeg_ms:.2f} ms "

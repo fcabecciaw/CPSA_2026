@@ -99,7 +99,8 @@ One file, `config/showcase.yaml`, with six sections and no unknown keys:
 ```yaml
 camera:    # device (auto or /dev/videoN), match, width, height, fps, exposure,
            # gain, white_balance, backlight_compensation, saturation, power_line_hz
-tracker:   # enabled, iou_match, alpha, fast_alpha, deadband_iou, min_hits, max_misses
+tracker:   # enabled, iou_match, alpha, fast_alpha, deadband_iou, min_hits, max_misses,
+           # still: enabled, motion_thr, force_every_s
 model:     # path, conf_thr, iou_thr
 labels:    # it | en
 web:       # host, port, video_fps, jpeg_quality, static_dir
@@ -110,7 +111,10 @@ log:       # level
 re-plug does not need a restart of the unit. The camera's automatic exposure,
 white balance and backlight compensation are switched off/overridden at every
 open, and `tracker` keeps the boxes still from frame to frame (`enabled: false`
-publishes the raw detector boxes).
+publishes the raw detector boxes). `tracker.still` is the motion gate in front of
+the DPU: while the 80x60 grey frame stops changing the loop draws the previous
+boxes instead of running the detector, and a full detection still happens every
+`force_every_s` seconds so a new still object cannot be missed.
 
 ## Protocol
 

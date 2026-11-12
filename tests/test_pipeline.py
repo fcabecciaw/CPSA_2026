@@ -7,6 +7,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from cpsa.config import (
     MovenetConfig,
     ShowcaseConfig,
     SmoothingConfig,
+    StillConfig,
     TrackerConfig,
     WebConfig,
 )
@@ -181,6 +183,9 @@ KEYPOINTS = np.array(
 )
 DEFAULT_POSE = MovenetPose(keypoints=KEYPOINTS, score=0.75)
 
+DISABLED_STILL = StillConfig(enabled=False, motion_thr=1.0, force_every_s=0.5)
+STILL = StillConfig(enabled=True, motion_thr=1.0, force_every_s=30.0)
+
 DEFAULT_TRACKER = TrackerConfig(
     enabled=True,
     iou_match=0.3,
@@ -189,6 +194,7 @@ DEFAULT_TRACKER = TrackerConfig(
     deadband_iou=0.9,
     min_hits=2,
     max_misses=6,
+    still=DISABLED_STILL,
 )
 
 DEFAULT_SMOOTHING = SmoothingConfig(
@@ -533,6 +539,7 @@ def test_a_disabled_tracker_publishes_the_raw_boxes(tmp_path: Path) -> None:
         deadband_iou=0.9,
         min_hits=2,
         max_misses=6,
+        still=DISABLED_STILL,
     )
     pipeline, camera, sink, channel = build(tmp_path, detector=detector, tracker=disabled)
     try:
@@ -553,6 +560,124 @@ def test_a_disabled_tracker_publishes_the_raw_boxes(tmp_path: Path) -> None:
         tuple(item["box"]) for state in sink.topics("showcase.state") for item in state["objects"]
     }
     assert len(boxes) >= 2
+
+
+# --------------------------------------------------------------------------- #
+# The motion gate in front of the DPU (F-S6)
+# --------------------------------------------------------------------------- #
+
+
+def tracker_with_still(**overrides: object) -> TrackerConfig:
+    """The default tracker with the motion gate configured for one test."""
+    settings: dict[str, object] = {
+        "enabled": True,
+        "motion_thr": 1.0,
+        "force_every_s": 30.0,
+    }
+    settings.update(overrides)
+    return replace(DEFAULT_TRACKER, still=StillConfig(**settings))  # type: ignore[arg-type]
+
+
+def test_a_still_scene_stops_the_detector_and_keeps_the_published_objects(
+    tmp_path: Path,
+) -> None:
+    detector = FakeDetector([PERSON])
+    pipeline, camera, sink, channel = build(
+        tmp_path, detector=detector, tracker=tracker_with_still()
+    )
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            feed(camera, 16, delay=0.02)
+            wait_until(lambda: len(sink.topics("showcase.state")) >= 2)
+            submits = detector.calls.count("submit")
+            before = sink.topics("showcase.state")[-1]["objects"]
+
+            # No frame moves the 8x4 camera: the loop draws the same boxes and
+            # keeps publishing state, but the DPU is not touched again.
+            feed(camera, 16, delay=0.02)
+            wait_until(lambda: len(sink.topics("showcase.state")) >= 3)
+            time.sleep(0.05)
+            submits_after = detector.calls.count("submit")
+            after = sink.topics("showcase.state")[-1]["objects"]
+    finally:
+        channel.close()
+        channel.unlink()
+
+    assert submits > 0
+    assert submits_after == submits
+    assert after == before
+    assert [item["label"] for item in after] == ["persona"]
+
+
+def test_motion_goes_to_the_detector_at_once(tmp_path: Path) -> None:
+    detector = FakeDetector([PERSON])
+    pipeline, camera, sink, channel = build(
+        tmp_path, detector=detector, tracker=tracker_with_still()
+    )
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            feed(camera, 12, delay=0.02)
+            wait_until(lambda: len(sink.topics("showcase.state")) >= 2)
+            submits = detector.calls.count("submit")
+
+            camera.push(200)
+            wait_until(lambda: detector.calls.count("submit") > submits)
+            submits_after = detector.calls.count("submit")
+    finally:
+        channel.close()
+        channel.unlink()
+
+    assert submits_after == submits + 1
+
+
+def test_a_still_scene_is_refreshed_every_force_every_s(tmp_path: Path) -> None:
+    detector = FakeDetector([PERSON])
+    pipeline, camera, sink, channel = build(
+        tmp_path,
+        detector=detector,
+        tracker=tracker_with_still(force_every_s=0.15),
+    )
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            feed(camera, 6, delay=0.02)
+            wait_until(lambda: sink.topics("showcase.state"))
+            submits = detector.calls.count("submit")
+
+            # 14 still frames over about 0.4 s: the gate skips most of them but
+            # the refresh timer lets a new still object through every 0.15 s.
+            feed(camera, 14, delay=0.03)
+            time.sleep(0.1)
+            submitted = detector.calls.count("submit") - submits
+    finally:
+        channel.close()
+        channel.unlink()
+
+    assert 2 <= submitted < 14
+
+
+def test_a_disabled_gate_infers_on_every_frame(tmp_path: Path) -> None:
+    detector = FakeDetector([PERSON])
+    pipeline, camera, sink, channel = build(
+        tmp_path, detector=detector, tracker=tracker_with_still(enabled=False)
+    )
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            feed(camera, 6, delay=0.02)
+            wait_until(lambda: sink.topics("showcase.state"))
+            submits = detector.calls.count("submit")
+
+            feed(camera, 10, delay=0.03)
+            time.sleep(0.1)
+            submitted = detector.calls.count("submit") - submits
+    finally:
+        channel.close()
+        channel.unlink()
+
+    assert submitted == 10
 
 
 def test_a_detector_without_submit_runs_the_synchronous_path(tmp_path: Path) -> None:

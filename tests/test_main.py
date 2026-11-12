@@ -29,6 +29,7 @@ from cpsa.config import (
     MovenetConfig,
     ShowcaseConfig,
     SmoothingConfig,
+    StillConfig,
     TrackerConfig,
     WebConfig,
 )
@@ -162,6 +163,7 @@ def showcase_config(
             deadband_iou=0.9,
             min_hits=2,
             max_misses=6,
+            still=StillConfig(enabled=True, motion_thr=1.0, force_every_s=0.5),
         ),
         model=ModelConfig(path=model, conf_thr=0.35, iou_thr=0.45),
         movenet=MovenetConfig(path=movenet, enabled=True, publish_hz=30.0, smoothing=SMOOTHING),

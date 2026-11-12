@@ -123,18 +123,43 @@ class CameraConfig:
 
 
 @dataclass(frozen=True)
+class StillConfig:
+    """The motion gate that keeps a still scene off the DPU.
+
+    ``enabled: false`` runs the detector on every frame, as before. Otherwise
+    the loop measures how much the 80x60 grey image moved since the last frame
+    it actually inferred; when that mean difference stays below ``motion_thr``
+    for three frames the frames are drawn from the last boxes without touching
+    the DPU, and a full detection is forced every ``force_every_s`` seconds
+    (or at once, when the scene moves) so a new still object cannot be missed
+    for longer than that.
+    """
+
+    enabled: bool
+    motion_thr: float
+    force_every_s: float
+
+
+@dataclass(frozen=True)
 class TrackerConfig:
     """Box stabilization between the detector and the overlay.
 
     ``enabled: false`` publishes the raw detector boxes unchanged. Otherwise a
-    detection joins a track of the same class when their IoU is at least
-    ``iou_match``; the track filters its box with an EMA of ``alpha``
-    (``fast_alpha`` when the new box barely overlaps the filtered one, so a
-    real move is followed at once) and only moves its displayed box when it
-    leaves a ``deadband_iou`` overlap or shifts by more than 4% of its diagonal
-    or changes a side by more than 8%. A track is shown after ``min_hits``
-    consecutive detections (immediately at score 0.6) and survives
-    ``max_misses`` missed frames.
+    detection joins a track when their IoU is at least ``iou_match`` and the
+    class agrees, or at 0.5 when it does not (an agreeing class always wins);
+    the track filters its box with an EMA of ``alpha`` (``fast_alpha`` when the
+    new box barely overlaps the filtered one, so a real move is followed at
+    once) and only moves its displayed box when it leaves a ``deadband_iou``
+    overlap or shifts by more than 4% of its diagonal or changes a side by more
+    than 8%. Its class is the majority of the last 15 matched frames, relabelled
+    only when a new class holds 70% of them for 0.5 s, so a detector that
+    flickers between two classes no longer kills and re-creates the track. A
+    track whose displayed box has held for a second is *settled*: it tolerates a
+    wider deadband, a score quantized to 5% and up to 30 missed frames. A track
+    is shown after ``min_hits`` consecutive detections (immediately at score
+    0.6) and otherwise survives ``max_misses`` missed frames.
+
+    ``still`` is the motion gate in front of the DPU (:class:`StillConfig`).
     """
 
     enabled: bool
@@ -144,6 +169,7 @@ class TrackerConfig:
     deadband_iou: float
     min_hits: int
     max_misses: int
+    still: StillConfig
 
 
 @dataclass(frozen=True)
@@ -320,8 +346,19 @@ def _tracker_config(tracker: _Section) -> TrackerConfig:
         deadband_iou=tracker.fraction("deadband_iou"),
         min_hits=tracker.integer("min_hits", 0, 100),
         max_misses=tracker.integer("max_misses", 0, 100),
+        still=_still_config(tracker.section("still")),
     )
     tracker.reject_unknown()
+    return config
+
+
+def _still_config(still: _Section) -> StillConfig:
+    config = StillConfig(
+        enabled=still.boolean("enabled"),
+        motion_thr=still.positive("motion_thr"),
+        force_every_s=still.positive("force_every_s"),
+    )
+    still.reject_unknown()
     return config
 
 
