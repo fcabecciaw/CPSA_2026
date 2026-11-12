@@ -6,6 +6,15 @@ is a 2 px rectangle in the class colour plus a ``"<label> <score>%"`` tag; the
 colours come from a fixed palette indexed by class, so a class keeps its colour
 across frames and runs.
 
+A busy frame draws at most :data:`MAX_DRAWN_OBJECTS` boxes -- the persons first,
+then the best scores -- because a 640x480 video cannot show fifty tags anyway;
+every detection still reaches ``showcase.state``. Each label is rasterized once
+and cached as an RGB sprite, so a frame pays one blit per box instead of a
+``getTextSize``/``putText`` pair, and the boxes of one colour go out in a single
+``polylines`` call. Boxes, labels and the frame copy together cost 0.08 ms on
+the host and are budgeted 1.5 ms on the board (R2-G): the label rasterizer alone
+was 5 ms there.
+
 In the MoveNet view the frame is dimmed to 35 % and the COCO-17 skeleton is
 drawn on top in a neon palette, one colour per body part (magenta head, cyan
 arms, lime torso, an electric purple left leg and an orange right one): every
@@ -22,6 +31,7 @@ per-call rasterizer setup, not the pixels, was the board's 2.8 ms. R2-G budgets
 
 from __future__ import annotations
 
+import heapq
 from collections.abc import Sequence
 
 import cv2
@@ -32,6 +42,8 @@ from cpsa.protocol import NUM_KEYPOINTS, ShowcaseObject
 
 __all__ = [
     "COCO_SKELETON",
+    "MAX_DRAWN_OBJECTS",
+    "PERSON_CLASS",
     "SKELETON_MIN_SCORE",
     "class_color",
     "draw_overlay",
@@ -44,6 +56,22 @@ _FONT_SCALE = 0.45
 _FONT_THICKNESS = 1
 _LABEL_PADDING = 3
 _LABEL_GAP = 4
+
+MAX_DRAWN_OBJECTS = 12
+"""Boxes drawn on one frame: persons first, then the best scores.
+
+The video is 640x480 and a crowd would only bury itself; the rest of the
+detections still reach ``showcase.state`` and the dashboard.
+"""
+
+PERSON_CLASS = 0
+"""COCO-80 ``person``: the class the drawing order keeps when the frame is full."""
+
+_LABEL_SPRITE_LIMIT = 512
+"""Label sprites kept before the cache is dropped (a few dozen labels x scores)."""
+
+_LABEL_SPRITES: dict[tuple[str, int, tuple[int, int, int]], NDArray[np.uint8]] = {}
+"""``(label, score %, colour) -> RGB sprite``: the label rasterized once (R2-G)."""
 
 SKELETON_MIN_SCORE = 0.3
 """A keypoint below this score is not drawn (F-E4 #25)."""
@@ -142,35 +170,144 @@ def draw_overlay(
     The image is RGB (the order the JPEG encoder and the shared frame channel
     expect) and the copy is what the video shows, so the frame being analyzed
     can never change under it.
+
+    At most :data:`MAX_DRAWN_OBJECTS` boxes are drawn -- the persons first, then
+    by score -- and each label is a sprite rendered once per label and score and
+    then blitted: the board's overlay was 5 ms of ``putText``/``getTextSize``
+    rasterizer setup, not of pixels. Every detection still reaches
+    ``showcase.state``: this caps the drawing, not the measurement.
     """
     overlay = np.array(rgb, copy=True)
+    if not objects:
+        return overlay
     height, width = overlay.shape[:2]
-    for item in objects:
-        colour = class_color(item.class_id)
-        x1, y1, x2, y2 = _clip(item.box, width, height)
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), colour, _BOX_THICKNESS)
-        text = f"{item.label} {int(round(item.score * 100.0))}%"
-        (text_width, text_height), _ = cv2.getTextSize(text, _FONT, _FONT_SCALE, _FONT_THICKNESS)
-        label_height = text_height + 2 * _LABEL_GAP
-        top = y1 - label_height
-        if top < 0:
-            # No room above the box: put the tag just inside its top edge.
-            top = y1 + _LABEL_GAP
-        top = max(0, min(top, height - label_height))
-        bottom = min(height - 1, top + label_height)
-        right = min(width - 1, x1 + text_width + 2 * _LABEL_PADDING)
-        cv2.rectangle(overlay, (x1, top), (right, bottom), colour, -1)
-        cv2.putText(
-            overlay,
-            text,
-            (x1 + _LABEL_PADDING, bottom - _LABEL_GAP),
-            _FONT,
-            _FONT_SCALE,
-            _text_color(colour),
-            _FONT_THICKNESS,
-            cv2.LINE_AA,
-        )
+    drawn = _drawn(objects)
+    corners = _clipped_corners(drawn, width, height)
+    colours = [class_color(item.class_id) for item in drawn]
+    _draw_boxes(overlay, corners, colours)
+    for item, position, colour in zip(drawn, corners, colours, strict=True):
+        sprite = _label_sprite(item.label, int(round(item.score * 100.0)), colour)
+        _blit_label(overlay, sprite, int(position[0]), int(position[1]))
     return overlay
+
+
+def _drawn(objects: Sequence[ShowcaseObject]) -> list[ShowcaseObject]:
+    """The objects to draw: persons first, then by score, at most :data:`MAX_DRAWN_OBJECTS`."""
+    if len(objects) <= MAX_DRAWN_OBJECTS:
+        return list(objects)
+    return heapq.nsmallest(MAX_DRAWN_OBJECTS, objects, key=_draw_priority)
+
+
+def _draw_priority(item: ShowcaseObject) -> tuple[int, float]:
+    """Sort key of the drawing order: a person before any other class, then the score."""
+    return (0 if item.class_id == PERSON_CLASS else 1, -float(item.score))
+
+
+def _clipped_corners(
+    items: Sequence[ShowcaseObject],
+    width: int,
+    height: int,
+) -> NDArray[np.int32]:
+    """Clip every box to the image in one numpy pass: ``(x1, y1, x2, y2)`` rows."""
+    boxes = np.asarray([item.box for item in items], dtype=np.float64).reshape(-1, 4)
+    finite = np.isfinite(boxes).all(axis=1)
+    boxes[~finite] = 0.0
+    np.rint(boxes, out=boxes)
+    corners = np.empty((boxes.shape[0], 4), dtype=np.int32)
+    np.clip(boxes[:, 0], 0, max(width - 1, 0), out=boxes[:, 0])
+    np.clip(boxes[:, 1], 0, max(height - 1, 0), out=boxes[:, 1])
+    np.clip(boxes[:, 2], 0, max(width - 1, 0), out=boxes[:, 2])
+    np.clip(boxes[:, 3], 0, max(height - 1, 0), out=boxes[:, 3])
+    corners[:, 0] = boxes[:, 0]
+    corners[:, 1] = boxes[:, 1]
+    corners[:, 2] = np.maximum(boxes[:, 2], boxes[:, 0])
+    corners[:, 3] = np.maximum(boxes[:, 3], boxes[:, 1])
+    return corners
+
+
+def _draw_boxes(
+    overlay: NDArray[np.uint8],
+    corners: NDArray[np.int32],
+    colours: Sequence[tuple[int, int, int]],
+) -> None:
+    """Draw every box of a colour in one ``polylines`` call (one per colour)."""
+    if corners.size == 0:
+        return
+    quads = np.empty((corners.shape[0], 4, 2), dtype=np.int32)
+    quads[:, 0, 0] = corners[:, 0]
+    quads[:, 0, 1] = corners[:, 1]
+    quads[:, 1, 0] = corners[:, 2]
+    quads[:, 1, 1] = corners[:, 1]
+    quads[:, 2, 0] = corners[:, 2]
+    quads[:, 2, 1] = corners[:, 3]
+    quads[:, 3, 0] = corners[:, 0]
+    quads[:, 3, 1] = corners[:, 3]
+    groups: dict[tuple[int, int, int], list[NDArray[np.int32]]] = {}
+    for quad, colour in zip(quads, colours, strict=True):
+        groups.setdefault(colour, []).append(quad)
+    for colour, group in groups.items():
+        cv2.polylines(overlay, group, True, colour, _BOX_THICKNESS)
+
+
+def _label_sprite(
+    label: str,
+    percent: int,
+    colour: tuple[int, int, int],
+) -> NDArray[np.uint8]:
+    """The ``"<label> <score>%"`` tag as an RGB sprite, rendered once and cached.
+
+    The sprite is exactly the filled rectangle plus the text the overlay used to
+    draw into the frame, so blitting it is pixel-for-pixel the old label. The
+    cache is keyed by label, rounded score and colour: a frame usually hits it
+    for every box and only pays a blit.
+    """
+    key = (label, percent, colour)
+    sprite = _LABEL_SPRITES.get(key)
+    if sprite is not None:
+        return sprite
+    text = f"{label} {percent}%"
+    (text_width, text_height), _ = cv2.getTextSize(text, _FONT, _FONT_SCALE, _FONT_THICKNESS)
+    sprite = np.empty(
+        (text_height + 2 * _LABEL_GAP, text_width + 2 * _LABEL_PADDING, 3), dtype=np.uint8
+    )
+    sprite[:, :] = colour
+    cv2.putText(
+        sprite,
+        text,
+        (_LABEL_PADDING, text_height + _LABEL_GAP),
+        _FONT,
+        _FONT_SCALE,
+        _text_color(colour),
+        _FONT_THICKNESS,
+        cv2.LINE_AA,
+    )
+    if len(_LABEL_SPRITES) >= _LABEL_SPRITE_LIMIT:
+        _LABEL_SPRITES.clear()
+    _LABEL_SPRITES[key] = sprite
+    return sprite
+
+
+def _blit_label(
+    overlay: NDArray[np.uint8],
+    sprite: NDArray[np.uint8],
+    left: int,
+    bottom: int,
+) -> None:
+    """Copy a label sprite above (or, when there is no room, inside) a box."""
+    height, width = overlay.shape[:2]
+    sprite_height, sprite_width = sprite.shape[:2]
+    top = bottom - sprite_height
+    if top < 0:
+        # No room above the box: put the tag just inside its top edge.
+        top = bottom + _LABEL_GAP
+    top = max(0, min(top, max(height - sprite_height, 0)))
+    visible_height = min(sprite_height, height - top)
+    visible_width = min(sprite_width, width - left)
+    if visible_height <= 0 or visible_width <= 0:
+        return
+    overlay[top : top + visible_height, left : left + visible_width] = sprite[
+        :visible_height, :visible_width
+    ]
 
 
 def draw_skeleton(
@@ -243,22 +380,6 @@ def _skeleton_points(
     np.clip(coordinates, 0.0, (max(width - 1, 0), max(height - 1, 0)), out=coordinates)
     coordinates[~drawable] = 0.0
     return coordinates.astype(np.int32), drawable
-
-
-def _clip(
-    box: Sequence[float],
-    width: int,
-    height: int,
-) -> tuple[int, int, int, int]:
-    """Clip a float box to the image and return integer corners inside it."""
-    x1, y1, x2, y2 = (float(value) for value in box)
-    if not all(np.isfinite(value) for value in (x1, y1, x2, y2)):
-        return (0, 0, 0, 0)
-    left = min(max(int(round(x1)), 0), max(width - 1, 0))
-    top = min(max(int(round(y1)), 0), max(height - 1, 0))
-    right = min(max(int(round(x2)), left), max(width - 1, 0))
-    bottom = min(max(int(round(y2)), top), max(height - 1, 0))
-    return (left, top, right, bottom)
 
 
 def _text_color(colour: tuple[int, int, int]) -> tuple[int, int, int]:

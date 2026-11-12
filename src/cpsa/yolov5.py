@@ -71,12 +71,15 @@ from cpsa.dpu import (
     input_quantization_lut_scaled,
 )
 from cpsa.yolox import (
+    _SLOT_CANDIDATE_CAP,
     COCO80_EN,
     COCO80_IT,
     MAX_CLASSES_PER_CELL,
     MAX_DETECTIONS,
     Detection,
     Pass,
+    _best_per_row,
+    _cap_slots,
     _cell_candidates,
     _class_thresholds,
     _finalize,
@@ -475,7 +478,19 @@ class QuantizedYolov5Decoder:
         classes: list[NDArray[np.intp]] = []
         candidates = 0
 
+        # First pass: the objectness byte of every anchor slot of every head.
         # Ascending stride reproduces the anchor order of decode_yolov5.
+        scanned: list[
+            tuple[
+                _HeadLayout,
+                NDArray[np.int8],
+                NDArray[np.float64],
+                NDArray[np.int8],
+                NDArray[np.intp],
+                NDArray[np.intp],
+            ]
+        ] = []
+        slots_total = 0
         for position in self._order:
             layout = self._layouts[position]
             raw = np.asarray(outputs[position])
@@ -492,49 +507,72 @@ class QuantizedYolov5Decoder:
             thresholds, gates = self._thresholds(layout, conf_thr, class_thr)
             cells = layout.height * layout.width
             slots = raw.reshape(cells, _ANCHORS_PER_CELL, layout.channels // _ANCHORS_PER_CELL)
+            # A candidate needs the loosest class gate to pass, so the
+            # objectness gate is the minimum gate: a background cell costs a
+            # byte compare per anchor, not an 80-channel scan.
+            cell_index, anchor_index = np.nonzero(slots[:, :, _OBJECTNESS] >= np.min(gates))
+            scanned.append((layout, slots, thresholds, gates, cell_index, anchor_index))
+            slots_total += cell_index.size
 
-            # Objectness first (one value per anchor), then the class logits of
-            # its survivors only: a background cell costs a handful of byte
-            # compares, not an 80-channel scan. A candidate needs the loosest
-            # class gate to pass, so the objectness gate is the minimum gate.
-            layout.keep[:] = (slots[:, :, _OBJECTNESS] >= np.min(gates)).any(axis=1)
-            index = np.flatnonzero(layout.keep)
-            if index.size == 0:
+        if slots_total == 0:
+            self.last_candidate_count = 0
+            return _finalize(boxes, scores, classes, iou_thr)
+
+        # A pathological frame (a busy texture read as thousands of objects)
+        # would otherwise evaluate 80 logits for every survivor: keep the
+        # objectness-best slots instead, ties to the lower slot. The slots are
+        # already in the reference order (head by head, cell then anchor), so the
+        # shared :func:`_cap_slots` rule is the whole selection.
+        if slots_total > _SLOT_CANDIDATE_CAP:
+            objectness_survivors = np.concatenate(
+                [slots[cell, anchor, _OBJECTNESS] for _, slots, _, _, cell, anchor in scanned]
+            )
+            chosen = np.zeros(slots_total, dtype=np.bool_)
+            chosen[_cap_slots(objectness_survivors, np.arange(slots_total))] = True
+            bounds = np.cumsum([cell.size for _, _, _, _, cell, _ in scanned])[:-1]
+            selected = np.split(chosen, bounds)
+        else:
+            selected = [np.ones(cell.size, dtype=np.bool_) for _, _, _, _, cell, _ in scanned]
+
+        for (
+            layout,
+            slots,
+            thresholds,
+            gates,
+            cell_index,
+            anchor_index,
+        ), keep_slot in zip(scanned, selected, strict=True):
+            if not keep_slot.any():
                 continue
-            survivors = slots[index]
-            # The float sigmoid runs on the (candidate, class) pairs that pass
-            # their int8 gate, not on every class of every survivor: the other
-            # logits can never reach their threshold, and the scan that finds
-            # them is a contiguous byte compare. ``0.0`` stands in for those
-            # classes, and no threshold is below it, so they stay unqualified.
-            class_logits = survivors[:, :, _CLASS_START:]
-            above = class_logits >= gates
-            qualified = above.any(axis=2).any(axis=1)
+            cell_index = cell_index[keep_slot]
+            anchor_index = anchor_index[keep_slot]
+            # The rows of the chosen slots: their box, objectness and class
+            # logits, in one gather instead of a dense pass over the grid.
+            rows = slots[cell_index, anchor_index]
+            # The float sigmoid runs on the (slot, class) pairs that pass their
+            # int8 gate, not on every class of every slot: the other logits can
+            # never reach their threshold, and ``np.nonzero`` of the byte compare
+            # is the scan that finds them.
+            pair_slot, pair_class = np.nonzero(rows[:, _CLASS_START:] >= gates)
+            if pair_slot.size == 0:
+                continue
+            factor = layout.dequant_factor
+            objectness = _sigmoid(rows[:, _OBJECTNESS].astype(np.float64) * factor)
+            pair_scores = objectness[pair_slot] * _sigmoid(
+                rows[pair_slot, _CLASS_START + pair_class].astype(np.float64) * factor
+            )
+            qualified = pair_scores > thresholds[pair_class]
             if not qualified.any():
                 continue
-            index = index[qualified]
-            survivors = survivors[qualified]
-            above = above[qualified]
+            pair_slot = pair_slot[qualified]
+            pair_class = pair_class[qualified]
+            pair_scores = pair_scores[qualified]
 
-            factor = layout.dequant_factor
-            regression = _sigmoid(survivors[:, :, :_BOX_CHANNELS].astype(np.float64) * factor)
-            objectness = _sigmoid(survivors[:, :, _OBJECTNESS].astype(np.float64) * factor)
-            class_scores = np.zeros(above.shape, dtype=np.float64)
-            class_scores[above] = _sigmoid(
-                survivors[:, :, _CLASS_START:][above].astype(np.float64) * factor
-            )
-            cell_scores = (objectness[:, :, None] * class_scores).reshape(
-                index.size * _ANCHORS_PER_CELL, layout.classes
-            )
-
-            center_x = (
-                regression[:, :, 0] * 2.0 - 0.5 + layout.grid_x[index][:, None]
-            ) * layout.stride
-            center_y = (
-                regression[:, :, 1] * 2.0 - 0.5 + layout.grid_y[index][:, None]
-            ) * layout.stride
-            box_width = (regression[:, :, 2] * 2.0) ** 2 * layout.anchors[None, :, 0]
-            box_height = (regression[:, :, 3] * 2.0) ** 2 * layout.anchors[None, :, 1]
+            regression = _sigmoid(rows[:, :_BOX_CHANNELS].astype(np.float64) * factor)
+            center_x = (regression[:, 0] * 2.0 - 0.5 + layout.grid_x[cell_index]) * layout.stride
+            center_y = (regression[:, 1] * 2.0 - 0.5 + layout.grid_y[cell_index]) * layout.stride
+            box_width = (regression[:, 2] * 2.0) ** 2 * layout.anchors[anchor_index, 0]
+            box_height = (regression[:, 3] * 2.0) ** 2 * layout.anchors[anchor_index, 1]
             box = np.stack(
                 (
                     center_x - box_width / 2.0,
@@ -544,21 +582,21 @@ class QuantizedYolov5Decoder:
                 ),
                 axis=-1,
             )
-
             usable = (
-                np.isfinite(box).all(axis=-1)
-                & (box[:, :, 2] > box[:, :, 0])
-                & (box[:, :, 3] > box[:, :, 1])
+                np.isfinite(box).all(axis=-1) & (box[:, 2] > box[:, 0]) & (box[:, 3] > box[:, 1])
             )
-            rows, class_ids, kept_scores = _cell_candidates(
-                cell_scores, thresholds, usable.reshape(-1)
-            )
-            if rows.size == 0:
+            valid = usable[pair_slot]
+            if not valid.any():
                 continue
-            candidates += int(rows.size)
-            boxes.append(box.reshape(-1, _BOX_CHANNELS)[rows])
-            scores.append(kept_scores)
-            classes.append(class_ids)
+            pair_slot = pair_slot[valid]
+            pair_class = pair_class[valid]
+            pair_scores = pair_scores[valid]
+
+            pair_slot, pair_class, pair_scores = _best_per_row(pair_slot, pair_class, pair_scores)
+            candidates += int(pair_slot.size)
+            boxes.append(box[pair_slot])
+            scores.append(pair_scores)
+            classes.append(pair_class)
 
         self.last_candidate_count = candidates
         return _finalize(boxes, scores, classes, iou_thr)

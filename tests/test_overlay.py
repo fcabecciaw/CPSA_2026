@@ -3,9 +3,18 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
-from cpsa.overlay import COCO_SKELETON, SKELETON_MIN_SCORE, draw_skeleton
-from cpsa.protocol import NUM_KEYPOINTS
+from cpsa import overlay
+from cpsa.overlay import (
+    COCO_SKELETON,
+    MAX_DRAWN_OBJECTS,
+    SKELETON_MIN_SCORE,
+    class_color,
+    draw_overlay,
+    draw_skeleton,
+)
+from cpsa.protocol import NUM_KEYPOINTS, ShowcaseObject
 
 DIM_FACTOR = 0.35
 """The MoveNet view dims the camera frame to this brightness."""
@@ -75,3 +84,101 @@ def test_an_out_of_frame_joint_is_clipped() -> None:
 
     assert overlay.shape == frame.shape
     assert not np.array_equal(overlay, _dimmed(frame))
+
+
+# -- the boxes (R2-G) -------------------------------------------------------- #
+
+
+def _object(
+    label: str = "persona",
+    class_id: int = 0,
+    score: float = 0.87,
+    box: tuple[float, float, float, float] = (10.2, 12.6, 60.0, 50.0),
+) -> ShowcaseObject:
+    return ShowcaseObject(label=label, class_id=class_id, score=score, box=box)
+
+
+def test_the_overlay_draws_the_box_edge_in_the_class_colour() -> None:
+    frame = _frame(value=200)
+
+    picture = draw_overlay(frame, [_object()])
+
+    assert picture is not frame
+    assert np.array_equal(frame, _frame(value=200))  # the analysed frame is untouched
+    # ``(10.2, 12.6)`` rounds to the box's top-left corner, which the 2 px
+    # rectangle of the class colour covers; the inside of the box is the frame.
+    assert tuple(int(channel) for channel in picture[13, 10]) == class_color(0)
+    assert tuple(int(channel) for channel in picture[13, 60]) == class_color(0)
+    # Below the tag on the top edge, inside the box, the frame still shows.
+    assert tuple(int(channel) for channel in picture[45, 30]) == (200, 200, 200)
+
+
+def test_a_box_outside_the_frame_is_clipped() -> None:
+    frame = _frame()
+
+    picture = draw_overlay(frame, [_object(box=(-100.0, -80.0, 40.0, 40.0))])
+
+    assert picture.shape == frame.shape
+    assert tuple(int(channel) for channel in picture[0, 0]) == class_color(0)
+    assert tuple(int(channel) for channel in picture[40, 40]) != (200, 200, 200)
+
+
+def test_at_most_twelve_boxes_are_drawn_persons_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    drawn: list[tuple[str, int]] = []
+    sprite = overlay._label_sprite
+
+    def recording(label: str, percent: int, colour: tuple[int, int, int]) -> np.ndarray:
+        drawn.append((label, percent))
+        return sprite(label, percent, colour)
+
+    monkeypatch.setattr(overlay, "_label_sprite", recording)
+    objects = [
+        _object(label="persona", class_id=0, score=0.50 + 0.05 * index, box=(5, 5, 30, 30))
+        for index in range(8)
+    ] + [
+        _object(label="bottiglia", class_id=39, score=0.90 + 0.01 * index, box=(5, 5, 30, 30))
+        for index in range(8)
+    ]
+
+    draw_overlay(_frame(), objects)
+
+    # The eight persons beat the bottles whatever their score, then the four
+    # best bottles fill the frame: twelve tags, the best score first in each group.
+    assert drawn == [("persona", 85 - 5 * index) for index in range(8)] + [
+        ("bottiglia", 97),
+        ("bottiglia", 96),
+        ("bottiglia", 95),
+        ("bottiglia", 94),
+    ]
+    assert len(drawn) == MAX_DRAWN_OBJECTS
+
+
+def test_a_label_is_rasterized_once_and_reused_across_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(overlay, "_LABEL_SPRITES", {})
+    objects = [_object(label="tazza", class_id=41, score=0.62), _object(label="libro", score=0.44)]
+
+    draw_overlay(_frame(), objects)
+    cached = dict(overlay._LABEL_SPRITES)
+    draw_overlay(_frame(), objects)
+
+    assert set(cached) == {("tazza", 62, class_color(41)), ("libro", 44, class_color(0))}
+    assert cached == overlay._LABEL_SPRITES  # the second frame rendered nothing
+
+
+def test_a_label_sprite_is_keyed_by_label_score_and_colour(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(overlay, "_LABEL_SPRITES", {})
+
+    draw_overlay(
+        _frame(),
+        [
+            _object(label="tazza", class_id=41, score=0.62),
+            _object(label="tazza", class_id=41, score=0.63),
+            _object(label="tazza", class_id=39, score=0.62),
+        ],
+    )
+
+    assert len(overlay._LABEL_SPRITES) == 3

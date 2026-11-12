@@ -161,31 +161,33 @@ def _iou_matrix(
     return scores
 
 
-def _diagonal_iou(a: NDArray[np.float64], b: NDArray[np.float64]) -> NDArray[np.float64]:
-    """IoU of row ``i`` of ``a`` against row ``i`` of ``b``, for every row."""
+def _overlap(a: BoxLike, b: Sequence[float]) -> float:
+    """IoU of two boxes, without the tuple conversions of :func:`box_iou`."""
 
-    width = np.clip(np.minimum(a[:, 2], b[:, 2]) - np.maximum(a[:, 0], b[:, 0]), 0.0, None)
-    height = np.clip(np.minimum(a[:, 3], b[:, 3]) - np.maximum(a[:, 1], b[:, 1]), 0.0, None)
+    width = min(a[2], b[2]) - max(a[0], b[0])
+    height = min(a[3], b[3]) - max(a[1], b[1])
+    if width <= 0.0 or height <= 0.0:
+        return 0.0
     intersection = width * height
-    area_a = np.clip(a[:, 2] - a[:, 0], 0.0, None) * np.clip(a[:, 3] - a[:, 1], 0.0, None)
-    area_b = np.clip(b[:, 2] - b[:, 0], 0.0, None) * np.clip(b[:, 3] - b[:, 1], 0.0, None)
-    union = area_a + area_b - intersection
-    scores = np.zeros(intersection.shape, dtype=np.float64)
-    np.divide(intersection, union, out=scores, where=union > 0.0)
-    return scores
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - intersection
+    return intersection / union if union > 0.0 else 0.0
 
 
 def _left_deadband(
     displayed: BoxLike,
-    filtered: BoxLike,
-    overlap: float,
+    filtered: Sequence[float],
     deadband_iou: float,
     shift_fraction: float = MAX_SHIFT_FRACTION,
     size_fraction: float = MAX_SIZE_FRACTION,
 ) -> bool:
-    """Whether ``filtered`` differs from ``displayed`` enough to move the box."""
+    """Whether ``filtered`` differs from ``displayed`` enough to move the box.
 
-    if overlap < deadband_iou:
+    Plain Python arithmetic on eight numbers, its own IoU included: on the board
+    a numpy call on a single box costs more than the whole check, so this is one
+    of the few places a loop beats a vectorized pass.
+    """
+
+    if _overlap(displayed, filtered) < deadband_iou:
         return True
     width = displayed[2] - displayed[0]
     height = displayed[3] - displayed[1]
@@ -207,10 +209,15 @@ def _left_deadband(
 
 @dataclass
 class _Track:
-    """One object followed across frames."""
+    """One object followed across frames.
+
+    The filtered box lives in the tracker's ``(tracks, 4)`` matrix at the track's
+    index, so the frame's EMA is a few array operations on the whole batch
+    instead of a handful per track.
+    """
 
     class_id: int
-    filtered: NDArray[np.float64]
+
     displayed: Box
     score: float
     hits: int
@@ -235,7 +242,7 @@ class Tracker:
     def __init__(self, config: TrackerConfig) -> None:
         self._config = config
         self._tracks: list[_Track] = []
-        self._delta = np.zeros(4, dtype=np.float64)
+        self._filtered = np.zeros((0, 4), dtype=np.float64)
 
     @property
     def tracks(self) -> int:
@@ -245,6 +252,7 @@ class Tracker:
     def reset(self) -> None:
         """Forget every track, for example when the camera is reopened."""
         self._tracks.clear()
+        self._filtered = np.zeros((0, 4), dtype=np.float64)
 
     def update(
         self,
@@ -276,23 +284,23 @@ class Tracker:
         )
         scores = self._overlaps(boxes, old_count)
         matched = self._match(scores, detections, old_count, covered)
-        changed: list[tuple[_Track, bool]] = []
+        changed: list[tuple[int, bool]] = []
+        filter_detections: list[int] = []
+        filter_tracks: list[int] = []
+        births: list[Box] = []
         for index, detection in enumerate(detections):
             track_index = matched.get(index)
             if track_index is None:
+                births.append(_box(detection.box))
                 self._tracks.append(self._birth(detection, when))
                 continue
-            track = self._tracks[track_index]
-            was_shown = track.shown
-            self._filter(
-                track,
-                boxes[index],
-                scores[index, track_index],
-                float(detection.score),
-                int(detection.class_id),
-                when,
-            )
-            changed.append((track, was_shown))
+            changed.append((track_index, self._tracks[track_index].shown))
+            filter_detections.append(index)
+            filter_tracks.append(track_index)
+        if births:
+            self._filtered = np.vstack((self._filtered, np.asarray(births, dtype=np.float64)))
+        if filter_tracks:
+            self._filter(filter_tracks, filter_detections, boxes, scores, detections, when)
         matched_tracks = set(matched.values())
         for track_index in range(old_count):
             if track_index in matched_tracks:
@@ -304,16 +312,22 @@ class Tracker:
                 continue
             track.misses += 1
             track.hits = 0
-        self._tracks = [track for track in self._tracks if track.misses <= self._miss_limit(track)]
         self._move_displayed(changed, when)
+        alive = [
+            index
+            for index, track in enumerate(self._tracks)
+            if track.misses <= self._miss_limit(track)
+        ]
+        if len(alive) != len(self._tracks):
+            self._tracks = [self._tracks[index] for index in alive]
+            self._filtered = self._filtered[alive]
         return self._published()
 
     def _overlaps(self, boxes: NDArray[np.float64], track_count: int) -> NDArray[np.float64]:
         """IoU of every detection against every live track."""
         if track_count == 0:
             return np.empty((0, 0))
-        filtered = np.stack([track.filtered for track in self._tracks])
-        return _iou_matrix(boxes, filtered)
+        return _iou_matrix(boxes, self._filtered)
 
     def _match(
         self,
@@ -342,7 +356,7 @@ class Tracker:
             (int(detection.class_id) for detection in detections), dtype=np.int64
         )
         same_class = detection_classes[:, None] == classes[None, :]
-        allowed = np.where(same_class, scores >= config.iou_match, scores >= MATCH_IOU)
+        allowed = scores >= np.where(same_class, config.iou_match, MATCH_IOU)
         if covered is not None:
             looked_for = np.fromiter(
                 (track.class_id in covered for track in self._tracks),
@@ -350,14 +364,17 @@ class Tracker:
                 count=track_count,
             )
             allowed &= looked_for[None, :]
-        preference = np.where(same_class, scores + CLASS_PREFERENCE, scores)
-        preference[~allowed] = -1.0
+        # Only the pairs above their IoU gate can match: sorting them (a handful
+        # on a real frame) instead of the whole detection x track matrix keeps
+        # the stable preference order and costs nothing on a crowd.
+        pairs = np.flatnonzero(allowed)
+        if pairs.size == 0:
+            return {}
+        preference = scores.ravel()[pairs] + CLASS_PREFERENCE * same_class.ravel()[pairs]
         matched: dict[int, int] = {}
         used: set[int] = set()
-        for flat in np.argsort(-preference, axis=None, kind="stable"):
+        for flat in pairs[np.argsort(-preference, kind="stable")]:
             detection_index, track_index = divmod(int(flat), track_count)
-            if preference[detection_index, track_index] < 0.0:
-                break
             if detection_index in matched or track_index in used:
                 continue
             matched[detection_index] = track_index
@@ -373,7 +390,6 @@ class Tracker:
         high = score >= BIRTH_SCORE
         return _Track(
             class_id=class_id,
-            filtered=np.asarray(box, dtype=np.float64),
             displayed=box,
             score=score,
             hits=1,
@@ -384,29 +400,46 @@ class Tracker:
 
     def _filter(
         self,
-        track: _Track,
-        box: NDArray[np.float64],
-        overlap: float,
-        score: float,
-        class_id: int,
+        track_indices: Sequence[int],
+        detection_indices: Sequence[int],
+        boxes: NDArray[np.float64],
+        overlaps: NDArray[np.float64],
+        detections: Sequence[Detection],
         now: float,
     ) -> None:
-        """Filter one matched track; the displayed box is moved later, together."""
+        """Filter every matched track of the frame; the boxes move later, together.
+
+        The EMA of all matched pairs is one vectorized update -- a crowd would
+        otherwise pay a handful of numpy calls per track -- and the per-track
+        work left is the scalar score, hit count and class vote.
+        """
+
         config = self._config
-        alpha = config.fast_alpha if overlap < FAST_IOU else config.alpha
-        np.subtract(box, track.filtered, out=self._delta)
-        self._delta *= alpha
-        track.filtered += self._delta
-        score_alpha = SETTLED_SCORE_ALPHA if track.settled else config.alpha
-        track.score += score_alpha * (score - track.score)
-        track.hits += 1
-        track.misses = 0
-        track.shown = track.shown or track.hits >= config.min_hits
-        self._vote(track, class_id, now)
+        tracks = self._tracks
+        overlap = overlaps[detection_indices, track_indices]
+        matched = boxes[detection_indices]
+        filtered = self._filtered[track_indices]
+        alpha = np.where(overlap < FAST_IOU, config.fast_alpha, config.alpha)
+        self._filtered[track_indices] = filtered + alpha[:, None] * (matched - filtered)
+        for track_index, detection_index in zip(track_indices, detection_indices, strict=True):
+            track = tracks[track_index]
+            score = float(detections[detection_index].score)
+            score_alpha = SETTLED_SCORE_ALPHA if track.settled else config.alpha
+            track.score += score_alpha * (score - track.score)
+            track.hits += 1
+            track.misses = 0
+            track.shown = track.shown or track.hits >= config.min_hits
+            self._vote(track, int(detections[detection_index].class_id), now)
 
     def _vote(self, track: _Track, class_id: int, now: float) -> None:
         """Relabel a track whose detections changed class, without killing it."""
         track.votes.append(class_id)
+        if class_id == track.class_id and track.pending_class is None:
+            # The detector agrees with the track and no relabel is in flight: a
+            # vote for the current class can neither start one nor confirm
+            # another, so counting the window would be pure cost. This is the
+            # steady state of every booth frame.
+            return
         leader, count = Counter(track.votes).most_common(1)[0]
         if leader == track.class_id or count < VOTE_SHARE * len(track.votes):
             track.pending_class = None
@@ -424,23 +457,23 @@ class Tracker:
             return max(SETTLED_MAX_MISSES, self._config.max_misses)
         return self._config.max_misses
 
-    def _move_displayed(self, changed: Sequence[tuple[_Track, bool]], now: float) -> None:
+    def _move_displayed(self, changed: Sequence[tuple[int, bool]], now: float) -> None:
         """Move the displayed boxes of the tracks that left their deadband."""
-        shown = [(track, was_shown) for track, was_shown in changed if track.shown]
+        tracks = self._tracks
+        shown = [(index, was_shown) for index, was_shown in changed if tracks[index].shown]
         if not shown:
             return
-        filtered = np.stack([track.filtered for track, _ in shown])
-        displayed = np.asarray([track.displayed for track, _ in shown], dtype=np.float64)
-        overlaps = _diagonal_iou(displayed, filtered)
-        for (track, was_shown), overlap in zip(shown, overlaps, strict=True):
+        rows = np.fromiter((index for index, _ in shown), dtype=np.intp, count=len(shown))
+        filtered = self._filtered[rows].tolist()
+        for (index, was_shown), row in zip(shown, filtered, strict=True):
+            track = tracks[index]
             if not was_shown:
-                self._display(track, now)
+                self._display(track, row, now)
                 continue
             settled = track.settled
             left = _left_deadband(
                 track.displayed,
-                track.filtered,
-                float(overlap),
+                row,
                 SETTLED_DEADBAND_IOU if settled else self._config.deadband_iou,
                 SETTLED_SHIFT_FRACTION if settled else MAX_SHIFT_FRACTION,
                 SETTLED_SIZE_FRACTION if settled else MAX_SIZE_FRACTION,
@@ -456,11 +489,11 @@ class Tracker:
                 continue
             if settled:
                 track.settled = False
-            self._display(track, now)
+            self._display(track, row, now)
 
-    def _display(self, track: _Track, now: float) -> None:
+    def _display(self, track: _Track, filtered: Sequence[float], now: float) -> None:
         """Snap the displayed box to the filtered one and restart its still timer."""
-        track.displayed = _as_box(track.filtered)
+        track.displayed = _as_box(filtered)
         track.displayed_since = now
         track.change_frames = 0
 

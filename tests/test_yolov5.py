@@ -27,6 +27,7 @@ from cpsa.yolov5 import (
     prepare_input,
     prepare_input_into,
 )
+from cpsa.yolox import _SLOT_CANDIDATE_CAP
 
 STRIDES = (8, 16, 32)
 BACKGROUND = -1000.0
@@ -386,7 +387,9 @@ def test_the_quantized_decoder_matches_the_float_decode(conf_thr: float) -> None
 def test_the_quantized_decoder_matches_the_reference_with_per_class_thresholds(
     overrides: dict[int, float],
 ) -> None:
-    heads = _planted_heads()
+    # Small heads: the frame stays under the decode slot cap, so the float
+    # reference sees exactly the slots the int8 path evaluates.
+    heads = _planted_heads(shapes=((4, 4, 255), (2, 2, 255), (1, 1, 255)))
     decoder = QuantizedYolov5Decoder([head.shape for head in heads], STRIDES, QUANTIZED_FIX_POINTS)
 
     actual = decoder.decode(heads, 0.35, 0.45, overrides)
@@ -1022,7 +1025,12 @@ def test_live_class_thresholds_apply_to_the_next_decode_without_a_reload(
 
 
 def test_a_crowded_frame_decodes_like_the_float_path() -> None:
-    """150 planted objects in clusters: the int8 path keeps the float result."""
+    """150 planted objects in clusters, more than the decode evaluates.
+
+    The decoder scores only the objectness-best slots of the frame, so the float
+    reference is run on the same heads with the cap's rejects silenced: the two
+    paths must still agree box for box, which is what pins the selection rule.
+    """
     heads = _crowded_heads()
     decoder = QuantizedYolov5Decoder(QUANTIZED_SHAPES, STRIDES, QUANTIZED_FIX_POINTS)
     overrides = class_thresholds(0.35, class_conf={"person": 0.40}, object_conf=0.25)
@@ -1030,10 +1038,7 @@ def test_a_crowded_frame_decodes_like_the_float_path() -> None:
     actual = decoder.decode(heads, 0.35, 0.45, overrides)
 
     expected = decode_yolov5(
-        [
-            head.astype(np.float64) * 2.0**-fix_point
-            for head, fix_point in zip(heads, QUANTIZED_FIX_POINTS, strict=True)
-        ],
+        _frame_the_cap_decodes(heads),
         STRIDES,
         conf_thr=0.35,
         iou_thr=0.45,
@@ -1042,10 +1047,57 @@ def test_a_crowded_frame_decodes_like_the_float_path() -> None:
     )
     for got, want in zip(actual, expected, strict=True):
         assert np.array_equal(got, want)
-    # The crowd really fills the frame: the prefilter kept enough candidates for
-    # the class-aware NMS and its per-class matrices to be the work of a frame.
-    assert decoder.last_candidate_count > 150
+    # The crowd really fills the frame: more slots survive the objectness gate
+    # than the cap evaluates, and the detection list is full.
+    assert _survivors(heads) > _SLOT_CANDIDATE_CAP
     assert actual[1].size == 100
+
+
+def _survivors(heads: list[NDArray[np.int8]]) -> int:
+    """Slots of ``heads`` above the background sentinel of the crowded frame."""
+    return sum(
+        int(np.count_nonzero(head.reshape(-1, SLOT)[:, OBJECTNESS] > np.iinfo(np.int8).min))
+        for head in heads
+    )
+
+
+def _frame_the_cap_decodes(heads: list[NDArray[np.int8]]) -> list[NDArray[np.float64]]:
+    """Dequantized ``heads`` with every slot beyond the decode cap silenced.
+
+    :class:`QuantizedYolov5Decoder` evaluates the class logits of the
+    :data:`_SLOT_CANDIDATE_CAP` objectness-best survivors only (ties to the lower
+    slot). Every other slot could never be a detection, so dropping it is the
+    same as leaving it below the background: this returns the heads the float
+    path can be compared against. Background slots are exactly ``-128`` in the
+    test frames, below the loosest gate, so the survivors are the slots above it.
+    """
+    survivors = [
+        np.flatnonzero(head.reshape(-1, SLOT)[:, OBJECTNESS] > np.iinfo(np.int8).min)
+        for head in heads
+    ]
+    count = sum(index.size for index in survivors)
+    kept = np.zeros(count, dtype=np.bool_)
+    if count > _SLOT_CANDIDATE_CAP:
+        objectness = np.concatenate(
+            [
+                head.reshape(-1, SLOT)[index, OBJECTNESS]
+                for head, index in zip(heads, survivors, strict=True)
+            ]
+        ).astype(np.int16)
+        kept[np.argsort(-objectness, kind="stable")[:_SLOT_CANDIDATE_CAP]] = True
+    else:
+        kept[:] = True
+
+    dequantized = [
+        head.astype(np.float64) * 2.0**-fix_point
+        for head, fix_point in zip(heads, QUANTIZED_FIX_POINTS, strict=True)
+    ]
+    start = 0
+    for head, index in zip(dequantized, survivors, strict=True):
+        stop = start + index.size
+        head.reshape(-1, SLOT)[index[~kept[start:stop]], OBJECTNESS] = BACKGROUND
+        start = stop
+    return dequantized
 
 
 @pytest.mark.benchmark

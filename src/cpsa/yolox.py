@@ -97,7 +97,6 @@ MAX_DETECTIONS = 100
 #: person's cells, and one class per cell would let ``person`` swallow the bottle.
 MAX_CLASSES_PER_CELL = 3
 
-_NMS_MATRIX_CANDIDATES = 512
 
 _NMS_CANDIDATE_CAP = 300
 """Candidates with the best scores kept before NMS.
@@ -106,7 +105,20 @@ A real frame yields a few dozen candidates, so the cap only trips on a
 pathological head (a busy texture read as hundreds of objects); it bounds the
 pairwise pass there without changing the small frames the showcase sees.
 """
-"""Candidate count up to which the NMS computes its overlaps as one matrix."""
+
+_SLOT_CANDIDATE_CAP = 100
+"""Objectness-surviving slots whose class logits are evaluated.
+
+A cell needs its loosest class gate to pass to be a candidate at all, so the
+objectness prefilter already drops the background. On a pathological head
+(a busy texture read as thousands of objects) it still leaves hundreds of
+survivors, and evaluating 80 class logits of each is what the decode pays for;
+the loop keeps the 100 most objectness-confident instead. A frame with 30
+objects has a few dozen survivors, so the cap never trips on the booth.
+"""
+
+_NMS_MATRIX_CANDIDATES = 512
+"""Candidate count up to which the NMS computes a class' overlaps as one matrix."""
 
 _MIN_CHANNELS = 6
 
@@ -114,6 +126,23 @@ _MIN_CHANNELS = 6
 _OBJECTNESS = 4
 _CLASS_START = 5
 _BOX_CHANNELS = 4
+
+
+def _cap_slots(
+    objectness: NDArray[np.int8],
+    index: NDArray[np.intp],
+    cap: int = _SLOT_CANDIDATE_CAP,
+) -> NDArray[np.intp]:
+    """Keep the ``cap`` objectness-best slots of ``index``, still in index order.
+
+    Ties go to the lower slot index, so the prefilter is deterministic and a
+    frame below the cap is decoded exactly like the uncapped one.
+    """
+
+    if index.size <= cap:
+        return index
+    order = np.lexsort((index, -objectness[index].astype(np.int16)))[:cap]
+    return np.sort(index[order])
 
 
 @dataclass(frozen=True)
@@ -258,9 +287,11 @@ def _class_aware_nms(
     score order inside a class is unchanged) and the pairwise overlap stays
     ``sum(n_c ** 2)`` instead of ``n ** 2``. A class cannot contribute more than
     :data:`MAX_DETECTIONS` survivors to the capped output, so its pass stops
-    there. Within one matrix-sized class the overlaps are computed once and the
-    pass only flips booleans; beyond :data:`_NMS_MATRIX_CANDIDATES` a per-row
-    scan is used instead.
+    there. Within one matrix-sized class the overlaps are computed once, as a
+    boolean matrix of "would suppress"; the pass over the frame then only ANDs
+    rows of it into the alive mask, which is far cheaper than a comparison and a
+    fancy-index assignment per survivor. Beyond :data:`_NMS_MATRIX_CANDIDATES` a
+    per-row scan keeps the memory bounded on a pathological head.
     """
 
     if scores.size <= 1:
@@ -272,14 +303,14 @@ def _class_aware_nms(
         remaining = np.ones(order.size, dtype=np.bool_)
         kept = 0
         if order.size <= _NMS_MATRIX_CANDIDATES:
-            overlap = _pairwise_iou(boxes[order])
+            suppresses = _pairwise_iou(boxes[order]) > iou_thr
             for position in range(order.size):
                 if not remaining[position]:
                     continue
                 keep.append(int(order[position]))
                 kept += 1
                 remaining[position] = False
-                remaining[overlap[position] > iou_thr] = False
+                remaining &= ~suppresses[position]
                 if kept >= MAX_DETECTIONS:
                     break
             continue
@@ -378,30 +409,55 @@ def _cell_candidates(
     """
 
     qualified = (scores > thresholds) & usable[:, None]
-    counts = qualified.sum(axis=1)
-    rows = np.flatnonzero(counts)
-    if rows.size == 0:
+    # Cell-major, class-minor: the pairs are already in the reference order and
+    # never materialize the whole (cells, classes) matrix of the sort below.
+    pair_rows, pair_classes = np.nonzero(qualified)
+    if pair_rows.size == 0:
         return (
             np.zeros(0, dtype=np.intp),
             np.zeros(0, dtype=np.intp),
             np.zeros(0, dtype=np.float64),
         )
-    cell_qualified = qualified[rows]
-    if np.max(counts[rows]) <= 1:
+    pair_scores = scores[pair_rows, pair_classes]
+    if pair_rows.size == 1 or np.all(pair_rows[1:] != pair_rows[:-1]):
         # Most cells of a real frame hold a single class above its threshold.
-        cell_index, class_ids = np.nonzero(cell_qualified)
-        cells = rows[cell_index]
-        return cells, class_ids, scores[cells, class_ids]
-    cell_scores = np.where(cell_qualified, scores[rows], -np.inf)
-    # Stable sort: equal scores keep the lower class id, on both paths.
-    class_ids = np.argsort(-cell_scores, axis=1, kind="stable")[:, :MAX_CLASSES_PER_CELL]
-    row_index = np.arange(rows.size, dtype=np.intp)[:, None]
-    kept = cell_qualified[row_index, class_ids].ravel()
-    return (
-        np.repeat(rows, kept.reshape(rows.size, -1).sum(axis=1)),
-        class_ids.ravel()[kept],
-        cell_scores[row_index, class_ids].ravel()[kept],
-    )
+        return pair_rows, pair_classes, pair_scores
+
+    # Rank the qualified pairs of a cell: best score first, then the lower class
+    # id (the stable sort the two paths always shared). Sorting only the pairs
+    # above a threshold, instead of every class of every cell, is what keeps the
+    # busy decode off the 80-column sort.
+    return _best_per_row(pair_rows, pair_classes, pair_scores)
+
+
+def _best_per_row(
+    rows: NDArray[np.intp],
+    classes: NDArray[np.intp],
+    scores: NDArray[np.float64],
+    limit: int = MAX_CLASSES_PER_CELL,
+) -> tuple[NDArray[np.intp], NDArray[np.intp], NDArray[np.float64]]:
+    """Keep the ``limit`` best-scored ``(row, class)`` pairs of every row.
+
+    ``rows`` must be non-decreasing, which the callers guarantee by walking the
+    cells in order. A pair sorts by score, then by the lower class id: exactly
+    the stable sort over a cell's classes that both the float and the int8 path
+    have always used, over the few pairs above a threshold instead of the 80
+    classes of every cell.
+    """
+
+    if rows.size <= 1:
+        return rows, classes, scores
+    order = np.lexsort((classes, -scores, rows))
+    rows = rows[order]
+    classes = classes[order]
+    scores = scores[order]
+    first = np.empty(rows.size, dtype=np.bool_)
+    first[0] = True
+    np.not_equal(rows[1:], rows[:-1], out=first[1:])
+    starts = np.flatnonzero(first)
+    rank = np.arange(rows.size) - np.repeat(starts, np.diff(np.append(starts, rows.size)))
+    kept = rank < limit
+    return rows[kept], classes[kept], scores[kept]
 
 
 def _decode_head(
@@ -737,6 +793,10 @@ class QuantizedYoloxDecoder:
             index = np.flatnonzero(layout.keep)
             if index.size == 0:
                 continue
+            # A pathological frame leaves hundreds of survivors; the class
+            # logits of the best _SLOT_CANDIDATE_CAP cells are what the decode
+            # evaluates, the rest would only cost a scan apiece.
+            index = _cap_slots(flat[:, _OBJECTNESS], index)
             index = index[np.any(flat[index, _CLASS_START:] >= gates, axis=1)]
             if index.size == 0:
                 continue
