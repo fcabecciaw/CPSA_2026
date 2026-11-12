@@ -1,6 +1,9 @@
 """Disk cache of synthesized WAV files.
 
-Key: ``sha1(engine, voice, text)`` exactly as frozen by the R2-V task. The
+Key: ``sha1(engine, voice, text)`` as frozen by the R2-V task, plus the speaking
+rate for the engines that have one (XTTS): the same sentence at another speed is
+another WAV. ``text`` is the normalized sentence (:func:`cpsa_tts.text.normalize`),
+so the dashboard text and the pregenerated text meet on the same key. The
 sentence itself is never written to disk, only its digest, so the cache does not
 leak what the dashboard said. Files are written atomically (temp file +
 ``os.replace``) so a crash cannot leave a truncated WAV in the cache.
@@ -18,10 +21,16 @@ import numpy as np
 import soundfile as sf
 
 
-def cache_key(engine: str, voice: str, text: str) -> str:
-    """The sha1 key of one (engine, voice, text) triple, as a hex digest."""
+def cache_key(engine: str, voice: str, text: str, speed: float | None = None) -> str:
+    """The sha1 key of one (engine, voice, text[, speed]), as a hex digest.
+
+    ``speed=None`` (an engine without a rate) keeps the original R2-V key.
+    """
     digest = hashlib.sha1()  # noqa: S324 - cache key, not a security boundary
-    for part in (engine, voice, text):
+    parts = [engine, voice, text]
+    if speed is not None:
+        parts.append(f"speed={speed:.2f}")
+    for part in parts:
         digest.update(part.encode("utf-8"))
         digest.update(b"\x00")
     return digest.hexdigest()
@@ -37,11 +46,11 @@ class WavCache:
     def path(self, key: str) -> Path:
         return self.directory / f"{key}.wav"
 
-    def has(self, engine: str, voice: str, text: str) -> bool:
-        return self.path(cache_key(engine, voice, text)).is_file()
+    def has(self, engine: str, voice: str, text: str, speed: float | None = None) -> bool:
+        return self.path(cache_key(engine, voice, text, speed)).is_file()
 
-    def read(self, engine: str, voice: str, text: str) -> bytes | None:
-        path = self.path(cache_key(engine, voice, text))
+    def read(self, engine: str, voice: str, text: str, speed: float | None = None) -> bytes | None:
+        path = self.path(cache_key(engine, voice, text, speed))
         try:
             return path.read_bytes()
         except FileNotFoundError:
@@ -54,8 +63,9 @@ class WavCache:
         text: str,
         samples: np.ndarray,
         sample_rate: int,
+        speed: float | None = None,
     ) -> Path:
-        path = self.path(cache_key(engine, voice, text))
+        path = self.path(cache_key(engine, voice, text, speed))
         write_wav_atomic(path, samples, sample_rate)
         return path
 

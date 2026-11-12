@@ -118,17 +118,17 @@ describe("F-E4 #7/#13 — one sentence about the most salient object", () => {
 });
 
 describe("F-E4 #13 — global gap between utterances", () => {
-  it("waits 4 s, then speaks again", () => {
+  it("waits 2 s, then speaks again", () => {
     const memory = memoryFor(1);
     const engine = new CognitiveEngine(RULEBOOK, { rng: () => 0.5 });
     engine.consider([appear("tazza")], memory, 0);
     expect(engine.tick(0, memory)).not.toBeNull();
     engine.endSpeech();
 
-    engine.consider([appear("libro", 3_000)], memory, 3_000);
-    expect(engine.tick(3_999, memory)).toBeNull();
-    engine.consider([appear("libro", 4_001)], memory, 4_001);
-    expect(engine.tick(4_001, memory)).not.toBeNull();
+    engine.consider([appear("libro", 1_000)], memory, 1_000);
+    expect(engine.tick(1_999, memory)).toBeNull();
+    engine.consider([appear("libro", 2_001)], memory, 2_001);
+    expect(engine.tick(2_001, memory)).not.toBeNull();
   });
 });
 

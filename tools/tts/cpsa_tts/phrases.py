@@ -8,8 +8,13 @@ and their yes/no answers). The files are read as text and
 parsed with narrow regular expressions on purpose: this package must not depend
 on Node, Vite or the web toolchain, and it must not import the dashboard code.
 
-The texts are used verbatim as cache keys, so the parser preserves the strings
-exactly (TypeScript escapes are decoded with ``json.loads``).
+The texts are the dashboard's own strings (TypeScript escapes are decoded with
+``json.loads``); the cache key uses their normalized form (``text.normalize``).
+
+The regular expressions only see the fixed sentences. The full speech catalog
+(scene lines and every rendered slot variant, in priority order) is exported by
+the dashboard itself with ``node web/scripts/export-speech.mjs``, which runs the
+real grammar; :func:`collect_for_cache` prefers that file when it exists.
 """
 
 from __future__ import annotations
@@ -49,14 +54,21 @@ def web_source_dir(repo_root: Path) -> Path:
     return Path(repo_root) / "web" / "src"
 
 
+def default_catalog_path(repo_root: Path) -> Path:
+    """Where ``web/scripts/export-speech.mjs`` writes the speech catalog."""
+    return Path(repo_root) / "build" / "speech-catalog.json"
+
+
 @dataclass(frozen=True, slots=True)
 class Phrase:
     """One fixed sentence of the dashboard."""
 
     id: str
     text: str
-    source: str  # "rulebook" | "fact" | "scene" | "question"
-    kind: str  # "rule" | "fact" | "scene" | "question" | "answer"
+    #: "rulebook" | "fact", or the catalog group: "scene" | "indoor" | "counts" | "rest".
+    source: str
+    #: "rule" | "fact", or the catalog line's origin (rule id, scene family…).
+    kind: str
 
     def to_dict(self) -> dict[str, str]:
         return asdict(self)
@@ -199,6 +211,46 @@ def collect(repo_root: Path) -> PhrasesDocument:
         raise ValueError(f"no phrases found under {sources}")
     generated_at = datetime.now(UTC).isoformat(timespec="seconds")
     return PhrasesDocument(phrases=tuple(phrases), generated_at=generated_at)
+
+
+def load_catalog(path: Path) -> list[Phrase]:
+    """The lines of a speech catalog exported by the dashboard, in file order."""
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    lines = raw.get("lines") if isinstance(raw, dict) else None
+    if not isinstance(lines, list):
+        raise ValueError(f"{path}: not a speech catalog (no 'lines' list)")
+    phrases: list[Phrase] = []
+    for index, line in enumerate(lines):
+        if not isinstance(line, dict) or not isinstance(line.get("text"), str):
+            raise ValueError(f"{path}: line {index} has no text")
+        group = str(line.get("group", "catalog"))
+        phrases.append(
+            Phrase(
+                id=f"{group}.{index:04d}",
+                text=line["text"],
+                source=group,
+                kind=str(line.get("source", group)),
+            )
+        )
+    return _unique(phrases)
+
+
+def collect_for_cache(repo_root: Path, catalog: Path | None = None) -> PhrasesDocument:
+    """What the pregenerate fills: the speech catalog, then any fixed phrase it lacks.
+
+    Without a catalog file this is :func:`collect` (the fixed phrases only).
+    """
+    fixed = collect(repo_root)
+    path = catalog if catalog is not None else default_catalog_path(repo_root)
+    if catalog is None and not path.is_file():
+        return fixed
+    phrases = load_catalog(path)
+    if not phrases:
+        raise ValueError(f"{path}: the speech catalog is empty")
+    return PhrasesDocument(
+        phrases=tuple(_unique([*phrases, *fixed.phrases])),
+        generated_at=fixed.generated_at,
+    )
 
 
 def write_phrases(path: Path, document: PhrasesDocument) -> Path:

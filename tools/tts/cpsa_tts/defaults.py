@@ -15,6 +15,7 @@ import os
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from .engines import EngineError, EngineRegistry
 
@@ -24,12 +25,12 @@ DEFAULTS_FILE = "default.json"
 
 
 class DefaultStore:
-    """``default.json``: ``{"engine": ..., "voice": ..., "updated_at": ...}``."""
+    """``default.json``: ``{"engine", "voice", "speed"?, "updated_at"}``."""
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path).expanduser()
 
-    def read(self) -> dict[str, str] | None:
+    def read(self) -> dict[str, Any] | None:
         """The persisted choice, or None when absent, unreadable or malformed."""
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
@@ -46,17 +47,20 @@ class DefaultStore:
             return None
         if not engine or not voice:
             return None
-        return {"engine": engine, "voice": voice}
+        choice: dict[str, Any] = {"engine": engine, "voice": voice}
+        speed = raw.get("speed")
+        if isinstance(speed, int | float) and not isinstance(speed, bool):
+            choice["speed"] = float(speed)
+        return choice
 
-    def write(self, engine: str, voice: str) -> Path:
+    def write(self, engine: str, voice: str, speed: float | None = None) -> Path:
         """Persist the choice atomically: a crash cannot truncate the file."""
         path = self.path
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "engine": engine,
-            "voice": voice,
-            "updated_at": datetime.now(UTC).isoformat(timespec="seconds"),
-        }
+        payload: dict[str, Any] = {"engine": engine, "voice": voice}
+        if speed is not None:
+            payload["speed"] = speed
+        payload["updated_at"] = datetime.now(UTC).isoformat(timespec="seconds")
         handle, temp_name = tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=path.parent)
         try:
             with os.fdopen(handle, "w", encoding="utf-8") as file:
@@ -70,7 +74,7 @@ class DefaultStore:
         return path
 
 
-def apply_persisted(registry: EngineRegistry, store: DefaultStore) -> dict[str, str] | None:
+def apply_persisted(registry: EngineRegistry, store: DefaultStore) -> dict[str, Any] | None:
     """Adopt the persisted default when it still names a known engine and voice."""
     choice = store.read()
     if choice is None:
@@ -80,4 +84,10 @@ def apply_persisted(registry: EngineRegistry, store: DefaultStore) -> dict[str, 
     except EngineError as error:
         log.warning("ignoring %s: %s", store.path, error)
         return None
+    if "speed" in choice:
+        try:
+            registry.set_speed(choice["engine"], choice["speed"])
+        except EngineError as error:
+            log.warning("ignoring the speed in %s: %s", store.path, error)
+            choice.pop("speed")
     return choice

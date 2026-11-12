@@ -20,8 +20,9 @@ from . import __version__
 from .cache import WavCache, write_wav_atomic
 from .config import Settings, repo_root
 from .defaults import DefaultStore, apply_persisted
-from .engines import Engine, EngineError, EngineRegistry, Voice
-from .phrases import PhrasesDocument, collect, write_phrases
+from .engines import Engine, EngineError, EngineRegistry, Voice, engine_speed
+from .phrases import PhrasesDocument, collect, collect_for_cache, write_phrases
+from .text import normalize
 
 log = logging.getLogger("cpsa_tts.cli")
 
@@ -96,7 +97,10 @@ def _parser() -> argparse.ArgumentParser:
         help="load the default engine before accepting requests",
     )
 
-    pre = sub.add_parser("pregenerate", help="fill the cache with the dashboard's fixed phrases")
+    pre = sub.add_parser(
+        "pregenerate",
+        help="fill the cache with every known dashboard sentence (speech catalog first)",
+    )
     pre.add_argument(
         "--engine", action="append", dest="engines", help="repeatable; default: the default engine"
     )
@@ -107,6 +111,12 @@ def _parser() -> argparse.ArgumentParser:
         "--json", type=Path, help="path of phrases.json (default <repo>/build/phrases.json)"
     )
     pre.add_argument("--report", type=Path, help="path of the run report JSON")
+    pre.add_argument(
+        "--catalog",
+        type=Path,
+        help="speech catalog from web/scripts/export-speech.mjs "
+        "(default <repo>/build/speech-catalog.json when present)",
+    )
 
     samples = sub.add_parser("samples", help="write comparison WAVs (5 sentences, every voice)")
     samples.add_argument(
@@ -202,17 +212,14 @@ def _serve(args: argparse.Namespace, settings: Settings) -> int:
 
 def _pregenerate(args: argparse.Namespace, settings: Settings) -> int:
     root = repo_root()
-    document = collect(root)
+    document = collect_for_cache(root, args.catalog)
     json_path = args.json or root / "build" / "phrases.json"
     write_phrases(json_path, document)
     counts = document.counts()
     log.info(
-        "phrases.json: %d sentences (%d rulebook, %d facts, %d scene, %d questions) -> %s",
+        "phrases.json: %d sentences (%s) -> %s",
         counts["total"],
-        counts["rulebook"],
-        counts["fact"],
-        counts["scene"],
-        counts["question"],
+        ", ".join(f"{key} {value}" for key, value in counts.items() if key != "total" and value),
         json_path,
     )
     if args.dry_run:
@@ -224,28 +231,45 @@ def _pregenerate(args: argparse.Namespace, settings: Settings) -> int:
     report: dict[str, Any] = {"cache_dir": str(cache.directory), "engines": {}}
     for engine in selected:
         voice = _pick_voice(engine, args.voice)
+        speed = engine_speed(engine)
         rows = document.phrases[: args.limit] if args.limit else document.phrases
         started = time.perf_counter()
         synthesized = 0
         skipped = 0
         durations: list[float] = []
+        audio_s = 0.0
         for index, phrase in enumerate(rows, start=1):
-            if not cache.has(engine.id, voice.id, phrase.text):
+            text = normalize(phrase.text, engine.id)
+            if text and not cache.has(engine.id, voice.id, text, speed):
                 began = time.perf_counter()
-                samples = engine.synthesize(phrase.text, voice.id)
-                cache.write(engine.id, voice.id, phrase.text, samples, engine.sample_rate)
+                samples = engine.synthesize(text, voice.id)
+                cache.write(engine.id, voice.id, text, samples, engine.sample_rate, speed)
                 durations.append(time.perf_counter() - began)
+                audio_s += len(samples) / engine.sample_rate
                 synthesized += 1
             else:
                 skipped += 1
             if index % 50 == 0:
-                log.info("%s/%s: %d/%d", engine.id, voice.id, index, len(rows))
+                done = time.perf_counter() - started
+                eta = done / index * (len(rows) - index)
+                log.info(
+                    "%s/%s: %d/%d (%s) %.0fs, about %.0fs left",
+                    engine.id,
+                    voice.id,
+                    index,
+                    len(rows),
+                    phrase.source,
+                    done,
+                    eta,
+                )
         elapsed = time.perf_counter() - started
         report["engines"][f"{engine.id}/{voice.id}"] = {
             "phrases": len(rows),
+            "speed": speed,
             "synthesized": synthesized,
             "cached": skipped,
             "seconds": round(elapsed, 1),
+            "audio_seconds": round(audio_s, 1),
             "median_ms": round(statistics.median(durations) * 1000, 1) if durations else None,
         }
         log.info(
@@ -272,7 +296,7 @@ def _pregenerate(args: argparse.Namespace, settings: Settings) -> int:
 def _key_for(engine: Engine, voice: Voice, text: str) -> str:
     from .cache import cache_key
 
-    return cache_key(engine.id, voice.id, text)
+    return cache_key(engine.id, voice.id, text, engine_speed(engine))
 
 
 def _selected_engines(registry: EngineRegistry, requested: list[str] | None) -> list[Engine]:
@@ -334,7 +358,7 @@ def _samples(args: argparse.Namespace, settings: Settings) -> int:
                     )
                     continue
                 began = time.perf_counter()
-                samples = engine.synthesize(text, voice.id)
+                samples = engine.synthesize(normalize(text, engine.id), voice.id)
                 elapsed_ms = (time.perf_counter() - began) * 1000
                 write_wav_atomic(path, samples, engine.sample_rate)
                 entries.append(
@@ -420,14 +444,14 @@ def _bench(args: argparse.Namespace, settings: Settings) -> int:
         cold_audio: list[float] = []
         for text in BENCH_TEXTS:
             began = time.perf_counter()
-            samples = engine.synthesize(text, voice.id)
+            samples = engine.synthesize(normalize(text, engine.id), voice.id)
             cold_times.append((time.perf_counter() - began) * 1000)
             cold_audio.append(len(samples) / engine.sample_rate)
         warm: list[float] = []
         for _ in range(max(1, args.repeats)):
             for text in BENCH_TEXTS:
                 began = time.perf_counter()
-                engine.synthesize(text, voice.id)
+                engine.synthesize(normalize(text, engine.id), voice.id)
                 warm.append((time.perf_counter() - began) * 1000)
         device = engine.device
         gpu_mb = None
@@ -475,12 +499,14 @@ def _synthesize(args: argparse.Namespace, settings: Settings) -> int:
     registry = _registry(settings)
     cache = WavCache(settings.cache_dir)
     engine, voice = registry.resolve(args.engine, args.voice)
-    payload = None if args.no_cache else cache.read(engine.id, voice.id, args.text)
+    text = normalize(args.text, engine.id)
+    speed = engine_speed(engine)
+    payload = None if args.no_cache else cache.read(engine.id, voice.id, text, speed)
     if payload is None:
         began = time.perf_counter()
-        samples = engine.synthesize(args.text, voice.id)
+        samples = engine.synthesize(text, voice.id)
         elapsed_ms = (time.perf_counter() - began) * 1000
-        path = cache.write(engine.id, voice.id, args.text, samples, engine.sample_rate)
+        path = cache.write(engine.id, voice.id, text, samples, engine.sample_rate, speed)
         log.info(
             "synthesized %s/%s in %.0f ms (%.2fs audio) -> %s",
             engine.id,
@@ -490,7 +516,7 @@ def _synthesize(args: argparse.Namespace, settings: Settings) -> int:
             path,
         )
     else:
-        path = cache.path(_key_for(engine, voice, args.text))
+        path = cache.path(_key_for(engine, voice, text))
         log.info("cache hit -> %s", path)
     args.out.expanduser().parent.mkdir(parents=True, exist_ok=True)
     args.out.expanduser().write_bytes(path.read_bytes())

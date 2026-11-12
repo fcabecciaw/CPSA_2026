@@ -61,8 +61,8 @@ class Settings:
     kokoro_device: str = "cpu"
     #: ``cuda`` when PyTorch sees the Blackwell GPU, ``cpu`` otherwise.
     xtts_device: str = "auto"
-    #: XTTS speaking rate; 1.0 is the model default.
-    xtts_speed: float = 1.0
+    #: XTTS speaking rate; 1.0 is the model default, 1.15 sounds less read aloud.
+    xtts_speed: float = 1.15
     #: edge-tts speaking rate ("+0%", "-5%", ...).
     edge_rate: str = "+0%"
     log_level: str = "INFO"

@@ -147,3 +147,18 @@ def test_job_without_phrases_uses_the_dashboard_sources(tmp_path) -> None:
     job.start(engine, engine.voices[0], rows=rows)
     status = wait_for_end(job)
     assert status["total"] == 2
+
+
+def test_job_synthesizes_the_normalized_text_once_per_spoken_sentence(tmp_path) -> None:
+    engine = FakeEngine()
+    rows = (
+        Phrase(id="scene.0000", text="Sembra un'auto… dico bene?", source="scene", kind="x"),
+        # Spoken identically: already cached by the line above.
+        Phrase(id="scene.0001", text="Sembra un'auto... dico bene?", source="scene", kind="x"),
+    )
+    job = make_job(tmp_path, engine, rows)
+    job.start(engine, engine.voices[0])
+    status = wait_for_end(job)
+    assert status["synthesized"] == 1
+    assert status["cached"] == 1
+    assert engine.calls == ["Sembra un'auto, dico bene?"]

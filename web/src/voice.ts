@@ -235,6 +235,10 @@ const PLAY_TIMEOUT_MS = 3_000;
 const WATCHDOG_MARGIN_MS = 1_500;
 /** `resume()` without a gesture can stay pending forever in Chrome. */
 const RESUME_TIMEOUT_MS = 1_000;
+/** Prefetched WAVs kept for `speak` (oldest dropped first). */
+const PREFETCH_KEEP = 8;
+/** Prefetch requests in flight at once, so they never crowd out a real line. */
+const PREFETCH_IN_FLIGHT = 2;
 
 /** The fixed voice of the demo: XTTS-v2 Ana Florence, every line pre-cached. */
 export const FIXED_VOICE: VoicePick = {
@@ -659,6 +663,9 @@ export class VoiceEngine {
   private audioSuspended = false;
   /** The gate came back because the context suspended, not by choice. */
   private lockedBySuspend = false;
+  /** WAVs requested ahead of `speak`, by engine/voice/text (`prefetch`). */
+  private readonly warmed = new Map<string, Promise<ArrayBuffer>>();
+  private warming = 0;
 
   constructor(options: VoiceOptions = {}) {
     this.synth = options.synth === undefined ? browserSynth() : options.synth;
@@ -933,6 +940,60 @@ export class VoiceEngine {
     return this.startSynth(text, handlers);
   }
 
+  /**
+   * Request the audio of lines that are about to be said, so `speak` finds the
+   * WAV already here (or at least already synthesized and cached by the
+   * service). Best effort: at most `PREFETCH_IN_FLIGHT` requests at a time,
+   * failures are forgotten and `speak` simply asks again.
+   */
+  prefetch(texts: readonly string[]): void {
+    const info = this.service;
+    const tts = this.tts;
+    if (info === null || tts === null || this.audio === null || !this.enabled || this.muted) {
+      return;
+    }
+    for (const text of texts) {
+      const key = warmKey(info, text);
+      if (this.warmed.has(key) || this.warming >= PREFETCH_IN_FLIGHT) {
+        continue;
+      }
+      this.warming += 1;
+      const request = tts.synthesize(text, info.engine, info.voice);
+      request.then(
+        () => {
+          this.warming -= 1;
+        },
+        () => {
+          this.warming -= 1;
+          this.warmed.delete(key);
+        },
+      );
+      this.warmed.set(key, request);
+      while (this.warmed.size > PREFETCH_KEEP) {
+        const oldest = this.warmed.keys().next().value;
+        if (oldest === undefined) {
+          break;
+        }
+        this.warmed.delete(oldest);
+      }
+    }
+  }
+
+  /** The prefetched WAV of `text`, else a fresh request (used once). */
+  private fetchWav(text: string, info: TtsServiceInfo, signal: AbortSignal): Promise<ArrayBuffer> {
+    const tts = this.tts;
+    if (tts === null) {
+      return Promise.reject(new Error("no tts service"));
+    }
+    const key = warmKey(info, text);
+    const warmed = this.warmed.get(key);
+    this.warmed.delete(key);
+    if (warmed === undefined) {
+      return tts.synthesize(text, info.engine, info.voice, signal);
+    }
+    return warmed.catch(() => tts.synthesize(text, info.engine, info.voice, signal));
+  }
+
   /** Cancel the utterance in flight (vision lost, mode switch, mute). */
   cancel(): void {
     if (!this.speaking && !this.simulating) {
@@ -973,7 +1034,7 @@ export class VoiceEngine {
     let stale = false;
     try {
       const wav = await this.bounded(
-        this.tts.synthesize(text, info.engine, info.voice, controller.signal),
+        this.fetchWav(text, info, controller.signal),
         this.requestTimeoutMs,
         () => controller.abort(),
       );
@@ -1200,4 +1261,9 @@ export class VoiceEngine {
         return this.selected === null ? "Voce pronta" : `Voce pronta · ${this.selected.name}`;
     }
   }
+}
+
+/** The prefetch key: the same sentence in another voice is another WAV. */
+function warmKey(info: TtsServiceInfo, text: string): string {
+  return `${info.engine}\u0000${info.voice}\u0000${text}`;
 }

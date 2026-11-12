@@ -5,11 +5,12 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { CognitiveAgent } from "./cognitive/agent";
+import { CognitiveAgent, HEARTBEAT_MS } from "./cognitive/agent";
 import { CognitiveMemory } from "./cognitive/memory";
 import { Perception } from "./cognitive/perception";
 import { RULEBOOK } from "./cognitive/rulebook";
 import { CognitiveEngine, type Rule } from "./cognitive/rules";
+import { SceneMachine } from "./cognitive/scene";
 import { armsUp, detection, person, pose, showcase } from "./cognitive/testkit";
 import type { StatusPayload } from "./protocol";
 
@@ -78,9 +79,9 @@ describe("F-E4 #21 — lost vision", () => {
     );
     expect(resumed.filter((event) => event.type === "appear")).toHaveLength(0);
     expect(spoken).toHaveLength(1);
-    // The queued recovery expires 3 s after it was captured, then the 4 s gap
-    // is over: 5 s after the loss is the last moment it can still be said.
-    agent.tick(now + 4_000);
+    // The queued recovery expires 2 s after it was captured and the 2 s gap is
+    // over at once: 3 s after the loss is the last moment it can still be said.
+    agent.tick(now + 3_000);
     expect(spoken.at(-1)).toBe("Ci vedo di nuovo!");
   });
 });
@@ -124,3 +125,69 @@ describe("F-E4 #22 — mode switch", () => {
     expect(spoken.filter((text) => text === "Ora guardo i movimenti: muoviti un po'!")).toHaveLength(1);
   });
 });
+
+/** `showcase.state` arrives at most 10 Hz from the board (`src/cpsa/pipeline.py`). */
+const STATE_PERIOD_MS = 100;
+/** A cached WAV: HTTP round trip on loopback, file read and decode. */
+const CACHED_WAV_MS = 60;
+
+describe("T1 — responsiveness", () => {
+  it("speaks an object shown to an idle ARI within 1 s of the first detection", () => {
+    const spokenAt: Array<{ text: string; at: number }> = [];
+    let clock = 0;
+    const memory = new CognitiveMemory({ storage: null });
+    const agent = new CognitiveAgent({
+      engine: new CognitiveEngine(RULEBOOK, { rng: () => 0.5 }),
+      memory,
+      perception: new Perception(),
+      scene: new SceneMachine({ rng: () => 0.5 }),
+      speak: (text, handlers) => {
+        spokenAt.push({ text, at: clock });
+        handlers.onStart?.();
+        handlers.onEnd?.("ended");
+      },
+    });
+    const cup = detection("tazza", 41, [300, 200, 380, 300], 0.9);
+    const shownAt = 6_000;
+    // The real cadence: frames at 10 Hz, the heartbeat at HEARTBEAT_MS.
+    for (clock = 0; clock <= shownAt + 2_000; clock += HEARTBEAT_MS) {
+      if (clock % STATE_PERIOD_MS === 0) {
+        agent.onShowcase(showcase(clock >= shownAt ? [cup] : []), clock);
+      }
+      agent.tick(clock);
+    }
+    const line = spokenAt.find((entry) => /tazza/i.test(entry.text));
+    expect(line).toBeDefined();
+    expect(line!.at + CACHED_WAV_MS - shownAt).toBeLessThanOrEqual(1_000);
+  });
+
+  it("hands the line waiting for the gap to the voice before it is spoken", () => {
+    const prefetched: Array<{ texts: string[]; at: number }> = [];
+    const spokenAt: Array<{ text: string; at: number }> = [];
+    let clock = 0;
+    const agent = new CognitiveAgent({
+      engine: new CognitiveEngine(pick("object.tazza", "person.single"), { rng: () => 0.5 }),
+      memory: new CognitiveMemory({ storage: null }),
+      perception: new Perception(),
+      speak: (text, handlers) => {
+        spokenAt.push({ text, at: clock });
+        handlers.onEnd?.("ended");
+      },
+      prefetch: (texts) => prefetched.push({ texts: [...texts], at: clock }),
+    });
+    const cup = detection("tazza", 41, [300, 200, 380, 300], 0.9);
+    for (clock = 0; clock <= 12_000; clock += HEARTBEAT_MS) {
+      const objects = clock >= 6_800 ? [cup, person(20)] : clock >= 6_000 ? [cup] : [];
+      agent.onShowcase(showcase(objects), clock);
+      agent.tick(clock);
+    }
+    const said = spokenAt.find((entry) => /ciao/i.test(entry.text));
+    expect(said).toBeDefined();
+    // The greeting was queued inside the 2 s gap after the cup line: the voice
+    // got it at once, before the gap released it, and only once.
+    const warmed = prefetched.filter((entry) => entry.texts.includes(said!.text));
+    expect(warmed).toHaveLength(1);
+    expect(warmed[0].at).toBeLessThan(said!.at);
+  });
+});
+

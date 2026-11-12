@@ -41,10 +41,11 @@ export interface PerceptionOptions {
 }
 
 export const DEFAULT_PERCEPTION_OPTIONS: PerceptionOptions = {
-  enterFrames: 6,
-  windowFrames: 10,
-  absenceMs: 2_000,
-  countSettleMs: 1_500,
+  // ~0.4 s at the board's ~10 Hz showcase.state: quick, still debounced (T1).
+  enterFrames: 4,
+  windowFrames: 6,
+  absenceMs: 1_500,
+  countSettleMs: 800,
   warmupMs: 3_000,
   sceneryContinuousMs: 120_000,
   sceneryReturnMs: 30_000,

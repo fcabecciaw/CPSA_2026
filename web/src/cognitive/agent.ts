@@ -40,12 +40,24 @@ export interface AgentOptions {
   scene?: SceneMachine;
   /** Speak one sentence; `main.ts` bridges this to `VoiceEngine`. */
   speak?: (text: string, handlers: SpeechHandlers) => void;
+  /**
+   * Warm the audio of lines that are about to be said: the line the engine
+   * already selected (waiting for the gap) and the scene's next nudge.
+   * `main.ts` bridges this to `VoiceEngine.prefetch`; called only on change.
+   */
+  prefetch?: (texts: readonly string[]) => void;
   onUtterance?: (utterance: Utterance, mind: MindSnapshot) => void;
   onExpression?: (expression: Expression) => void;
   onMind?: (mind: MindSnapshot) => void;
 }
 
 const SELF_FACT_MS = 20_000;
+
+/**
+ * Period of the cognitive heartbeat (`tick`) the dashboard should use: 100 ms
+ * keeps the gap, the queue and the scene timers within a tenth of a second.
+ */
+export const HEARTBEAT_MS = 100;
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -65,6 +77,8 @@ export class CognitiveAgent {
   private lastUtterance: Utterance | null = null;
   private speechTimer: TimerHandle | null = null;
   private readonly speechTimers = new Set<TimerHandle>();
+  /** The last list handed to `prefetch`, so the same lines are not re-sent. */
+  private prefetched = "";
 
   /** Face cues come from the laptop browser, never from the board (R2-D). */
   private faceStatus = "spento";
@@ -190,7 +204,7 @@ export class CognitiveAgent {
     return [];
   }
 
-  /** 250 ms heartbeat: dwell/idle/pairs, expression decay, speech pump. */
+  /** `HEARTBEAT_MS` heartbeat: dwell/idle/pairs, expression decay, speech pump. */
   tick(now: number): CognitiveEvent[] {
     if (!this.started) {
       this.begin(now);
@@ -313,7 +327,27 @@ export class CognitiveAgent {
       }
       this.options.onUtterance?.(utterance, this.mind);
     }
+    this.warm();
     this.options.onMind?.(this.mind);
+  }
+
+  /** Hand the selected-but-waiting line and the scene's next nudge to the voice. */
+  private warm(): void {
+    const prefetch = this.options.prefetch;
+    if (prefetch === undefined) {
+      return;
+    }
+    const texts = [
+      ...new Set([...this.engine.upcoming(this.memory), ...this.scene.upcoming(this.memory)]),
+    ];
+    const key = texts.join("\n");
+    if (key === this.prefetched) {
+      return;
+    }
+    this.prefetched = key;
+    if (texts.length > 0) {
+      prefetch(texts);
+    }
   }
 
   /** Ask the scene machine what it wants to say; the engine decides when. */

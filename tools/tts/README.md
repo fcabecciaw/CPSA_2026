@@ -90,7 +90,7 @@ curl -s http://127.0.0.1:8765/pregenerate
 | `GET` | `/health` | stato, motori (disponibile/carico/device), cache, ultime misure, avanzamento della pre-generazione |
 | `GET` | `/voices` | motori, licenze, device, voci selezionabili |
 | `POST` | `/tts` | `{"text": str, "engine"?: str, "voice"?: str}` → `audio/wav` |
-| `PUT` | `/default` | `{"engine": str, "voice": str}` → la nuova coppia predefinita, salvata in `<cache>/default.json` |
+| `PUT` | `/default` | `{"engine": str, "voice": str, "speed"?: float}` → la nuova coppia predefinita (e la velocità di XTTS, 0.5–2.0), salvata in `<cache>/default.json` |
 | `POST` | `/pregenerate` | `{"engine"?: str, "voice"?: str}` → `202` con lo stato del riempimento; `409` se un job è già in corso |
 | `GET` | `/pregenerate` | `{running, engine, voice, total, done, synthesized, cached, failed, error, started_at, finished_at, elapsed_s}` |
 
@@ -104,8 +104,17 @@ Ogni risposta contiene gli header `X-TTS-Engine`, `X-TTS-Voice`,
 non validi, `409` se un riempimento è già in corso, `422` per un corpo malformato,
 `502` se il motore fallisce (per `edge` significa quasi sempre "senza internet").
 
+Prima della sintesi ogni frase passa per `cpsa_tts/text.py` (`normalize`), così
+la voce non legge mai la punteggiatura: `…`/`...`, `:` e `;` diventano una
+virgola, `×` diventa "per", virgolette, «», parentesi, asterischi ed emoji
+spariscono, `!!`/`?!` diventano un solo segno e, per XTTS, il punto finale viene
+tolto (`?` e `!` restano per l'intonazione). XTTS sintetizza poi una frase alla
+volta senza il punto finale di ciascuna, con una pausa di 0,14 s invece dei
+0,42 s di Coqui.
+
 La cache sta in `~/.cache/cpsa-tts/` con nome
-`sha1(engine, voice, text).wav`: il testo non viene mai scritto su disco. Le
+`sha1(engine, voice, testo normalizzato[, speed]).wav` (la velocità solo per
+XTTS: un'altra velocità è un altro WAV): il testo non viene mai scritto su disco. Le
 richieste identiche concorrenti sintetizzano una volta sola, e i file sono scritti
 in modo atomico. Ogni motore produce lo stesso formato (mono, 24 kHz, PCM 16 bit)
 anche quando l'endpoint restituisce altro: `edge` arriva in MP3 e viene
@@ -129,27 +138,33 @@ Origini ammesse: `http://10.42.0.83:8080` (dashboard) e
 | `CPSA_TTS_CACHE_DIR` | `~/.cache/cpsa-tts` | cache WAV e `default.json` |
 | `CPSA_TTS_KOKORO_DEVICE` | `cpu` | device di Kokoro (`cuda` per provarlo sulla GPU) |
 | `CPSA_TTS_XTTS_DEVICE` | `auto` | `auto`, `cuda` o `cpu` |
-| `CPSA_TTS_XTTS_SPEED` | `1.0` | velocità di XTTS |
+| `CPSA_TTS_XTTS_SPEED` | `1.15` | velocità di XTTS (0.5–2.0; `PUT /default` con `speed` ha la precedenza) |
 | `CPSA_TTS_EDGE_RATE` | `+0%` | velocità delle voci Microsoft (`-5%`, `+10%`, …) |
 | `CPSA_TTS_ALLOWED_ORIGINS` | le due origini sopra | CORS, separate da virgole |
 | `CPSA_TTS_LOG_LEVEL` | `INFO` | log |
 | `CPSA_TTS_SAMPLES_DIR` | `<repo>/build/tts-samples` | dove scrive `samples` |
 
-## Pre-generazione delle frasi fisse
+## Pre-generazione di tutte le frasi
 
-La dashboard parla soprattutto con frasi fisse: 100 frasi del rulebook senza slot,
-40 fatti, 57 battute delle scene (`SCENE_PHRASES` in `scene.ts`: saluti, inviti,
-reazioni; quelle uguali a una frase del rulebook contano una volta sola) e 36
-frasi del gioco delle domande (`content/questions.ts`: 7 domande con le risposte
-sì/no), 233 in tutto. `pregenerate` le estrae dai sorgenti
-TypeScript, esporta `build/phrases.json` e riempie la cache:
+Tutto ciò che ARI può dire e che si conosce in anticipo va in cache. La dashboard
+stessa esporta il catalogo con la sua grammatica (`web/src/cognitive/speechcatalog.ts`):
+scene, domande, fatti e frasi fisse del rulebook, poi le varianti con slot già
+declinate (righe degli oggetti per tutte le 80 classi, singolare e 2–3 esemplari;
+conteggi 2..8 per le 34 classi da stand; saluti di gruppo per 3..8 persone;
+saluti dell'ora). Circa 5000 frasi, in ordine di priorità
+(`scene`, `indoor`, `counts`, `rest`):
 
 ```sh
-uv run cpsa-tts pregenerate                        # motore predefinito, ~1 min
-uv run cpsa-tts pregenerate --engine xtts --voice ana_florence   # la voce della demo, ~4 min
-uv run cpsa-tts pregenerate --engine edge --voice it-IT-IsabellaNeural
+(cd ../../web && node scripts/export-speech.mjs)   # -> <repo>/build/speech-catalog.json
+uv run cpsa-tts pregenerate --engine xtts --voice ana_florence   # usa il catalogo se c'è
 uv run cpsa-tts pregenerate --dry-run              # solo phrases.json
 ```
+
+Senza `build/speech-catalog.json` (o con `--catalog` per un altro file)
+`pregenerate` ricade sulle sole frasi fisse estratte dai sorgenti TypeScript (100
+del rulebook e 40 fatti). Il riempimento salta ciò che è già in cache e si può
+interrompere e riprendere; il log stampa l'avanzamento ogni 50 frasi con il
+tempo rimanente.
 
 Dalla dashboard (e in generale via HTTP) lo stesso riempimento si lancia in
 sottofondo, senza bloccare la pagina e con l'avanzamento in `GET /pregenerate`:
@@ -166,10 +181,11 @@ scriverebbero la stessa cache e caricherebbero due volte lo stesso modello. Se i
 motore `edge` è offline il job si ferma alla prima frase e riporta l'errore;
 quello che era già in cache resta.
 
-Il parsing è in `cpsa_tts/phrases.py`: nessuna dipendenza da Node. Se il rulebook,
-i fatti, le scene o le domande cambiano, `tests/test_phrases.py` fallisce sui conteggi fissati e ricorda di
-rieseguire la pre-generazione. Le frasi con slot (`{oggetto}`, `{n}`, `{ora}`,
-`{dpu}`, …) sono escluse: si sintetizzano alla prima occorrenza e restano in cache.
+Il parsing di riserva è in `cpsa_tts/phrases.py` (nessuna dipendenza da Node). Se
+il rulebook cambia, `tests/test_phrases.py` fallisce sui conteggi fissati e
+ricorda di rieseguire export e pre-generazione. Le frasi con un numero aperto
+(`{totale}`, `{fps}`, `{dpu}`, `{minuti}`) non sono nel catalogo: si sintetizzano
+alla prima occorrenza e restano in cache.
 
 ## Ascolto comparato (scegliere la voce a orecchio)
 

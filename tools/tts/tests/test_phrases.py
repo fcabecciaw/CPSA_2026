@@ -129,3 +129,45 @@ def test_write_phrases_is_utf8_and_json_readable(tmp_path: Path) -> None:
 def test_collect_fails_loudly_without_sources(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="no phrases"):
         collect(tmp_path)
+
+
+def test_collect_for_cache_prefers_the_speech_catalog(tmp_path) -> None:
+    from cpsa_tts.phrases import collect_for_cache, load_catalog
+
+    catalog = tmp_path / "speech-catalog.json"
+    catalog.write_text(
+        json.dumps(
+            {
+                "lines": [
+                    {"text": "Ciao! Che piacere vederti.", "group": "scene", "source": "scene.X"},
+                    {"text": "Vedo la tazza. Caffè o tè?", "group": "indoor", "source": "object"},
+                    {"text": "Vedo la tazza. Caffè o tè?", "group": "rest", "source": "dup"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = load_catalog(catalog)
+    assert [(row.source, row.text) for row in rows] == [
+        ("scene", "Ciao! Che piacere vederti."),
+        ("indoor", "Vedo la tazza. Caffè o tè?"),
+    ]
+    document = collect_for_cache(repo_root(), catalog)
+    texts = [phrase.text for phrase in document.phrases]
+    # Catalog first, in its order; then the fixed phrases it does not list.
+    assert texts[:2] == ["Ciao! Che piacere vederti.", "Vedo la tazza. Caffè o tè?"]
+    assert len(texts) == len(set(texts))
+    assert set(texts) >= {phrase.text for phrase in collect(repo_root()).phrases}
+
+
+def test_collect_for_cache_without_a_catalog_is_the_fixed_phrases(tmp_path) -> None:
+    from cpsa_tts.phrases import collect_for_cache
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "web").symlink_to(repo_root() / "web")
+    assert [p.text for p in collect_for_cache(root).phrases] == [
+        p.text for p in collect(repo_root()).phrases
+    ]
+    with pytest.raises(FileNotFoundError):
+        collect_for_cache(root, tmp_path / "missing.json")

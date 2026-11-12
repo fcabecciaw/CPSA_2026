@@ -741,3 +741,47 @@ describe("fixed demo voice", () => {
     expect(voice.serviceInfo()).toMatchObject({ engine: "edge", voice: "it-IT-ElsaNeural" });
   });
 });
+
+describe("T1 — prefetch", () => {
+  it("requests a line ahead and speaks it without a second request", async () => {
+    const tts = new FakeTts();
+    const sink = new FakeSink();
+    const voice = makeVoice(tts, sink);
+    await flush();
+    voice.activate();
+
+    voice.prefetch(["Ciao a tutti! Siete in tre.", "Vieni più vicino, non mordo!", "C'è qualcuno?"]);
+    // At most two requests in flight: the third line waits for a later call.
+    expect(tts.calls).toEqual([
+      "kokoro/if_sara/Ciao a tutti! Siete in tre.",
+      "kokoro/if_sara/Vieni più vicino, non mordo!",
+    ]);
+    await flush();
+
+    expect(voice.speak("Ciao a tutti! Siete in tre.")).toBe(true);
+    await flush();
+    expect(tts.calls).toHaveLength(2);
+    expect(sink.played).toBe(1);
+  });
+
+  it("asks again when the prefetch failed, and skips a muted tab", async () => {
+    const tts = new FakeTts();
+    const sink = new FakeSink();
+    const voice = makeVoice(tts, sink);
+    await flush();
+    voice.activate();
+
+    tts.fail = true;
+    voice.prefetch(["Ciao!"]);
+    await flush();
+    tts.fail = false;
+    expect(voice.speak("Ciao!")).toBe(true);
+    await flush();
+    expect(tts.calls).toEqual(["kokoro/if_sara/Ciao!", "kokoro/if_sara/Ciao!"]);
+    expect(sink.played).toBe(1);
+
+    voice.setMuted(true);
+    voice.prefetch(["Altro"]);
+    expect(tts.calls).toHaveLength(2);
+  });
+});

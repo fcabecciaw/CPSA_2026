@@ -29,6 +29,8 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from .text import sentences
+
 log = logging.getLogger("cpsa_tts.engines")
 
 #: Silence inserted between the sentence chunks of one utterance.
@@ -42,6 +44,10 @@ class EngineError(RuntimeError):
 
 class UnknownEngineError(EngineError):
     """The engine id is not one of the configured engines."""
+
+
+class InvalidSpeedError(EngineError):
+    """A speaking rate out of range, or for an engine without one."""
 
 
 class UnknownVoiceError(EngineError):
@@ -86,6 +92,28 @@ class Engine(Protocol):
     def synthesize(self, text: str, voice: str) -> np.ndarray: ...
 
     def unload(self) -> None: ...
+
+
+#: XTTS speaking rates accepted from the environment and ``PUT /default``.
+SPEED_RANGE = (0.5, 2.0)
+
+
+def _valid_speed(value: float) -> float:
+    """A finite speed inside :data:`SPEED_RANGE`, else ``EngineError``."""
+    low, high = SPEED_RANGE
+    try:
+        speed = float(value)
+    except (TypeError, ValueError) as error:
+        raise InvalidSpeedError(f"speed must be a number, got {value!r}") from error
+    if not low <= speed <= high:
+        raise InvalidSpeedError(f"speed must be between {low} and {high}, got {speed}")
+    return round(speed, 2)
+
+
+def engine_speed(engine: object) -> float | None:
+    """The speaking rate of an engine that has one (part of the cache key)."""
+    speed = getattr(engine, "speed", None)
+    return float(speed) if isinstance(speed, int | float) else None
 
 
 def _join(chunks: list[np.ndarray], sample_rate: int) -> np.ndarray:
@@ -204,7 +232,7 @@ class XttsEngine:
     def __init__(self, device: str = "auto", speed: float = 1.0) -> None:
         self._requested_device = device
         self._device = "cpu"
-        self._speed = speed
+        self._speed = _valid_speed(speed)
         self._tts: Any = None
         self._lock = threading.Lock()
 
@@ -217,6 +245,15 @@ class XttsEngine:
     @property
     def loaded(self) -> bool:
         return self._tts is not None
+
+    @property
+    def speed(self) -> float:
+        """Speaking rate passed to XTTS (``1.0`` is the model's own pace)."""
+        return self._speed
+
+    @speed.setter
+    def speed(self, value: float) -> None:
+        self._speed = _valid_speed(value)
 
     def dependencies_available(self) -> bool:
         return importlib.util.find_spec("TTS") is not None
@@ -260,20 +297,28 @@ class XttsEngine:
         tts = self._tts
         assert tts is not None
         speaker = self.speakers[voice][0]
+        # One call per sentence, as Coqui's own splitter does, but without the
+        # sentence-final "." (XTTS sometimes voices it) and with the short
+        # CHUNK_GAP_S pause instead of Coqui's 0.42 s padding after each one.
+        chunks: list[np.ndarray] = []
         with self._lock:
+            speed = self._speed
             try:
                 import torch
 
                 with torch.inference_mode():
-                    audio = tts.tts(
-                        text=text,
-                        speaker=speaker,
-                        language=self.language,
-                        speed=self._speed,
-                    )
+                    for sentence in sentences(text) or [text]:
+                        audio = tts.tts(
+                            text=sentence.rstrip(".").rstrip() or sentence,
+                            speaker=speaker,
+                            language=self.language,
+                            speed=speed,
+                            split_sentences=False,
+                        )
+                        chunks.append(_as_float32(audio))
             except Exception as error:  # noqa: BLE001 - reported as a 502
                 raise EngineError(f"XTTS synthesis failed: {error}") from error
-        samples = _as_float32(audio)
+        samples = _join(chunks, self.sample_rate)
         if samples.size == 0:
             raise EngineError("XTTS returned no audio")
         return samples
@@ -548,8 +593,24 @@ class EngineRegistry:
             return engine, voices[self._default_voice]
         return engine, next(iter(voices.values()))
 
-    def defaults(self) -> dict[str, str]:
-        return {"engine": self._default_engine, "voice": self._default_voice}
+    def defaults(self) -> dict[str, Any]:
+        """Default engine and voice, plus its speaking rate when it has one."""
+        defaults: dict[str, Any] = {"engine": self._default_engine, "voice": self._default_voice}
+        speed = engine_speed(self.default_engine())
+        if speed is not None:
+            defaults["speed"] = speed
+        return defaults
+
+    def check_speed(self, engine_id: str, speed: float) -> float:
+        """The validated speaking rate for an engine that has one (XTTS)."""
+        if engine_speed(self.get(engine_id)) is None:
+            raise InvalidSpeedError(f"{engine_id} has no adjustable speed")
+        return _valid_speed(speed)
+
+    def set_speed(self, engine_id: str, speed: float) -> None:
+        """Change the speaking rate of an engine that has one (XTTS)."""
+        valid = self.check_speed(engine_id, speed)
+        self.get(engine_id).speed = valid  # type: ignore[attr-defined]
 
     def default_engine(self) -> Engine:
         return self._engines[self._default_engine]

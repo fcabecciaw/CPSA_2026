@@ -369,3 +369,85 @@ def test_cors_allows_the_voice_picker_methods(tmp_path, engine) -> None:
         assert response.headers["access-control-allow-origin"] == "http://10.42.0.83:8080"
         assert response.headers["access-control-allow-private-network"] == "true"
         assert method in response.headers["access-control-allow-methods"]
+
+
+class SpeedEngine(FakeEngine):
+    """A fake engine with an adjustable speaking rate, like XTTS."""
+
+    id = "xtts"
+    voices = (Voice(id="ana_florence", name="Ana", lang="it", gender="female"),)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.speed = 1.15
+
+
+def make_speed_app(tmp_path: Path, engine: SpeedEngine) -> TestClient:
+    settings = Settings(cache_dir=tmp_path / "cache", default_engine="xtts")
+    registry = EngineRegistry()
+    registry.register(engine)
+    registry.set_defaults("xtts", "ana_florence")
+    return TestClient(create_app(settings=settings, registry=registry))
+
+
+def test_tts_speaks_the_normalized_text_and_shares_its_cache(tmp_path) -> None:
+    engine = SpeedEngine()
+    client = make_speed_app(tmp_path, engine)
+    first = client.post("/tts", json={"text": "Sembra un'auto… dico bene?"})
+    assert first.status_code == 200
+    assert first.headers["x-tts-cache"] == "miss"
+    assert engine.calls == [("Sembra un'auto, dico bene?", "ana_florence")]
+    # Another spelling of the same spoken sentence is the same cache entry.
+    second = client.post("/tts", json={"text": "Sembra un'auto... dico bene?!"})
+    assert second.headers["x-tts-cache"] == "hit"
+    client.post("/tts", json={"text": "Ciao a tutti! Siete in 3."})
+    assert engine.calls[-1] == ("Ciao a tutti! Siete in 3", "ana_florence")
+
+
+def test_tts_rejects_text_that_normalizes_to_nothing(tmp_path, engine) -> None:
+    client, _ = make_app(tmp_path, engine)
+    response = client.post("/tts", json={"text": "«…»"})
+    assert response.status_code == 400
+    assert engine.calls == []
+
+
+def test_speed_is_part_of_the_cache_key_and_set_by_put_default(tmp_path) -> None:
+    engine = SpeedEngine()
+    client = make_speed_app(tmp_path, engine)
+    assert client.get("/health").json()["defaults"] == {
+        "engine": "xtts",
+        "voice": "ana_florence",
+        "speed": 1.15,
+    }
+    assert client.post("/tts", json={"text": "Ciao"}).headers["x-tts-cache"] == "miss"
+    assert client.post("/tts", json={"text": "Ciao"}).headers["x-tts-cache"] == "hit"
+
+    response = client.put(
+        "/default", json={"engine": "xtts", "voice": "ana_florence", "speed": 1.3}
+    )
+    assert response.status_code == 200
+    assert response.json()["defaults"]["speed"] == 1.3
+    assert engine.speed == 1.3
+    store = DefaultStore(tmp_path / "cache" / "default.json")
+    assert store.read() == {"engine": "xtts", "voice": "ana_florence", "speed": 1.3}
+    # Same sentence, new speed: a new WAV.
+    assert client.post("/tts", json={"text": "Ciao"}).headers["x-tts-cache"] == "miss"
+    assert len(engine.calls) == 2
+
+    # A restart adopts the persisted speed.
+    restarted_engine = SpeedEngine()
+    make_speed_app(tmp_path, restarted_engine)
+    assert restarted_engine.speed == 1.3
+
+
+def test_put_default_rejects_a_bad_speed(tmp_path, engine) -> None:
+    speedy = SpeedEngine()
+    client = make_speed_app(tmp_path, speedy)
+    too_fast = client.put("/default", json={"engine": "xtts", "voice": "ana_florence", "speed": 5})
+    assert too_fast.status_code == 400
+    assert speedy.speed == 1.15
+    assert not (tmp_path / "cache" / "default.json").exists()
+
+    plain, _ = make_app(tmp_path / "plain", engine)
+    no_rate = plain.put("/default", json={"engine": "fake", "voice": "fake_sara", "speed": 1.2})
+    assert no_rate.status_code == 400

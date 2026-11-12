@@ -385,3 +385,31 @@ describe("F-E4 #13 — scenes and rules share the one voice", () => {
     expect(engine.tick(4_000, day)?.text).toBe(second!.text);
   });
 });
+
+describe("T1 — lines to warm up", () => {
+  it("names the Attract nudge before it is due, and nothing in between", () => {
+    const machine = new SceneMachine({ rng: () => 0, attractMinMs: 0, attractMaxMs: 0 });
+    machine.reset(0);
+    const day = memory();
+    const upcoming: number[] = [];
+    for (let step = 0; step < 4; step += 1) {
+      upcoming.push(machine.upcoming(day).length);
+      const line = machine.step(step * 1_000, day, world());
+      say(machine, line!, day, step * 1_000);
+    }
+    // Before the 4th idle line (the nudge) the voice gets every invitation.
+    expect(upcoming).toEqual([0, 0, 0, SCENE_PHRASES.INVITATIONS.length]);
+  });
+
+  it("names the introduction and the invitation while Engage runs", () => {
+    const machine = new SceneMachine({ rng: () => 0, engageStepMs: 1_000 });
+    machine.reset(0);
+    const day = memory();
+    const greeting = machine.step(0, day, world({ people: 1 }));
+    expect(greeting?.kind).toBe("greeting");
+    expect(machine.upcoming(day)).toEqual([
+      ...SCENE_PHRASES.INTRO,
+      ...SCENE_PHRASES.PROMPTS_YOLOX,
+    ]);
+  });
+});

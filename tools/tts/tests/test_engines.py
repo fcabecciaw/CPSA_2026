@@ -192,3 +192,45 @@ def test_registry_wraps_a_load_failure() -> None:
 def test_cache_shared_by_cli_and_service(tmp_path) -> None:
     cache = WavCache(tmp_path)
     assert cache.directory == tmp_path
+
+
+def test_xtts_speed_default_env_and_range(monkeypatch) -> None:
+    from cpsa_tts.engines import InvalidSpeedError, XttsEngine
+
+    assert Settings().xtts_speed == 1.15
+    monkeypatch.setenv("CPSA_TTS_XTTS_SPEED", "1.2")
+    assert Settings.from_env().xtts_speed == 1.2
+    registry = EngineRegistry(xtts_speed=1.15, default_engine="xtts", default_voice="ana_florence")
+    assert registry.defaults() == {"engine": "xtts", "voice": "ana_florence", "speed": 1.15}
+    with pytest.raises(InvalidSpeedError):
+        XttsEngine(speed=3.0)
+    with pytest.raises(InvalidSpeedError):
+        registry.set_speed("kokoro", 1.2)
+
+
+def test_xtts_speaks_sentence_by_sentence_without_final_periods() -> None:
+    from cpsa_tts.engines import CHUNK_GAP_S, XttsEngine
+
+    class FakeCoqui:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def tts(self, **kwargs: object) -> list[float]:
+            self.calls.append(kwargs)
+            return [0.1] * 2_400
+
+    engine = XttsEngine(device="cpu", speed=1.15)
+    fake = FakeCoqui()
+    engine._tts = fake  # loaded: synthesize must not import Coqui
+    samples = engine.synthesize(
+        "Psst! Sì, dico proprio a te. Vieni a dare un'occhiata!", "ana_florence"
+    )
+    assert [call["text"] for call in fake.calls] == [
+        "Psst!",
+        "Sì, dico proprio a te",
+        "Vieni a dare un'occhiata!",
+    ]
+    assert {call["speed"] for call in fake.calls} == {1.15}
+    assert {call["split_sentences"] for call in fake.calls} == {False}
+    gap = int(24_000 * CHUNK_GAP_S)
+    assert samples.size == 3 * 2_400 + 2 * gap

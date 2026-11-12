@@ -5,14 +5,16 @@ Contract used by the dashboard (frozen by R2-V):
 - ``GET  /health``  -> readiness, engines, cache and last-request statistics.
 - ``GET  /voices``  -> engines, licences, devices and selectable voices.
 - ``POST /tts``     -> ``{text, engine?, voice?}`` answered with ``audio/wav``.
-- ``PUT  /default`` -> ``{engine, voice}``: the default used when a request omits
-  them, persisted in ``<cache dir>/default.json``.
+- ``PUT  /default`` -> ``{engine, voice, speed?}``: the default used when a
+  request omits them (and the XTTS speaking rate), persisted in
+  ``<cache dir>/default.json``.
 - ``POST /pregenerate`` -> ``{engine?, voice?}`` starts a background fill of the
   fixed dashboard sentences; ``GET /pregenerate`` reports its progress.
 
-Every synthesized sentence is cached on disk under
-``~/.cache/cpsa-tts/<sha1(engine, voice, text)>.wav``; a cache hit costs one
-file read. Synthesis runs in a worker thread so the event loop stays free.
+Every sentence is normalized first (:func:`cpsa_tts.text.normalize`: no
+punctuation read aloud) and cached on disk under
+``~/.cache/cpsa-tts/<sha1(engine, voice, text[, speed])>.wav``; a cache hit
+costs one file read. Synthesis runs in a worker thread so the event loop stays free.
 """
 
 from __future__ import annotations
@@ -36,11 +38,14 @@ from .engines import (
     Engine,
     EngineError,
     EngineRegistry,
+    InvalidSpeedError,
     UnknownEngineError,
     UnknownVoiceError,
     Voice,
+    engine_speed,
 )
 from .pregenerate import JobRunningError, PregenerateJob
+from .text import normalize
 
 log = logging.getLogger("cpsa_tts.service")
 
@@ -57,10 +62,14 @@ class TtsRequest(BaseModel):
 
 
 class DefaultRequest(BaseModel):
-    """Body of ``PUT /default``: both fields are required and validated."""
+    """Body of ``PUT /default``: engine and voice are required and validated.
+
+    ``speed`` (XTTS only) changes the speaking rate; omitted, it is kept.
+    """
 
     engine: str = Field(min_length=1)
     voice: str = Field(min_length=1)
+    speed: float | None = None
 
 
 class PregenerateRequest(BaseModel):
@@ -160,6 +169,7 @@ def create_app(
 
     @app.exception_handler(UnknownEngineError)
     @app.exception_handler(UnknownVoiceError)
+    @app.exception_handler(InvalidSpeedError)
     async def _unknown(_: Request, error: Exception) -> JSONResponse:
         stats.errors += 1
         return JSONResponse({"error": str(error)}, status_code=400)
@@ -203,9 +213,15 @@ def create_app(
     @app.put("/default")
     async def set_default(body: DefaultRequest) -> dict[str, Any]:
         """Change the default engine/voice of every request that omits them."""
+        # Validate the speed first: a rejected request changes nothing.
+        if body.speed is not None:
+            registry.check_speed(body.engine, body.speed)
         registry.set_defaults(body.engine, body.voice)
-        path = store.write(body.engine, body.voice)
-        log.info("default voice -> %s/%s (%s)", body.engine, body.voice, path)
+        if body.speed is not None:
+            registry.set_speed(body.engine, body.speed)
+        speed = engine_speed(registry.get(body.engine))
+        path = store.write(body.engine, body.voice, speed)
+        log.info("default voice -> %s/%s speed=%s (%s)", body.engine, body.voice, speed, path)
         return {"defaults": registry.defaults(), "defaults_file": str(path)}
 
     @app.post("/pregenerate")
@@ -225,21 +241,22 @@ def create_app(
 
     @app.post("/tts")
     async def synthesize(body: TtsRequest) -> Response:
-        text = body.text.strip()
-        if not text:
-            stats.errors += 1
-            return JSONResponse({"error": "text is empty"}, status_code=400)
-        if len(text) > settings.max_text_chars:
+        if len(body.text) > settings.max_text_chars:
             stats.errors += 1
             return JSONResponse(
                 {"error": f"text is longer than {settings.max_text_chars} characters"},
                 status_code=400,
             )
         engine, voice = registry.resolve(body.engine, body.voice)
+        text = normalize(body.text, engine.id)
+        if not text:
+            stats.errors += 1
+            return JSONResponse({"error": "text is empty"}, status_code=400)
         stats.requests += 1
-        key = cache_key(engine.id, voice.id, text)
+        speed = engine_speed(engine)
+        key = cache_key(engine.id, voice.id, text, speed)
 
-        cached = wav_cache.read(engine.id, voice.id, text)
+        cached = wav_cache.read(engine.id, voice.id, text, speed)
         if cached is not None:
             stats.cache_hits += 1
             stats.last = _last(engine, voice, text, 0.0, "hit")
@@ -248,7 +265,7 @@ def create_app(
         lock = locks.get(key)
         async with lock:
             # Another request may have filled the cache while we waited.
-            cached = wav_cache.read(engine.id, voice.id, text)
+            cached = wav_cache.read(engine.id, voice.id, text, speed)
             if cached is not None:
                 stats.cache_hits += 1
                 stats.last = _last(engine, voice, text, 0.0, "hit")
@@ -264,7 +281,7 @@ def create_app(
             except Exception as error:  # noqa: BLE001 - a model crash is a 502
                 raise EngineError(f"{engine.id} synthesis failed: {error}") from error
             elapsed_ms = (time.perf_counter() - started) * 1_000
-            wav_cache.write(engine.id, voice.id, text, samples, engine.sample_rate)
+            wav_cache.write(engine.id, voice.id, text, samples, engine.sample_rate, speed)
             payload = wav_bytes(samples, engine.sample_rate)
 
         stats.synth_runs += 1

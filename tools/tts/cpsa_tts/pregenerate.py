@@ -17,8 +17,9 @@ from datetime import UTC, datetime
 
 from .cache import WavCache
 from .config import repo_root
-from .engines import Engine, EngineError, Voice
-from .phrases import Phrase, collect
+from .engines import Engine, EngineError, Voice, engine_speed
+from .phrases import Phrase, collect_for_cache
+from .text import normalize
 
 log = logging.getLogger("cpsa_tts.pregenerate")
 
@@ -108,7 +109,7 @@ class PregenerateJob:
     def _phrase_rows(self) -> Sequence[Phrase]:
         if self.phrases is not None:
             return self.phrases()
-        return collect(repo_root()).phrases
+        return collect_for_cache(repo_root()).phrases
 
     # ------------------------------------------------------------------ worker
 
@@ -116,12 +117,14 @@ class PregenerateJob:
         began = time.monotonic()
         try:
             engine.load()
+            speed = engine_speed(engine)
             for phrase in rows:
-                if self.cache.has(engine.id, voice.id, phrase.text):
+                text = normalize(phrase.text, engine.id)
+                if not text or self.cache.has(engine.id, voice.id, text, speed):
                     self._bump(cached=True)
                     continue
                 try:
-                    samples = engine.synthesize(phrase.text, voice.id)
+                    samples = engine.synthesize(text, voice.id)
                 except EngineError as error:
                     # An offline engine would fail on every sentence: stop at the
                     # first one and say why; the cache keeps what already exists.
@@ -131,7 +134,7 @@ class PregenerateJob:
                         self._state.done = self._state.total
                     log.warning("pregenerate %s/%s: %s", engine.id, voice.id, error)
                     return
-                self.cache.write(engine.id, voice.id, phrase.text, samples, engine.sample_rate)
+                self.cache.write(engine.id, voice.id, text, samples, engine.sample_rate, speed)
                 self._bump(synthesized=True)
         finally:
             with self._lock:

@@ -2,8 +2,8 @@
  * Production-rule engine of the cognitive layer (F-E3 `rules.ts`).
  *
  * One utterance at a time, at most one queued (priority ≥ 80), re-validated
- * just before it is spoken and dropped after 3 s; a global gap between
- * utterances (4 s, 8 s in crowd mode); per-rule and per-object cooldowns;
+ * just before it is spoken and dropped after 2 s; a global gap between
+ * utterances (2 s, 5 s in crowd mode); per-rule and per-object cooldowns;
  * ACT-R-like novelty and habituation in the utility; variants never repeat the
  * previous line of the same rule (F-E4 #6, #13, #14). The engine is pure: the
  * caller gives it the clock and a random source.
@@ -91,7 +91,7 @@ export interface Utterance {
 /**
  * One sentence a scene wants to say, already phrased (`scene.ts`). The engine
  * still owns the voice: it gates the line with the global gap, the single
- * in-flight utterance, the one queue slot and the 3 s expiry (F-E4 #13), so
+ * in-flight utterance, the one queue slot and the 2 s expiry (F-E4 #13), so
  * scenes and rulebook rules can never speak at the same time.
  */
 export interface SceneLine {
@@ -141,9 +141,9 @@ export interface EngineOptions {
 
 const DEFAULTS: Required<EngineOptions> = {
   rng: Math.random,
-  gapMs: 4_000,
-  crowdGapMs: 8_000,
-  queueExpiryMs: 3_000,
+  gapMs: 2_000,
+  crowdGapMs: 5_000,
+  queueExpiryMs: 2_000,
   pendingExpiryMs: 1_000,
   queuePriority: 80,
   noise: 1,
@@ -240,7 +240,9 @@ export function renderRulePhrase(
   const rendered = rule.phrases.map((phrase) => renderPhrase(phrase, slots));
   const fresh = rendered.filter((text) => text !== previous);
   const pool = fresh.length > 0 ? fresh : rendered;
-  const index = Math.min(pool.length - 1, Math.floor(memory.rule(rule.id).count % pool.length));
+  // `fireCount` reads the day without creating an entry, so a preview
+  // (`CognitiveEngine.upcoming`) renders exactly what `speak` will say.
+  const index = Math.min(pool.length - 1, Math.floor(memory.fireCount(rule.id) % pool.length));
   return pool[index];
 }
 
@@ -360,6 +362,26 @@ export class CognitiveEngine {
     } else if (this.pending === null || candidate.utility > this.pending.utility) {
       this.pending = { ...candidate, seenAt: now };
     }
+  }
+
+  /**
+   * The sentences already selected but still waiting for the gap or the voice
+   * (queue slot first, then the pending candidate), so the voice can fetch
+   * their audio before `tick` releases them. Pure: nothing is consumed.
+   */
+  upcoming(memory: CognitiveMemory): string[] {
+    const texts: string[] = [];
+    for (const candidate of [this.queue?.candidate ?? null, this.pending]) {
+      if (candidate === null) {
+        continue;
+      }
+      texts.push(
+        candidate.scene !== undefined
+          ? candidate.scene.text
+          : renderRulePhrase(candidate.rule, candidate.event, memory),
+      );
+    }
+    return texts;
   }
 
   /** Choose the next utterance, if the gap and the queue allow one. */

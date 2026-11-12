@@ -13,7 +13,7 @@
  *
  * The machine only *decides what to say and when*: every line is offered to
  * `CognitiveEngine.offerScene`, which keeps the single voice, the global gap,
- * the one queue slot and the 3 s expiry. That is why scenes and rulebook rules
+ * the one queue slot and the 2 s expiry. That is why scenes and rulebook rules
  * can never talk over each other (F-E4 #13).
  */
 
@@ -318,6 +318,25 @@ export class SceneMachine {
       nextIdleInMs:
         this.name === "attract" ? Math.max(0, this.nextAttractAt - now) : null,
     };
+  }
+
+  /**
+   * Lines the scene is likely to offer next, for the voice to warm up: the
+   * Attract nudge when the next idle line is one, the self-introduction and
+   * the invitation while Engage is still running. Pure: no state changes.
+   */
+  upcoming(memory: CognitiveMemory): string[] {
+    if (this.name === "attract" && (this.idleLines + 1) % 4 === 0) {
+      const last = memory.lastPhrase("scene.invitation");
+      return INVITATIONS.filter((phrase) => phrase !== last);
+    }
+    if (this.name === "engage" && this.engageStep >= 1 && this.engageStep < 3) {
+      const prompts = this.mode === "movenet" ? PROMPTS.movenet : PROMPTS.yolox;
+      const intro =
+        this.engageStep === 1 && memory.fireCount("scene.intro") === 0 ? INTRO : [];
+      return [...intro, ...prompts];
+    }
+    return [];
   }
 
   /** Forget everything but the day's no-repeat bookkeeping (mode switch). */
