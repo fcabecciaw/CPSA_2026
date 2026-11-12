@@ -28,11 +28,11 @@ log = logging.getLogger("cpsa_tts.cli")
 BENCH_TEXTS = (
     "Ciao! Sono il robot della mostra e vi guardo sessanta volte al secondo.",
     "Il polpo ha gran parte dei suoi neuroni nei tentacoli: ogni braccio pensa da solo.",
-    "Sessanta sguardi in un secondo, e ancora non ho capito il mondo.",
+    "Mi chiamo ARI: so riconoscere oggetti, movimenti e sorrisi.",
 )
 
 SAMPLE_TEXTS = (
-    ("saluto", "Ciao! Che bello vederti."),
+    ("saluto", "Ciao! Che piacere vederti."),
     (
         "fatto-demo",
         "Guardo il mondo sessanta volte al secondo, e ogni volta cerco ottanta "
@@ -43,11 +43,8 @@ SAMPLE_TEXTS = (
         "Il polpo ha gran parte dei suoi neuroni nei tentacoli: ogni braccio, "
         "in un certo senso, pensa da solo.",
     ),
-    ("poesia", "Sessanta sguardi in un secondo, e ancora non ho capito il mondo."),
-    (
-        "congedo",
-        "Se ve ne andate, non vi preoccupate: io resto qui, a contare le sedie.",
-    ),
+    ("oggetto", "Vedo il cellulare! Chissà quante notifiche."),
+    ("congedo", "Ciao, a presto! Grazie della visita."),
 )
 
 
@@ -205,11 +202,10 @@ def _pregenerate(args: argparse.Namespace, settings: Settings) -> int:
     write_phrases(json_path, document)
     counts = document.counts()
     log.info(
-        "phrases.json: %d sentences (%d rulebook, %d facts, %d poems) -> %s",
+        "phrases.json: %d sentences (%d rulebook, %d facts) -> %s",
         counts["total"],
         counts["rulebook"],
         counts["fact"],
-        counts["poem"],
         json_path,
     )
     if args.dry_run:

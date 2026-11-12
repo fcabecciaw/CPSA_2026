@@ -101,9 +101,8 @@ Origini ammesse: `http://10.42.0.83:8080` (dashboard) e
 
 ## Pre-generazione delle frasi fisse
 
-La dashboard parla soprattutto con frasi fisse: 97 frasi del rulebook senza slot,
-40 fatti e 20 poesie (le righe di una poesia sono unite con uno spazio: la
-punteggiatura di fine riga è la pausa breve). `pregenerate` le estrae dai sorgenti
+La dashboard parla soprattutto con frasi fisse: 100 frasi del rulebook senza slot
+e 40 fatti. `pregenerate` le estrae dai sorgenti
 TypeScript, esporta `build/phrases.json` e riempie la cache:
 
 ```sh
@@ -124,7 +123,7 @@ uv run cpsa-tts samples
 xdg-open build/tts-samples/index.html
 ```
 
-Scrive cinque frasi rappresentative (saluto, due fatti, due poesie, incluse le
+Scrive cinque frasi rappresentative (saluto, due fatti, un oggetto, un congedo, incluse le
 frasi reali della dashboard) per **ogni** voce dei due motori e una pagina HTML
 senza dipendenze per ascoltarle. `--voice`/`--engine` limitano la produzione,
 `--force` rigenera.

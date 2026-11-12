@@ -1,8 +1,8 @@
 /**
  * The four scenes of the dialogue (R2-D, on top of the production-rule engine):
  *
- * - **Attract** — nobody: a fact or a poem every 20–40 s, alternating, never
- *   repeated within the day, with an occasional invitation to come closer.
+ * - **Attract** — nobody: a fact every 20–40 s, never repeated within the
+ *   day, with a short nudge to come closer every fourth line.
  * - **Engage** — someone arrives: one greeting adapted to the number of people
  *   (single / pair / small group / crowd, F-E4 #1/#2), a one-line
  *   self-introduction the first time, then an invitation to interact.
@@ -18,7 +18,6 @@
  */
 
 import { FACTS } from "./content/facts";
-import { POEMS } from "./content/poems";
 import { QUESTIONS } from "./content/questions";
 import type {
   CognitiveEvent,
@@ -28,7 +27,7 @@ import type {
   SceneName,
   WorldModelName,
 } from "./events";
-import { indefinitePhrase, nounPhrase } from "./grammar";
+import { nounPhrase, numberWord } from "./grammar";
 import type { CognitiveMemory } from "./memory";
 import type { Expression, GazeTarget, SceneLine, Utterance } from "./rules";
 
@@ -89,135 +88,184 @@ type Stimulus =
   | { type: "face"; kind: FaceCueKind; at: number }
   | { type: "appear"; label: string; count: number; at: number };
 
+/*
+ * Everything the scenes say. Lines addressed to people are gender-neutral
+ * ("Che piacere vederti", "Benvenuti" only for groups) and never claim to
+ * recognise someone: the system has no identity, so no "di nuovo" or
+ * "sei tornato" about a person (F-E4 #5).
+ */
 const GREETINGS = {
   single: [
-    "Ciao! Che bello vederti.",
-    "Ehi, ciao! Benvenuto.",
-    "Ciao! Ti tenevo compagnia alla stanza vuota.",
+    "Ciao! Che piacere vederti.",
+    "Ehi, ciao! Vieni pure avanti.",
+    "Ciao! Finalmente un po' di compagnia.",
+    "Oh, una visita! Ciao!",
   ],
+  /** Someone arrives after the stand was empty for a while: about ARI, not them. */
   return: [
-    "Eccoti di nuovo! Che piacere.",
-    "Sei tornato! La stanza era troppo silenziosa.",
-    "Eccoti! Mi stavo quasi addormentando.",
+    "Finalmente qualcuno! Ciao.",
+    "Oh, compagnia! Ciao!",
+    "Ciao! Cominciavo ad annoiarmi.",
+    "Ciao! Qui era tutto troppo tranquillo.",
   ],
   pair: [
-    "Ciao a voi due!",
-    "Eccovi! Siete arrivati in due.",
-    "Ciao! Che bella coppia di visitatori.",
+    "Ciao a tutti e due!",
+    "Ehi, siete in due! Ciao.",
+    "Ciao a voi due! Venite pure avanti.",
+    "Doppia visita! Ciao a voi due.",
   ],
   group: [
     "Ciao a tutti! Siete in {n}.",
-    "Che compagnia! Ciao a tutti.",
-    "Ciao gruppo! Piacere di vedervi.",
+    "Che bel gruppetto! Ciao a tutti.",
+    "Ciao a voi {n}! Venite pure avanti.",
+    "Ehi, siete in {n}! Benvenuti.",
   ],
   crowd: [
-    "Ciao a tutti! Che bella folla.",
-    "Benvenuti! Qui c'è posto per tutti.",
-    "Ciao a tutti! Mi sento in compagnia.",
+    "Ciao a tutti! Quanta gente!",
+    "Benvenuti! C'è posto per tutti.",
+    "Wow, che folla! Ciao a tutti.",
+    "Quante persone! Benvenuti al nostro stand.",
   ],
 } as const;
 
 const INTRO = [
-  "Piacere, sono ARI: guardo la stanza e provo a capire cosa succede.",
-  "Io sono ARI, un occhio artificiale che prova a fare conversazione.",
-  "Piacere! Sono ARI: vedo oggetti, gesti e sorrisi.",
+  "Piacere, sono ARI! Riconosco oggetti, gesti e sorrisi.",
+  "Mi chiamo ARI: so riconoscere oggetti, movimenti e sorrisi.",
+  "Io sono ARI, e con questa telecamera vedo oggetti, gesti e sorrisi.",
 ] as const;
 
 const PROMPTS = {
   yolox: [
-    "Mostrami un oggetto: lo riconosco e ti dico cosa vedo.",
-    "Prova a mostrarmi qualcosa: una tazza, un libro, un telefono.",
-    "Metti un oggetto davanti alla telecamera, indovino cos'è.",
+    "Mostrami un oggetto e provo a indovinare cos'è.",
+    "Hai qualcosa in tasca? Fammelo vedere!",
+    "Prova con un oggetto: una tazza, un libro, un telefono.",
+    "Metti un oggetto davanti alla telecamera, vediamo se indovino.",
   ],
   movenet: [
-    "Prova a salutarmi: alza una mano e dimmi ciao.",
-    "Fammi un gesto: alziamo le braccia insieme?",
-    "Salutami con la mano, mi piace rispondere.",
+    "Prova a salutarmi con la mano!",
+    "Alza le braccia, vediamo se ti seguo.",
+    "Fammi un gesto: prova a fare la T con le braccia!",
+    "Muovi le braccia: io ti disegno lo scheletro!",
   ],
 } as const;
 
+/** Attract nudges, every fourth idle line. */
 const INVITATIONS = [
   "Avvicinati, ti mostro cosa vedo.",
-  "Vieni più vicino, così ti vedo meglio.",
-  "Se ti avvicini, ti racconto cosa sto guardando.",
+  "Vieni più vicino, non mordo!",
+  "C'è qualcuno? Passa a salutarmi!",
+  "Hai un oggetto in tasca? Vieni a mostrarmelo.",
+  "Fermati un attimo, ti racconto cosa vedo.",
+  "Psst! Sì, dico proprio a te. Vieni a giocare?",
 ] as const;
 
 const GOODBYES = [
-  "A presto!",
-  "Ciao ciao, io resto qui.",
+  "Ciao, a presto!",
   "Grazie della visita!",
-  "A dopo! Continuo a guardare la stanza.",
+  "Ciao ciao! Io resto qui.",
+  "Alla prossima, buona giornata!",
+  "Ciao! È stato bello.",
 ] as const;
 
 const WAVE_FIRST = [
-  "Ciao! Benvenuto.",
-  "Ciao! Finalmente un saluto.",
-  "Ciao! Mi hai visto, vero?",
+  "Ciao! Ti saluto anch'io.",
+  "Ciao ciao! Ricambio il saluto.",
+  "Ehi, ciao! Che bel saluto.",
 ] as const;
 
 const WAVE_AGAIN = [
-  "Ciao di nuovo!",
-  "Un altro saluto? Che piacere.",
-  "Ci salutiamo ancora: mi piace.",
+  "Un altro saluto? Ciao ciao!",
+  "Ciao ancora! Non mi stanco mai.",
+  "Ricambio, sempre volentieri!",
 ] as const;
 
 const SMILES = [
   "Che bel sorriso!",
-  "Ecco un sorriso: giornata migliore.",
-  "Sorridi, e io sorrido con te.",
+  "Un sorriso! Mi hai messo di buon umore.",
+  "Sorridi? Allora sorrido anch'io.",
 ] as const;
 
 const SMILES_AGAIN = [
-  "Ancora quel sorriso! Non stanca mai.",
-  "Due sorrisi in poco tempo: ottimo.",
+  "Un altro sorriso! È contagioso.",
+  "Ancora un sorriso? Così mi vizi.",
+  "Sorrisi a raffica: che giornata!",
 ] as const;
 
 const MOUTH_OPEN = [
-  "Oh! Ti sei sorpreso?",
-  "Bocca aperta: c'è qualcosa di interessante.",
+  "Oh! Che sorpresa!",
+  "Bocca aperta? Ho detto qualcosa di strano?",
+  "Uno sbadiglio? Spero di non annoiarti!",
 ] as const;
 
 const LOOKING = [
-  "Mi stai guardando? E io guardo te.",
-  "Ci stiamo guardando: bello, no?",
+  "Mi stai guardando? Io guardo te.",
+  "Gara di sguardi? Chi ride perde!",
+  "Guardi proprio nella telecamera. Ciao!",
 ] as const;
 
 const NODS = [
-  "Annuisci? Allora siamo d'accordo.",
-  "Un cenno: messaggio ricevuto.",
+  "Sì? Allora siamo d'accordo.",
+  "Un bel sì! Ricevuto.",
+  "Annuisci? Mi fa piacere.",
 ] as const;
 
 const SHAKES = [
-  "Dici di no? Va bene, ne prendo nota.",
-  "Un cenno di no: rispetto la risposta.",
+  "No? Va bene, ne prendo nota.",
+  "Un no deciso! Ricevuto.",
+  "Scuoti la testa? Allora cambio argomento.",
 ] as const;
 
+/** The same object, still in view a few seconds after ARI named it. */
 const FOLLOW_UPS = [
-  "Ancora {oggetto}? Mi piace la costanza.",
-  "Di nuovo {oggetto}? Bene, così lo guardo meglio.",
-  "Ancora {oggetto}? Vuol dire che è importante.",
+  "Ancora {oggetto}? Non me lo aspettavo!",
+  "Sempre {oggetto}! Non mi stanco di guardare.",
+  "Ancora {oggetto}? Sta diventando la mia cosa preferita.",
 ] as const;
 
-/** Continuity lines for pairs that make a little story together. */
+/**
+ * Continuity: one object after another, only for pairs that tell a small
+ * story together. Any other pair says nothing (no generic "prima X, ora Y").
+ */
 const CONTINUITY: Record<string, readonly string[]> = {
-  "cellulare+tazza": ["Prima il telefono, ora una tazza: pausa caffè?"],
-  "tazza+cellulare": ["Prima la tazza, ora il telefono: si torna al lavoro?"],
-  "portatile+tazza": ["Prima il portatile, ora una tazza: stai lavorando sodo."],
-  "tazza+portatile": ["Prima la tazza, ora il portatile: si riparte."],
-  "tazza+libro": ["Prima la tazza, ora un libro: pomeriggio perfetto."],
-  "libro+tazza": ["Prima il libro, ora una tazza: pausa meritata."],
-  "pizza+bottiglia": ["Prima la pizza, ora una bottiglia: cena completa."],
-  "bottiglia+calice": ["Prima la bottiglia, ora un calice: brindisi in arrivo?"],
-  "tv+divano": ["Prima la tv, ora il divano: serata decisa."],
-  "zaino+ombrello": ["Prima lo zaino, ora un ombrello: si parte comunque."],
+  "cellulare+tazza": ["Telefono giù, tazza su: pausa caffè?"],
+  "tazza+cellulare": ["Finito il caffè, si torna al telefono?"],
+  "portatile+tazza": ["Dal computer alla tazza: pausa meritata!"],
+  "tazza+portatile": ["Caffè finito? Si torna al computer."],
+  "tazza+libro": ["Una tazza e poi un libro: pomeriggio perfetto."],
+  "libro+tazza": ["Un libro e una tazza: manca solo il divano."],
+  "cellulare+libro": ["Dal telefono al libro: approvo!"],
+  "libro+cellulare": ["Dal libro al telefono? Solo una sbirciatina, eh."],
+  "banana+mela": ["Banana, mela… manca solo l'arancia!"],
+  "mela+arancia": ["Mela e arancia: macedonia in arrivo?"],
+  "pizza+torta": ["Prima la pizza, poi la torta: che festa!"],
+  "zaino+ombrello": ["Zaino e ombrello: si parte con ogni tempo!"],
+  "tastiera+mouse": ["Tastiera e mouse: manca solo lo schermo!"],
+  "mouse+tastiera": ["Mouse e tastiera: qui si programma!"],
 };
 
-const CONTINUITY_GENERIC = [
-  "Prima {prima}, ora {ora}: la scena cambia.",
-  "Prima {prima}, ora {ora}: cosa starà succedendo?",
-  "Prima {prima}, ora {ora}: che cambiamento!",
-  "Prima {prima}, ora {ora}: mi piace seguire la giornata.",
-] as const;
+/** Every scene line, by family (for the tests and the phrase report). */
+export const SCENE_PHRASES = {
+  GREETINGS_SINGLE: GREETINGS.single,
+  GREETINGS_RETURN: GREETINGS.return,
+  GREETINGS_PAIR: GREETINGS.pair,
+  GREETINGS_GROUP: GREETINGS.group,
+  GREETINGS_CROWD: GREETINGS.crowd,
+  INTRO,
+  PROMPTS_YOLOX: PROMPTS.yolox,
+  PROMPTS_MOVENET: PROMPTS.movenet,
+  INVITATIONS,
+  GOODBYES,
+  WAVE_FIRST,
+  WAVE_AGAIN,
+  SMILES,
+  SMILES_AGAIN,
+  MOUTH_OPEN,
+  LOOKING,
+  NODS,
+  SHAKES,
+  FOLLOW_UPS,
+  CONTINUITY: Object.values(CONTINUITY).flat(),
+} as const satisfies Record<string, readonly string[]>;
 
 /** Last chosen variant of a line id, so a scene never repeats itself. */
 function pickVariant(
@@ -242,7 +290,6 @@ export class SceneMachine {
   private posePerson = false;
   private mode: WorldModelName = "yolox";
   private nextAttractAt = 0;
-  private nextIdle: "fact" | "poem" = "fact";
   private idleLines = 0;
   private engageStep = 0;
   private engageAt = 0;
@@ -294,7 +341,6 @@ export class SceneMachine {
     this.crowd = false;
     this.posePerson = false;
     this.nextAttractAt = now + this.attractGap();
-    this.nextIdle = "fact";
     this.idleLines = 0;
     this.engageStep = 0;
     this.goodbyeSent = false;
@@ -380,8 +426,6 @@ export class SceneMachine {
     }
     if (utterance.sceneKind === "fact") {
       memory.markIdleUsed("facts", utterance.ruleId.replace("scene.fact.", ""));
-    } else if (utterance.sceneKind === "poem") {
-      memory.markIdleUsed("poems", utterance.ruleId.replace("scene.poem.", ""));
     } else if (utterance.sceneKind === "question" && this.proposedQuestion !== null) {
       memory.markIdleUsed("questions", this.proposedQuestion);
       this.question = { id: this.proposedQuestion, askedAt: now };
@@ -459,7 +503,6 @@ export class SceneMachine {
   private enterAttract(now: number): void {
     this.name = "attract";
     this.nextAttractAt = now + this.attractGap();
-    this.nextIdle = "fact";
     this.idleLines = 0;
     this.lastObject = null;
     this.followUp = null;
@@ -475,7 +518,7 @@ export class SceneMachine {
     this.nextAttractAt = now + this.attractGap();
     this.idleLines += 1;
 
-    // Every fourth idle line is an invitation, so the facts stay the star.
+    // Every fourth idle line is a nudge, so the facts stay the star.
     if (this.idleLines % 4 === 0) {
       return this.line({
         ruleId: "scene.invitation",
@@ -490,52 +533,23 @@ export class SceneMachine {
     }
 
     const fact = this.pickFact(memory);
-    const poem = this.pickPoem(memory);
-    let useFact = this.nextIdle === "fact";
-    if (useFact && fact === null) {
-      useFact = false;
-    } else if (!useFact && poem === null) {
-      useFact = true;
+    if (fact === null) {
+      return null;
     }
-    if (useFact && fact !== null) {
-      this.nextIdle = "poem";
-      return {
-        ruleId: `scene.fact.${fact.id}`,
-        scene: "attract",
-        kind: "fact",
-        text: fact.text,
-        expression: "curious",
-        gaze: "wander",
-        priority: 38,
-        valid: () => this.name === "attract",
-      };
-    }
-    if (!useFact && poem !== null) {
-      this.nextIdle = "fact";
-      return {
-        ruleId: `scene.poem.${poem.id}`,
-        scene: "attract",
-        kind: "poem",
-        text: poem.lines.join(" "),
-        expression: "happy",
-        gaze: "wander",
-        priority: 38,
-        valid: () => this.name === "attract",
-      };
-    }
-    return null;
+    return {
+      ruleId: `scene.fact.${fact.id}`,
+      scene: "attract",
+      kind: "fact",
+      text: fact.text,
+      expression: "curious",
+      gaze: "wander",
+      priority: 38,
+      valid: () => this.name === "attract",
+    };
   }
 
   private pickFact(memory: CognitiveMemory): (typeof FACTS)[number] | null {
     const fresh = FACTS.filter((fact) => !memory.idleUsed("facts", fact.id));
-    if (fresh.length === 0) {
-      return null;
-    }
-    return fresh[Math.min(fresh.length - 1, Math.floor(this.options.rng() * fresh.length))] ?? null;
-  }
-
-  private pickPoem(memory: CognitiveMemory): (typeof POEMS)[number] | null {
-    const fresh = POEMS.filter((poem) => !memory.idleUsed("poems", poem.id));
     if (fresh.length === 0) {
       return null;
     }
@@ -621,7 +635,7 @@ export class SceneMachine {
         ruleId: "scene.greeting.group",
         scene: "engage",
         kind: "greeting",
-        text: template.replace("{n}", String(people)),
+        text: template.replaceAll("{n}", numberWord(people)),
         expression: "happy",
         gaze: "person",
         priority: 102,
@@ -836,14 +850,11 @@ export class SceneMachine {
     }
     const previous = this.lastObject;
     const key = `${previous.label}+${label}`;
-    const special = CONTINUITY[key];
-    const phrases =
-      special ??
-      CONTINUITY_GENERIC.map((template) =>
-        template
-          .replace("{prima}", nounPhrase(previous.label, previous.count))
-          .replace("{ora}", indefinitePhrase(label, count)),
-      );
+    const phrases = CONTINUITY[key];
+    if (phrases === undefined) {
+      // Only pairs that make a small story; the rulebook names the object.
+      return null;
+    }
     const text = pickVariant(
       phrases,
       memory.lastPhrase("scene.continuity"),

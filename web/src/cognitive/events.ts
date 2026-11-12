@@ -36,7 +36,6 @@ export type SceneName = "attract" | "engage" | "play" | "farewell";
 /** What a scene line is for, shown in the "mente" strip and used by the tests. */
 export type SceneLineKind =
   | "fact"
-  | "poem"
   | "invitation"
   | "greeting"
   | "intro"

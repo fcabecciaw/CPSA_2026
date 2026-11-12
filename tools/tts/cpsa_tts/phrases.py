@@ -1,9 +1,8 @@
 """Extract the dashboard's fixed Italian sentences from the TypeScript sources.
 
 The dashboard is the source of truth: ``web/src/cognitive/rulebook.ts`` (every
-phrase without a ``{oggetto}``/``{n}``/``{ora}`` slot), ``content/facts.ts`` (all
-facts) and ``content/poems.ts`` (all poems, lines joined with a single space,
-whose commas and periods are the short pause). The files are read as text and
+phrase without a ``{oggetto}``/``{n}``/``{ora}`` slot) and ``content/facts.ts``
+(all facts). The files are read as text and
 parsed with narrow regular expressions on purpose: this package must not depend
 on Node, Vite or the web toolchain, and it must not import the dashboard code.
 
@@ -29,7 +28,6 @@ PHRASES_ARRAY_RE = re.compile(r"phrases:\s*\[(.*?)\]", re.S)
 FACT_RE = re.compile(
     r'\{\s*id:\s*"(?P<id>[^"]+)",\s*topic:\s*"[^"]+",\s*text:\s*"(?P<text>(?:[^"\\]|\\.)*)"\s*\}'
 )
-POEM_RE = re.compile(r'\{\s*id:\s*"(?P<id>[^"]+)",\s*lines:\s*\[(?P<lines>.*?)\]\s*\}', re.S)
 
 
 def web_source_dir(repo_root: Path) -> Path:
@@ -42,8 +40,8 @@ class Phrase:
 
     id: str
     text: str
-    source: str  # "rulebook" | "fact" | "poem"
-    kind: str  # "rule" | "fact" | "poem"
+    source: str  # "rulebook" | "fact"
+    kind: str  # "rule" | "fact"
 
     def to_dict(self) -> dict[str, str]:
         return asdict(self)
@@ -57,7 +55,7 @@ class PhrasesDocument:
     generated_at: str
 
     def counts(self) -> dict[str, int]:
-        counts = {"rulebook": 0, "fact": 0, "poem": 0}
+        counts = {"rulebook": 0, "fact": 0}
         for phrase in self.phrases:
             counts[phrase.source] = counts.get(phrase.source, 0) + 1
         counts["total"] = len(self.phrases)
@@ -107,33 +105,12 @@ def parse_facts(path: Path) -> list[Phrase]:
     return _unique(phrases)
 
 
-def parse_poems(path: Path) -> list[Phrase]:
-    """Every poem, its lines joined by a single space (the short pause)."""
-    source = Path(path).read_text(encoding="utf-8")
-    phrases: list[Phrase] = []
-    for match in POEM_RE.finditer(source):
-        lines = [_decode(item.group(1)) for item in STRING_RE.finditer(match.group("lines"))]
-        if not lines:
-            continue
-        text = " ".join(line.strip() for line in lines)
-        phrases.append(
-            Phrase(
-                id=f"poem.{match.group('id')}",
-                text=text,
-                source="poem",
-                kind="poem",
-            )
-        )
-    return _unique(phrases)
-
-
 def collect(repo_root: Path) -> PhrasesDocument:
     """All fixed phrases of the dashboard, in a stable order."""
     sources = web_source_dir(repo_root)
     paths = (
         sources / "cognitive" / "rulebook.ts",
         sources / "cognitive" / "content" / "facts.ts",
-        sources / "cognitive" / "content" / "poems.ts",
     )
     missing = [str(path) for path in paths if not path.is_file()]
     if missing:
@@ -141,7 +118,6 @@ def collect(repo_root: Path) -> PhrasesDocument:
     phrases = [
         *parse_rulebook(paths[0]),
         *parse_facts(paths[1]),
-        *parse_poems(paths[2]),
     ]
     if not phrases:
         raise ValueError(f"no phrases found under {sources}")

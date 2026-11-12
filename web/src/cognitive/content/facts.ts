@@ -25,7 +25,7 @@ export const FACTS: readonly Fact[] = [
   { id: "demo-camera", topic: "demo", text: "La mia telecamera vede anche la profondità, grazie a una luce infrarossa che i vostri occhi non percepiscono." },
 
   // Vision and the brain
-  { id: "brain-neurons", topic: "brain", text: "Il cervello umano ha circa ottantasei miliardi di neuroni. Io, in confronto, sono piuttosto piccolo." },
+  { id: "brain-neurons", topic: "brain", text: "Il cervello umano ha circa ottantasei miliardi di neuroni. Il mio, in confronto, è piuttosto piccolo." },
   { id: "brain-power", topic: "brain", text: "Il vostro cervello lavora con circa venti watt di energia: è ancora molto più efficiente di qualunque computer." },
   { id: "brain-vision", topic: "brain", text: "Una parte enorme della corteccia cerebrale, secondo alcune stime quasi un terzo, lavora per la vista." },
   { id: "brain-blindspot", topic: "brain", text: "Ogni vostro occhio ha un punto cieco, dove il nervo ottico lascia la retina. Il cervello lo riempie senza dirvelo." },

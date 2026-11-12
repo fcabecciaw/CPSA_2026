@@ -63,7 +63,7 @@ describe("F-E4 #21 — lost vision", () => {
     const now = 1_000;
     const lost = agent.onConnection(false, now);
     expect(lost.map((event) => event.type)).toEqual(["vision"]);
-    expect(spoken).toEqual(["Ho perso la vista!"]);
+    expect(spoken).toEqual(["Ops, non vedo più niente!"]);
 
     expect(agent.onConnection(false, now + 100)).toEqual([]);
     expect(agent.onStatus(status({ camera: "error" }), now + 200)).toEqual([]);
@@ -93,7 +93,7 @@ describe("F-E4 #22 — mode switch", () => {
     agent.onShowcase(showcase([person(20)]), 0);
 
     agent.onPose(pose(armsUp()), 1_000);
-    expect(spoken).toEqual(["Passo alla modalità postura."]);
+    expect(spoken).toEqual(["Ora guardo i movimenti: muoviti un po'!"]);
     expect(memory.working.focus.mode).toBe("movenet");
 
     for (let now = 6_000; now <= 7_000; now += 100) {
@@ -121,6 +121,6 @@ describe("F-E4 #22 — mode switch", () => {
 
     agent.onShowcase(showcase([person(20)]), 12_000);
     expect(spoken.at(-1)).toBe("Torno a guardare gli oggetti.");
-    expect(spoken.filter((text) => text === "Passo alla modalità postura.")).toHaveLength(1);
+    expect(spoken.filter((text) => text === "Ora guardo i movimenti: muoviti un po'!")).toHaveLength(1);
   });
 });

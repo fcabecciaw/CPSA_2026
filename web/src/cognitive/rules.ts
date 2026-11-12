@@ -12,6 +12,7 @@
 import type { CognitiveEvent, SceneLineKind, SceneName } from "./events";
 import { objectKeyOf } from "./events";
 import {
+  indefinitePhrase,
   nounPhrase,
   objectCountSlots,
   renderPhrase,
@@ -165,6 +166,7 @@ export function slotsFor(event: CognitiveEvent): PhraseSlots {
     case "return":
       return {
         oggetto: nounPhrase(event.label, event.count),
+        unoggetto: indefinitePhrase(event.label, event.count),
         n: it(event.count),
       };
     case "disappear":
@@ -172,6 +174,7 @@ export function slotsFor(event: CognitiveEvent): PhraseSlots {
     case "dwell":
       return {
         oggetto: nounPhrase(event.label, event.count),
+        unoggetto: indefinitePhrase(event.label, event.count),
         n: it(event.count),
         secondi: it(event.seconds),
         minuti: it(Math.round(event.seconds / 60)),

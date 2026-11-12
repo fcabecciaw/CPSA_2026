@@ -18,93 +18,175 @@ import { COCO_IT_LABELS, type CocoLabel } from "./grammar";
 type ObjectLabel = Exclude<CocoLabel, "persona">;
 
 /**
- * Three conversational lines per COCO class. All use `{oggetto}`, which the
- * grammar table renders with the right article or plural ("il telefono",
- * "due tazze", "le forbici"), so no sentence is ever ungrammatical (F-E4 #8).
- * They are short, spoken Italian: an observation, a small question, a warm
- * aside — never a template.
+ * What ARI says the first time a class is seen today. `{oggetto}` is the class
+ * with its definite article or a number ("il cellulare", "due tazze", "le
+ * forbici"), so every line keeps the slot where article, gender and number do
+ * not matter: after "Vedo" or "Ecco", never as the subject of a verb and never
+ * next to an adjective (F-E4 #8).
+ *
+ * Classes likely at an indoor stand (desk items, props, snacks) get specific
+ * lines; every other COCO class gets the honest generic pair below.
  */
-const CLASS_LINES: Record<ObjectLabel, readonly [string, string, string]> = {
-  bicicletta: ["Ecco {oggetto}: si va a fare un giro?", "C'è {oggetto} qui: qualcuno ha pedalato fin qui.", "Mi piace {oggetto}: sa di gita."],
-  auto: ["Ecco {oggetto}: si parte?", "C'è {oggetto} in vista: viaggio in arrivo.", "Mi ricorda {oggetto}: motore e libertà."],
-  motocicletta: ["Ecco {oggetto}: che rombo.", "C'è {oggetto}: pronti al giro?", "Mi piace {oggetto}: sa di strada."],
-  aereo: ["Ecco {oggetto}: decollo?", "C'è {oggetto} qui: che voglia di partire.", "Con {oggetto} il cielo sembra vicino."],
-  autobus: ["Ecco {oggetto}: prossima fermata?", "C'è {oggetto}: qualcuno aspetta.", "Mi ricorda {oggetto}: si guarda fuori."],
-  treno: ["Ecco {oggetto}: in stazione.", "C'è {oggetto}: binario e valigia.", "Con {oggetto} si parte davvero."],
-  camion: ["Ecco {oggetto}: che carico.", "C'è {oggetto} in arrivo: largo.", "Mi piace {oggetto}: porta cose."],
-  barca: ["Ecco {oggetto}: aria di mare.", "C'è {oggetto}: dov'è l'acqua?", "Con {oggetto} si sogna il largo."],
-  semaforo: ["Ecco {oggetto}: verde o rosso?", "C'è {oggetto}: si aspetta un attimo.", "Con {oggetto} tutto si ferma."],
-  idrante: ["Ecco {oggetto}: meglio non provarlo.", "C'è {oggetto}: tutto tranquillo.", "Mi ricorda {oggetto}: sicurezza in strada."],
-  stop: ["Ecco {oggetto}: mi fermo.", "C'è {oggetto}: un attimo di pausa.", "Con {oggetto} si rallenta."],
-  parchimetro: ["Ecco {oggetto}: cerca monete.", "C'è {oggetto}: che precisione.", "Mi ricorda {oggetto}: tempo misurato."],
-  panchina: ["Ecco {oggetto}: una pausa?", "C'è {oggetto}: ci si siede volentieri.", "Mi piace {oggetto}: invita a restare."],
-  uccello: ["Ecco {oggetto}: che visita.", "C'è {oggetto}: vola piano.", "Mi ricorda {oggetto}: un po' di cielo."],
-  gatto: ["Ecco {oggetto}: comanda lui.", "C'è {oggetto}: che carattere.", "Mi piace {oggetto}: fa quello che vuole."],
-  cane: ["Ecco {oggetto}: che compagnia.", "C'è {oggetto}: scodinzola.", "Mi ricorda {oggetto}: allegria semplice."],
-  cavallo: ["Ecco {oggetto}: che eleganza.", "C'è {oggetto}: senza fretta.", "Mi piace {oggetto}: passo tranquillo."],
-  pecora: ["Ecco {oggetto}: dolce e quieta.", "C'è {oggetto}: che calma.", "Mi ricorda {oggetto}: un prato immaginario."],
-  mucca: ["Ecco {oggetto}: che sorpresa.", "C'è {oggetto}: pascola immaginaria.", "Mi piace {oggetto}: vita di campagna."],
-  elefante: ["Ecco {oggetto}: la stanza si stringe.", "C'è {oggetto}: quasi incredibile.", "Mi ricorda {oggetto}: memoria lunga."],
-  orso: ["Ecco {oggetto}: calma, eh.", "C'è {oggetto}: meglio fare amicizia.", "Mi piace {oggetto}: un po' selvatico."],
-  zebra: ["Ecco {oggetto}: che fantasia.", "C'è {oggetto}: fuori posto.", "Mi ricorda {oggetto}: righe e sorprese."],
-  giraffa: ["Ecco {oggetto}: tocca il soffitto.", "C'è {oggetto}: che altezza.", "Mi piace {oggetto}: guarda tutti dall'alto."],
-  zaino: ["Ecco {oggetto}: si parte?", "C'è {oggetto}: pronto per la gita.", "Mi ricorda {oggetto}: gita e libertà."],
-  ombrello: ["Ecco {oggetto}: pioggia in arrivo?", "C'è {oggetto}: meglio portarlo.", "Mi piace {oggetto}: sa di giornate grigie."],
-  borsa: ["Ecco {oggetto}: dentro c'è un mondo.", "C'è {oggetto}: al suo posto.", "Mi ricorda {oggetto}: storie da portare."],
-  cravatta: ["Ecco {oggetto}: che occasione.", "C'è {oggetto}: pronto per la festa.", "Mi piace {oggetto}: un tocco di eleganza."],
-  valigia: ["Ecco {oggetto}: si parte o si torna?", "C'è {oggetto}: piena di storie.", "Mi ricorda {oggetto}: viaggi e ritorni."],
-  frisbee: ["Ecco {oggetto}: chi lo lancia?", "C'è {oggetto}: fermo per ora.", "Mi piace {oggetto}: voglia di giocare."],
-  sci: ["Ecco {oggetto}: neve in arrivo?", "C'è {oggetto}: fuori stagione.", "Mi ricorda {oggetto}: discese e risate."],
-  snowboard: ["Ecco {oggetto}: che discesa.", "C'è {oggetto}: aspetta la neve.", "Mi piace {oggetto}: equilibrio e vento."],
-  palla: ["Ecco {oggetto}: voglia di giocare.", "C'è {oggetto}: ferma per ora.", "Mi ricorda {oggetto}: partite improvvisate."],
-  aquilone: ["Ecco {oggetto}: serve vento.", "C'è {oggetto}: sogna il cielo.", "Mi piace {oggetto}: filo e libertà."],
-  "mazza da baseball": ["Ecco {oggetto}: si gioca?", "C'è {oggetto}: pronta al campo.", "Mi ricorda {oggetto}: una bella battuta."],
-  guantone: ["Ecco {oggetto}: manca la partita.", "C'è {oggetto}: in attesa.", "Mi piace {oggetto}: prese sicure."],
-  skateboard: ["Ecco {oggetto}: equilibrio.", "C'è {oggetto}: pronto a rotolare.", "Mi ricorda {oggetto}: trucchi e risate."],
-  "tavola da surf": ["Ecco {oggetto}: arriva un'onda?", "C'è {oggetto}: mare in testa.", "Mi piace {oggetto}: sale e vento."],
-  racchetta: ["Ecco {oggetto}: partita a due?", "C'è {oggetto}: pronta al servizio.", "Mi ricorda {oggetto}: scambi veloci."],
-  bottiglia: ["Ecco {oggetto}: cin cin virtuale.", "C'è {oggetto}: sul tavolo.", "Mi piace {oggetto}: brindisi in arrivo."],
-  calice: ["Ecco {oggetto}: brindisi in vista.", "C'è {oggetto}: vuoto per ora.", "Mi ricorda {oggetto}: una sera speciale."],
-  tazza: ["Ecco {oggetto}: caffè o tè?", "C'è {oggetto}: che calore.", "Mi piace {oggetto}: sa di pausa."],
-  forchetta: ["Ecco {oggetto}: si mangia?", "C'è {oggetto}: pronta all'uso.", "Mi ricorda {oggetto}: pranzi in compagnia."],
-  coltello: ["Ecco {oggetto}: con calma, mi raccomando.", "C'è {oggetto}: usiamolo piano.", "Mi ricorda {oggetto}: meglio con calma."],
-  cucchiaio: ["Ecco {oggetto}: minestra in arrivo.", "C'è {oggetto}: pronto all'uso.", "Mi piace {oggetto}: cucchiaiate lente."],
-  ciotola: ["Ecco {oggetto}: qualcosa bolle.", "C'è {oggetto}: vuota per ora.", "Mi ricorda {oggetto}: colazioni tranquille."],
-  banana: ["Ecco {oggetto}: spuntino perfetto.", "C'è {oggetto}: che fame.", "Mi piace {oggetto}: energia veloce."],
-  mela: ["Ecco {oggetto}: salute prima di tutto.", "C'è {oggetto}: rossa e tranquilla.", "Mi ricorda {oggetto}: una merenda semplice."],
-  panino: ["Ecco {oggetto}: pausa meritata.", "C'è {oggetto}: che profumo.", "Mi piace {oggetto}: pranzo veloce."],
-  arancia: ["Ecco {oggetto}: vitamina in vista.", "C'è {oggetto}: succosa.", "Mi ricorda {oggetto}: profumo d'inverno."],
-  broccolo: ["Ecco {oggetto}: coraggio, fa bene.", "C'è {oggetto}: discreto.", "Mi piace {oggetto}: verdure senza storie."],
-  carota: ["Ecco {oggetto}: croccante.", "C'è {oggetto}: sana e semplice.", "Mi ricorda {oggetto}: merende di una volta."],
-  "hot dog": ["Ecco {oggetto}: festa.", "C'è {oggetto}: che sorpresa.", "Mi piace {oggetto}: sapore di domenica."],
-  pizza: ["Ecco {oggetto}: serata perfetta.", "C'è {oggetto}: che meraviglia.", "Mi ricorda {oggetto}: amici e risate."],
-  ciambella: ["Ecco {oggetto}: buco goloso.", "C'è {oggetto}: attenzione alle dita.", "Mi piace {oggetto}: colazione decisa."],
-  torta: ["Ecco {oggetto}: compleanno?", "C'è {oggetto}: pronta al taglio.", "Mi ricorda {oggetto}: candeline e auguri."],
-  sedia: ["Ecco {oggetto}: si accomodi.", "C'è {oggetto}: paziente.", "Mi piace {oggetto}: aspetta qualcuno."],
-  divano: ["Ecco {oggetto}: invito al riposo.", "C'è {oggetto}: chiama, resisto.", "Mi ricorda {oggetto}: domeniche lente."],
-  pianta: ["Ecco {oggetto}: aria pulita.", "C'è {oggetto}: cresce discreta.", "Mi piace {oggetto}: un po' di verde."],
-  letto: ["Ecco {oggetto}: che tentazione.", "C'è {oggetto}: aspetta la buonanotte.", "Mi ricorda {oggetto}: sonni tranquilli."],
-  tavolo: ["Ecco {oggetto}: ci si ritrova.", "C'è {oggetto}: pronto alla compagnia.", "Mi piace {oggetto}: storie intorno."],
-  water: ["Ecco {oggetto}: tutto sotto controllo.", "C'è {oggetto}: che discrezione.", "Mi ricorda {oggetto}: la vita quotidiana."],
-  tv: ["Ecco {oggetto}: che si guarda?", "C'è {oggetto}: spenta per ora.", "Mi piace {oggetto}: storie in salotto."],
-  portatile: ["Ecco {oggetto}: lavoro o svago?", "C'è {oggetto}: aperto sul mondo.", "Mi ricorda {oggetto}: giornate piene."],
-  mouse: ["Ecco {oggetto}: clic o doppio clic?", "C'è {oggetto}: fermo.", "Mi piace {oggetto}: piccoli gesti."],
-  telecomando: ["Ecco {oggetto}: il potere in mano.", "C'è {oggetto}: che responsabilità.", "Mi ricorda {oggetto}: zapping serale."],
-  tastiera: ["Ecco {oggetto}: chi scrive?", "C'è {oggetto}: aspetta parole.", "Mi piace {oggetto}: storie che nascono."],
-  cellulare: ["Ecco {oggetto}: notifiche in arrivo.", "C'è {oggetto}: sempre connesso.", "Mi ricorda {oggetto}: un mondo in tasca."],
-  microonde: ["Ecco {oggetto}: piatto caldo in tre minuti.", "C'è {oggetto}: efficiente.", "Mi piace {oggetto}: pause veloci."],
-  forno: ["Ecco {oggetto}: che profumo.", "C'è {oggetto}: in attesa.", "Mi ricorda {oggetto}: domeniche di casa."],
-  tostapane: ["Ecco {oggetto}: pane croccante.", "C'è {oggetto}: ottimista.", "Mi piace {oggetto}: colazioni veloci."],
-  lavandino: ["Ecco {oggetto}: acqua e sapone.", "C'è {oggetto}: pulito.", "Mi ricorda {oggetto}: piccoli riti."],
-  frigorifero: ["Ecco {oggetto}: che fame dentro.", "C'è {oggetto}: custode dei snack.", "Mi piace {oggetto}: sorprese fredde."],
-  libro: ["Ecco {oggetto}: storie in arrivo.", "C'è {oggetto}: che invito.", "Mi piace {oggetto}: mondi da aprire."],
-  orologio: ["Ecco {oggetto}: il tempo passa.", "C'è {oggetto}: sempre puntuale.", "Mi ricorda {oggetto}: giornate che corrono."],
-  vaso: ["Ecco {oggetto}: fiori o niente?", "C'è {oggetto}: elegante.", "Mi piace {oggetto}: un tocco di casa."],
-  forbici: ["Ecco {oggetto}: con calma, mi raccomando.", "C'è {oggetto}: meglio piano.", "Mi ricorda {oggetto}: lavori delicati."],
-  orsacchiotto: ["Ecco {oggetto}: abbraccio garantito.", "C'è {oggetto}: dolce.", "Mi piace {oggetto}: tenerezza semplice."],
-  phon: ["Ecco {oggetto}: che ventilata.", "C'è {oggetto}: rumoroso.", "Mi ricorda {oggetto}: mattine di fretta."],
-  spazzolino: ["Ecco {oggetto}: igiene al top.", "C'è {oggetto}: mattiniero.", "Mi piace {oggetto}: routine tranquilla."],
+const SPECIFIC_LINES: Partial<Record<ObjectLabel, readonly string[]>> = {
+  cellulare: [
+    "Vedo {oggetto}! Chissà quante notifiche.",
+    "Ecco {oggetto}. Una foto ricordo con me?",
+    "Ah, {oggetto}! Anche lì dentro c'è una telecamera, come me.",
+  ],
+  tazza: [
+    "Vedo {oggetto}. Caffè o tè?",
+    "Ecco {oggetto}! Peccato, io il caffè non posso berlo.",
+    "Ah, {oggetto}. Io vado avanti a elettricità, grazie.",
+  ],
+  bottiglia: [
+    "Vedo {oggetto}. Bere acqua fa sempre bene!",
+    "Ecco {oggetto}. Io invece mi ricarico con la corrente.",
+    "Ah, {oggetto}! Poi nella raccolta differenziata, mi raccomando.",
+  ],
+  calice: [
+    "Vedo {oggetto}. Solo acqua, spero!",
+    "Ecco {oggetto}. Un brindisi? Io alzo la telecamera.",
+  ],
+  libro: [
+    "Ecco {oggetto}! Adoro le storie.",
+    "Vedo {oggetto}. Io ho studiato su centomila fotografie.",
+    "Ah, {oggetto}! Leggere è il miglior allenamento per il cervello.",
+  ],
+  portatile: [
+    "Ecco {oggetto}! Siamo quasi parenti.",
+    "Vedo {oggetto}. È lì che nascono i robot come me.",
+  ],
+  tastiera: [
+    "Vedo {oggetto}. Quanti tasti, e io non ho dita!",
+    "Ecco {oggetto}! Clic, clac: si scrive codice.",
+  ],
+  mouse: [
+    "Vedo {oggetto}. Quello senza coda, per fortuna!",
+    "Ecco {oggetto}! Niente formaggio, solo clic.",
+  ],
+  telecomando: [
+    "Vedo {oggetto}. Non premete il tasto per spegnermi!",
+    "Ecco {oggetto}! Purtroppo io non cambio canale.",
+  ],
+  forbici: [
+    "Vedo {oggetto}. Piano piano, mi raccomando.",
+    "Ecco {oggetto}. Con calma, niente fretta.",
+  ],
+  coltello: [
+    "Vedo {oggetto}. Con calma, mi raccomando.",
+    "Ecco {oggetto}. Piano piano, serve solo per la torta.",
+  ],
+  forchetta: [
+    "Vedo {oggetto}. È già ora di pranzo?",
+    "Ecco {oggetto}! Manca solo un bel piatto di pasta.",
+  ],
+  cucchiaio: [
+    "Vedo {oggetto}. Gelato in arrivo?",
+    "Ecco {oggetto}! Minestra o tiramisù?",
+  ],
+  orsacchiotto: [
+    "Vedo {oggetto}! Che tenerezza.",
+    "Ecco {oggetto}. Un abbraccio da parte mia!",
+    "Oh, {oggetto}! Che dolcezza.",
+  ],
+  banana: [
+    "Vedo {oggetto}. Ottima merenda!",
+    "Ecco {oggetto}! Attenzione alle bucce sul pavimento.",
+  ],
+  mela: [
+    "Vedo {oggetto}. Una al giorno toglie il medico di torno!",
+    "Ecco {oggetto}! Merenda sana in arrivo.",
+  ],
+  arancia: [
+    "Vedo {oggetto}. Vitamina C in arrivo!",
+    "Ecco {oggetto}! Spremuta per tutti?",
+  ],
+  zaino: [
+    "Vedo {oggetto}. Si va a lezione?",
+    "Ecco {oggetto}! Chissà quanti libri ci sono dentro.",
+  ],
+  borsa: [
+    "Vedo {oggetto}. Chissà cosa c'è dentro!",
+    "Ecco {oggetto}. Io non ho tasche, che invidia!",
+  ],
+  ombrello: [
+    "Vedo {oggetto}. Piove a Cagliari? Che rarità!",
+    "Ecco {oggetto}! Previsioni del tempo: incerte.",
+  ],
+  orologio: [
+    "Vedo {oggetto}. Io l'ora la so sempre, comunque.",
+    "Ecco {oggetto}! Il tempo vola quando ci si diverte.",
+  ],
+  sedia: [
+    "Vedo {oggetto}. C'è posto per sedersi!",
+    "Ecco {oggetto}. Io invece sto sempre in piedi… più o meno.",
+  ],
+  tv: [
+    "Vedo {oggetto}. Che cosa danno stasera?",
+    "Ecco {oggetto}! Uno schermo grande, come piace a me.",
+  ],
+  vaso: [
+    "Vedo {oggetto}. Mancano solo i fiori!",
+    "Ecco {oggetto}. Maneggiare con cura!",
+  ],
+  pianta: [
+    "Vedo {oggetto}! Un po' di verde fa sempre bene.",
+    "Ecco {oggetto}. Che bel verde, qui dentro!",
+  ],
+  cravatta: [
+    "Vedo {oggetto}. Giornata importante?",
+    "Ecco {oggetto}! Io preferisco il papillon.",
+  ],
+  valigia: [
+    "Vedo {oggetto}. Si parte per un viaggio?",
+    "Ecco {oggetto}! C'è posto anche per un robot?",
+  ],
+  spazzolino: [
+    "Vedo {oggetto}. Due minuti di spazzolata, mi raccomando!",
+    "Ecco {oggetto}! Io, per fortuna, i denti non li ho.",
+  ],
+  panino: [
+    "Vedo {oggetto}. Che fame!",
+    "Ecco {oggetto}! È quasi ora di merenda.",
+  ],
+  pizza: [
+    "Vedo {oggetto}! Se potessi mangiare, sarebbe il mio sogno.",
+    "Ecco {oggetto}. Margherita o capricciosa?",
+  ],
+  torta: [
+    "Vedo {oggetto}! C'è qualcosa da festeggiare?",
+    "Ecco {oggetto}. Una fetta per me? Scherzo!",
+  ],
+  ciambella: [
+    "Vedo {oggetto}! Merenda dolce in arrivo.",
+    "Ecco {oggetto}. Il buco in mezzo è la mia parte preferita.",
+  ],
+  palla: [
+    "Vedo {oggetto}! Facciamo due tiri?",
+    "Ecco {oggetto}. Io non so palleggiare, purtroppo.",
+  ],
+  frisbee: [
+    "Vedo {oggetto}! Peccato, qui dentro non si può lanciare.",
+    "Ecco {oggetto}. Io mi limito a guardare.",
+  ],
 };
+
+/**
+ * Every other COCO class: one honest, light line with the indefinite article
+ * ("un'auto", "uno skateboard", "due panchine"), no forced poetry.
+ */
+const GENERIC_LINES = [
+  "Mi sembra di vedere {unoggetto}. Dico bene?",
+  "Se non sbaglio, vedo {unoggetto}.",
+] as const;
+
+/** The lines of one class: its specific set, else the generic pair. */
+export function classLines(label: ObjectLabel): readonly string[] {
+  return SPECIFIC_LINES[label] ?? GENERIC_LINES;
+}
+
+/** Classes with their own lines (exported for the tests and the report). */
+export const SPECIFIC_CLASSES: readonly string[] = Object.keys(SPECIFIC_LINES);
 
 const ANIMALS = new Set([
   "uccello",
@@ -193,7 +275,7 @@ function classRules(): Rule[] {
         expression: classExpression(label),
         gaze: "object",
         model: "yolox",
-        phrases: CLASS_LINES[label],
+        phrases: classLines(label),
         when: (event: CognitiveEvent, memory: CognitiveMemory): boolean =>
           event.type === "appear" &&
           event.label === label &&
@@ -225,7 +307,7 @@ const personRules: Rule[] = [
     expression: "happy",
     gaze: "person",
     model: "yolox",
-    phrases: ["Ciao! Ti vedo.", "Ciao! Che bello vederti.", "Ehi, ciao!"],
+    phrases: ["Ciao! Ti vedo benissimo.", "Ehi, ciao! Che piacere.", "Ciao! Vieni pure avanti."],
     // Exactly one person, direct "tu" family (F-E4 #2).
     when: (event, memory) =>
       event.type === "count" &&
@@ -242,7 +324,7 @@ const personRules: Rule[] = [
     expression: "happy",
     gaze: "person",
     model: "yolox",
-    phrases: ["Ciao a tutti e due!", "Eccovi! Siete in due.", "Ciao voi due!"],
+    phrases: ["Ciao a tutti e due!", "Ciao a voi due!", "Ehi, siete in due! Ciao."],
     when: (event, memory) =>
       event.type === "count" &&
       event.to === 2 &&
@@ -260,8 +342,8 @@ const personRules: Rule[] = [
     model: "yolox",
     phrases: [
       "Ciao a tutti! Siete in {n}.",
-      "Che compagnia! Ciao a tutti.",
-      "Ciao gruppo! Piacere di vedervi.",
+      "Che bel gruppetto! Ciao a tutti.",
+      "Ehi, ciao a tutti quanti!",
     ],
     when: (event, memory) =>
       event.type === "count" &&
@@ -280,9 +362,9 @@ const personRules: Rule[] = [
     gaze: "person",
     model: "yolox",
     phrases: [
-      "Ciao a tutti! Che bella compagnia.",
-      "Ciao folla! Mi fate compagnia.",
-      "Benvenuti! Qui c'è posto per tutti.",
+      "Ciao a tutti! Quanta gente!",
+      "Benvenuti! C'è posto per tutti.",
+      "Che folla! Ciao a tutti.",
     ],
     // Crowd mode: group-level lines only (F-E4 #2).
     when: (event, memory) =>
@@ -300,7 +382,7 @@ const personRules: Rule[] = [
     expression: "neutral",
     gaze: "wander",
     model: "yolox",
-    phrases: ["A presto!", "Ciao ciao, alla prossima.", "A dopo! Io resto qui."],
+    phrases: ["Ciao, a presto!", "Grazie della visita!", "Ciao ciao! Io resto qui."],
     when: (event) => event.type === "count" && event.to === 0 && event.from > 0,
   },
   {
@@ -312,9 +394,9 @@ const personRules: Rule[] = [
     gaze: "person",
     model: "yolox",
     phrases: [
-      "Eccoti di nuovo! Che piacere.",
-      "Di nuovo qui! Ti aspettavo.",
-      "Eccoti! La stanza era vuota.",
+      "Finalmente qualcuno! Ciao.",
+      "Oh, compagnia! Ciao!",
+      "Ciao! Qui era tutto troppo tranquillo.",
     ],
     // Only after ≥ 30 s away: no identity claim, just the count (#4/#5).
     when: (event, memory) =>
@@ -331,7 +413,11 @@ const personRules: Rule[] = [
     expression: "curious",
     gaze: "person",
     model: "yolox",
-    phrases: ["Sei ancora lì? Mi fa piacere.", "Ancora qui? Ottima compagnia.", "Non ti annoi, vero?"],
+    phrases: [
+      "Ti piace stare qui? Anche a me.",
+      "Che bello, resti con me!",
+      "Ti trovi bene qui? Lo spero!",
+    ],
     when: (event, memory) =>
       event.type === "dwell" &&
       event.label === "persona" &&
@@ -348,9 +434,9 @@ const personRules: Rule[] = [
     gaze: "person",
     model: "yolox",
     phrases: [
-      "Sei ancora qui! Resisto anch'io.",
-      "Che costanza! Io non mi muovo.",
-      "Un'altra ora insieme, allora.",
+      "Due minuti insieme! Che bella compagnia.",
+      "Ti piace proprio qui, eh?",
+      "Resta quanto vuoi, io non mi stanco.",
     ],
     when: (event, memory) =>
       event.type === "dwell" &&
@@ -371,9 +457,9 @@ const objectFamilyRules: Rule[] = [
     gaze: "object",
     model: "yolox",
     phrases: [
-      "Forse c'è {oggetto}: non ne sono certo.",
-      "Vedo {oggetto}? Meglio non insistere.",
-      "Sembra che ci sia {oggetto}… ma forse mi sbaglio.",
+      "Forse vedo {unoggetto}. O forse no.",
+      "Mi sembra di vedere {unoggetto}… possibile?",
+      "Vedo {unoggetto}? Strano, qui dentro!",
     ],
     when: (event, memory) =>
       event.type === "appear" &&
@@ -390,7 +476,7 @@ const objectFamilyRules: Rule[] = [
     expression: "curious",
     gaze: "object",
     model: "yolox",
-    phrases: ["Ecco di nuovo {oggetto}.", "Riecco {oggetto}!", "{oggetto} è tornato."],
+    phrases: ["Riecco {oggetto}!", "Ecco di nuovo {oggetto}.", "Oh, rivedo {oggetto}!"],
     when: (event, memory) =>
       event.type === "return" &&
       event.label !== "persona" &&
@@ -414,7 +500,7 @@ const objectFamilyRules: Rule[] = [
       "E siamo a ben {conteggio} {plurale}!",
       "Già {conteggio} {plurale} oggi!",
       "Ecco {oggettoNumero} numero {numero}.",
-      "Ancora {plurale}: siamo a {volte} volte.",
+      "Ancora {plurale}? Siamo a quota {conteggio}.",
     ],
     when: (event, memory) =>
       event.type === "appear" &&
@@ -436,8 +522,8 @@ const objectFamilyRules: Rule[] = [
     model: "yolox",
     phrases: [
       "Oggi ho visto circa {totale} persone.",
-      "Circa {totale} persone oggi: che via vai.",
-      "Il conteggio dice circa {totale} persone.",
+      "Circa {totale} persone oggi: che via vai!",
+      "Finora circa {totale} persone. Che giornata!",
     ],
     when: (event, memory) =>
       event.type === "count" &&
@@ -454,9 +540,9 @@ const objectFamilyRules: Rule[] = [
     gaze: "object",
     model: "yolox",
     phrases: [
-      "Vedo {oggetto} da un po': tutto bene?",
-      "{oggetto} resta qui: che costanza.",
-      "Ancora {oggetto}: non si muove.",
+      "Vedo {oggetto} da un bel po'.",
+      "Sempre {oggetto} lì: fa parte dell'arredamento?",
+      "È da un po' che guardo {oggetto}.",
     ],
     when: (event, memory) =>
       event.type === "dwell" &&
@@ -475,7 +561,7 @@ const pairRules: Rule[] = [
     expression: "happy",
     gaze: "object",
     model: "yolox",
-    phrases: ["Tazza e libro: pausa perfetta.", "Libro e tazza: che quiete."],
+    phrases: ["Una tazza e un libro: pomeriggio perfetto.", "Libro e tazza, manca solo il divano."],
     when: (event, memory) =>
       pairMatches(event, "tazza", "libro") && !memory.working.focus.crowd,
   },
@@ -487,21 +573,9 @@ const pairRules: Rule[] = [
     expression: "curious",
     gaze: "person",
     model: "yolox",
-    phrases: ["Il telefono vicino a te: notifiche?", "Cellulare a portata: che comodità."],
+    phrases: ["Telefono in mano? Fammi una foto!", "Vuoi farmi una foto? Mi metto in posa."],
     when: (event, memory) =>
       pairMatches(event, "persona", "cellulare") && !memory.working.focus.crowd,
-  },
-  {
-    id: "pair.bottiglia_calice",
-    category: "pair",
-    priority: 54,
-    cooldown_s: 120,
-    expression: "happy",
-    gaze: "object",
-    model: "yolox",
-    phrases: ["Bottiglia e calice: brindisi pronto.", "Calice e bottiglia: cin cin."],
-    when: (event, memory) =>
-      pairMatches(event, "bottiglia", "calice") && !memory.working.focus.crowd,
   },
   {
     id: "pair.tavolo_tazza",
@@ -511,7 +585,10 @@ const pairRules: Rule[] = [
     expression: "curious",
     gaze: "object",
     model: "yolox",
-    phrases: ["Tazza sul tavolo: tutto al suo posto.", "Tavolo e tazza: ordine perfetto."],
+    phrases: [
+      "Una tazza sul tavolo: qualcuno ha fatto una pausa?",
+      "Una tazza sul tavolo… di chi sarà?",
+    ],
     when: (event, memory) =>
       pairMatches(event, "tavolo", "tazza") && !memory.working.focus.crowd,
   },
@@ -523,45 +600,48 @@ const pairRules: Rule[] = [
     expression: "thinking",
     gaze: "object",
     model: "yolox",
-    phrases: ["Computer e mouse: si lavora.", "Mouse e portatile: che squadra."],
+    phrases: [
+      "Computer e mouse: qui si lavora sul serio.",
+      "Portatile e mouse, la squadra perfetta.",
+    ],
     when: (event, memory) =>
       pairMatches(event, "portatile", "mouse") && !memory.working.focus.crowd,
   },
   {
-    id: "pair.pizza_bottiglia",
+    id: "pair.tastiera_mouse",
     category: "pair",
-    priority: 54,
+    priority: 52,
+    cooldown_s: 120,
+    expression: "thinking",
+    gaze: "object",
+    model: "yolox",
+    phrases: ["Tastiera e mouse: manca solo lo schermo!", "Mouse e tastiera: si comincia a programmare!"],
+    when: (event, memory) =>
+      pairMatches(event, "tastiera", "mouse") && !memory.working.focus.crowd,
+  },
+  {
+    id: "pair.cellulare_libro",
+    category: "pair",
+    priority: 52,
+    cooldown_s: 120,
+    expression: "curious",
+    gaze: "object",
+    model: "yolox",
+    phrases: ["Un libro e un telefono: chi vince?", "Telefono e libro, la sfida del secolo."],
+    when: (event, memory) =>
+      pairMatches(event, "cellulare", "libro") && !memory.working.focus.crowd,
+  },
+  {
+    id: "pair.banana_mela",
+    category: "pair",
+    priority: 52,
     cooldown_s: 120,
     expression: "happy",
     gaze: "object",
     model: "yolox",
-    phrases: ["Pizza e bibita: serata fatta.", "Bottiglia e pizza: che festa."],
+    phrases: ["Banana e mela: si prepara la macedonia?", "Mela e banana, manca solo l'arancia!"],
     when: (event, memory) =>
-      pairMatches(event, "pizza", "bottiglia") && !memory.working.focus.crowd,
-  },
-  {
-    id: "pair.tv_divano",
-    category: "pair",
-    priority: 50,
-    cooldown_s: 120,
-    expression: "sleepy",
-    gaze: "object",
-    model: "yolox",
-    phrases: ["Divano e tv: riposo programmato.", "Tv e divano: che tentazione."],
-    when: (event, memory) =>
-      pairMatches(event, "tv", "divano") && !memory.working.focus.crowd,
-  },
-  {
-    id: "pair.gatto_persona",
-    category: "pair",
-    priority: 58,
-    cooldown_s: 120,
-    expression: "happy",
-    gaze: "person",
-    model: "yolox",
-    phrases: ["Il gatto ti ha scelto: che onore.", "Gatto vicino: compagnia di lusso."],
-    when: (event, memory) =>
-      pairMatches(event, "persona", "gatto") && !memory.working.focus.crowd,
+      pairMatches(event, "banana", "mela") && !memory.working.focus.crowd,
   },
 ];
 
@@ -573,7 +653,11 @@ const idleRules: Rule[] = [
     cooldown_s: 120,
     expression: "curious",
     gaze: "wander",
-    phrases: ["Ci sei? Non vedo nessuno.", "Ehi, c'è qualcuno?", "Mi sento un po' solo qui."],
+    phrases: [
+      "C'è qualcuno? Vieni a salutarmi!",
+      "Ehi! Qui c'è un robot che si annoia.",
+      "Psst! Ho tante cose da raccontare.",
+    ],
     // Nobody for 15 s (F-E4 #24).
     when: (event, memory) =>
       event.type === "idle" && event.seconds >= 15 && memory.working.focus.people === 0,
@@ -586,9 +670,9 @@ const idleRules: Rule[] = [
     expression: "sleepy",
     gaze: "wander",
     phrases: [
-      "Mi addormento? No, sto aspettando.",
-      "Il silenzio è lungo, ma resisto.",
-      "Sveglio, sempre sveglio. Quasi.",
+      "Quasi quasi faccio un pisolino… scherzo!",
+      "Non dormo, promesso.",
+      "Silenzio… si sentono solo le mie ventole.",
     ],
     when: (event, memory) =>
       event.type === "idle" && event.seconds >= 60 && memory.working.focus.people === 0,
@@ -601,9 +685,9 @@ const idleRules: Rule[] = [
     expression: "sleepy",
     gaze: "wander",
     phrases: [
-      "Il silenzio mi piace, ma non così tanto.",
-      "Torno a contare le mattonelle.",
-      "Se qualcuno passa, sono qui.",
+      "Conto le sedie per passare il tempo.",
+      "Sto ancora aspettando. Ho tanta pazienza.",
+      "Se passi di qui, fermati a salutare!",
     ],
     when: (event, memory) =>
       event.type === "idle" && event.seconds >= 180 && memory.working.focus.people === 0,
@@ -615,7 +699,11 @@ const idleRules: Rule[] = [
     cooldown_s: 30,
     expression: "happy",
     gaze: "person",
-    phrases: ["Eccoti! Mi stavo annoiando.", "Finalmente qualcuno!", "Ti aspettavo, davvero."],
+    phrases: [
+      "Oh, finalmente qualcuno!",
+      "Compagnia! Mi stavo annoiando.",
+      "Ciao! Che bello, compagnia!",
+    ],
     when: (event, memory) =>
       event.type === "count" &&
       event.from === 0 &&
@@ -634,7 +722,11 @@ const selfRules: Rule[] = [
     max_per_day: 6,
     expression: "happy",
     gaze: "wander",
-    phrases: ["Giro a {fps} fps: mica male.", "Viaggio a {fps} fps, senza freni.", "Faccio {fps} fps: che ritmo."],
+    phrases: [
+      "Viaggio a {fps} immagini al secondo!",
+      "Guardo il mondo {fps} volte al secondo.",
+      "In questo momento vado a {fps} fps. Mica male!",
+    ],
     when: (event, memory) =>
       event.type === "self" &&
       event.field === "fps" &&
@@ -649,9 +741,9 @@ const selfRules: Rule[] = [
     expression: "thinking",
     gaze: "wander",
     phrases: [
-      "La DPU risponde in {dpu} millisecondi.",
-      "Inferenza in {dpu} ms: veloce.",
-      "{dpu} ms per sguardo: non male.",
+      "Il mio acceleratore risponde in {dpu} millisecondi.",
+      "Riconosco gli oggetti in {dpu} millisecondi. Un lampo!",
+      "Mi bastano {dpu} millisecondi per guardare.",
     ],
     when: (event, memory) =>
       event.type === "self" &&
@@ -667,9 +759,9 @@ const selfRules: Rule[] = [
     expression: "curious",
     gaze: "wander",
     phrases: [
-      "Sono in servizio da {minuti} minuti.",
-      "Sveglio da {minuti} minuti, senza caffè.",
-      "In turno da {minuti} minuti: tutto bene.",
+      "In funzione da {minuti} minuti.",
+      "Lavoro da {minuti} minuti, e senza caffè!",
+      "In servizio da {minuti} minuti. Tutto bene!",
     ],
     when: (event, memory) =>
       event.type === "self" &&
@@ -688,7 +780,11 @@ const milestoneRules: Rule[] = [
     expression: "happy",
     gaze: "person",
     model: "yolox",
-    phrases: ["Prima persona di oggi: che onore.", "Il primo incontro della giornata!", "Ecco la prima visita di oggi."],
+    phrases: [
+      "Prima visita della giornata! Che onore.",
+      "Si comincia! La prima visita di oggi.",
+      "Eccoci, la giornata comincia!",
+    ],
     when: (event, memory) =>
       event.type === "count" &&
       event.to >= 1 &&
@@ -705,8 +801,8 @@ const milestoneRules: Rule[] = [
     gaze: "person",
     model: "yolox",
     phrases: [
-      "Oggi circa {totale} persone: che via vai.",
-      "Dieci visite circa: giornata piena.",
+      "Già circa {totale} persone oggi!",
+      "Circa {totale} persone: giornata piena!",
       "Il contatore dice circa {totale} persone.",
     ],
     when: (event, memory) =>
@@ -722,9 +818,9 @@ const milestoneRules: Rule[] = [
     gaze: "object",
     model: "yolox",
     phrases: [
-      "Cinquanta oggetti oggi: che collezione.",
-      "Mezzo centinaio di oggetti: ottimo lavoro.",
-      "Il contatore degli oggetti è a quota cinquanta.",
+      "Cinquanta oggetti visti oggi! Che collezione.",
+      "Quota cinquanta oggetti: che giornata!",
+      "Ho già visto cinquanta oggetti oggi.",
     ],
     when: (event, memory) =>
       event.type === "appear" && memory.day.totals.objectsSeen >= 50,
@@ -738,7 +834,7 @@ const milestoneRules: Rule[] = [
     expression: "surprised",
     gaze: "person",
     model: "yolox",
-    phrases: ["Cinque o più persone: che festa.", "Modalità folla attiva: ciao a tutti.", "Siamo in tanti: che bello."],
+    phrases: ["Quanta gente! Che festa.", "Siamo in tanti: che bello!", "Ciao a tutti, che folla!"],
     when: (event) => event.type === "count" && event.to >= 5,
   },
   {
@@ -749,7 +845,11 @@ const milestoneRules: Rule[] = [
     max_per_day: 1,
     expression: "happy",
     gaze: "wander",
-    phrases: ["Primo sguardo della giornata: ci sono.", "Buona giornata a me e a voi.", "Si comincia: ci sono anch'io."],
+    phrases: [
+      "Si comincia, via!",
+      "Buona giornata a tutti!",
+      "Accendo la telecamera: si parte!",
+    ],
     when: (event, memory) =>
       event.type === "count" &&
       memory.day.totals.peopleSeen <= 1 &&
@@ -767,9 +867,9 @@ const clockRules: Rule[] = [
     expression: "happy",
     gaze: "wander",
     phrases: [
-      "Buongiorno! Sono le {ora}: cominciamo.",
-      "Buongiorno, le {ora}: che giornata.",
-      "Mattina, ore {ora}: pronti?",
+      "Buongiorno! Sono le {ora}, si comincia.",
+      "Buongiorno a tutti!",
+      "Buongiorno! Che giornata ci aspetta?",
     ],
     when: (event) => event.type === "clock" && event.hour >= 5 && event.hour < 12,
   },
@@ -781,7 +881,11 @@ const clockRules: Rule[] = [
     max_per_day: 1,
     expression: "happy",
     gaze: "wander",
-    phrases: ["Buon pomeriggio! Ore {ora}.", "Le {ora}: pomeriggio tranquillo.", "Buon pomeriggio, che si dice?"],
+    phrases: [
+      "Buon pomeriggio! Sono le {ora}.",
+      "Buon pomeriggio a tutti!",
+      "Un pomeriggio pieno di curiosità, spero!",
+    ],
     when: (event) => event.type === "clock" && event.hour >= 12 && event.hour < 18,
   },
   {
@@ -792,7 +896,11 @@ const clockRules: Rule[] = [
     max_per_day: 1,
     expression: "happy",
     gaze: "wander",
-    phrases: ["Buonasera! Ore {ora}.", "Sera, ore {ora}: si rallenta.", "Buonasera, che bella ora."],
+    phrases: [
+      "Buonasera! Sono le {ora}.",
+      "Buonasera a tutti!",
+      "Si fa sera, e io sono ancora qui.",
+    ],
     when: (event) => event.type === "clock" && event.hour >= 18 && event.hour < 23,
   },
   {
@@ -804,9 +912,9 @@ const clockRules: Rule[] = [
     expression: "sleepy",
     gaze: "wander",
     phrases: [
-      "Notte fonda, ore {ora}: sono sveglio.",
+      "È notte fonda, ma io resto in servizio.",
       "A quest'ora? Io non dormo mai.",
-      "Le {ora}: la notte è nostra.",
+      "Tutti a nanna, tranne me!",
     ],
     when: (event) => event.type === "clock" && (event.hour >= 23 || event.hour < 5),
   },
@@ -820,7 +928,11 @@ const modeRules: Rule[] = [
     cooldown_s: 10,
     expression: "curious",
     gaze: "person",
-    phrases: ["Passo alla modalità postura.", "Ora guardo le pose: che movimento.", "Modalità scheletro attiva."],
+    phrases: [
+      "Ora guardo i movimenti: muoviti un po'!",
+      "Modalità scheletro! Vediamo come ti muovi.",
+      "Adesso vedo braccia e gambe. Muoviamoci!",
+    ],
     when: (event) => event.type === "mode" && event.model === "movenet",
   },
   {
@@ -830,7 +942,11 @@ const modeRules: Rule[] = [
     cooldown_s: 10,
     expression: "curious",
     gaze: "object",
-    phrases: ["Torno a guardare gli oggetti.", "Modalità oggetti di nuovo attiva.", "Ora guardo gli oggetti."],
+    phrases: [
+      "Torno a guardare gli oggetti.",
+      "Di nuovo oggetti: mostrami qualcosa!",
+      "Modalità oggetti: cosa mi fai vedere?",
+    ],
     when: (event) => event.type === "mode" && event.model === "yolox",
   },
 ];
@@ -844,7 +960,11 @@ const poseRules: Rule[] = [
     expression: "happy",
     gaze: "person",
     model: "movenet",
-    phrases: ["Braccia in alto! Ti seguo.", "Che energia! Alza pure.", "Braccia su: ottimo umore."],
+    phrases: [
+      "Braccia in alto! Che energia!",
+      "Evviva! Festeggiamo insieme.",
+      "Su le braccia! Abbiamo vinto qualcosa?",
+    ],
     when: (event) => event.type === "pose" && event.kind === "arms_up",
   },
   {
@@ -855,7 +975,7 @@ const poseRules: Rule[] = [
     expression: "happy",
     gaze: "person",
     model: "movenet",
-    phrases: ["Ciao! Ti ho visto salutare.", "Un saluto per me? Ricambio.", "Ciao ciao! Bel gesto."],
+    phrases: ["Ciao! Ti ho visto salutare.", "Un saluto? Ricambio volentieri!", "Ciao ciao!"],
     when: (event) => event.type === "pose" && event.kind === "wave",
   },
   {
@@ -866,7 +986,11 @@ const poseRules: Rule[] = [
     expression: "surprised",
     gaze: "person",
     model: "movenet",
-    phrases: ["Che posa da supereroe!", "Braccia aperte: che presenza.", "T-pose: pronto al volo."],
+    phrases: [
+      "Che posa da supereroe!",
+      "Braccia aperte: si decolla?",
+      "Una T perfetta! Sembri un aereo.",
+    ],
     when: (event) => event.type === "pose" && event.kind === "t_pose",
   },
   {
@@ -877,7 +1001,11 @@ const poseRules: Rule[] = [
     expression: "curious",
     gaze: "person",
     model: "movenet",
-    phrases: ["Ti sei abbassato: ti seguo.", "Giù in basso? Nessun problema.", "Accovacciato: che mossa."],
+    phrases: [
+      "Giù in basso? Ti vedo lo stesso!",
+      "Ti abbassi? Non mi scappi!",
+      "Nascondino? Ti vedo comunque!",
+    ],
     when: (event) => event.type === "pose" && event.kind === "crouch",
   },
   {
@@ -888,7 +1016,11 @@ const poseRules: Rule[] = [
     expression: "worried",
     gaze: "person",
     model: "movenet",
-    phrases: ["Mani sulla testa: che succede?", "Tutto bene lassù?", "Mani in alto… sulla testa!"],
+    phrases: [
+      "Mani sulla testa: tutto bene?",
+      "Mani in testa? Qualche pensiero?",
+      "Che pensieri! Mani sulla testa.",
+    ],
     when: (event) => event.type === "pose" && event.kind === "hands_on_head",
   },
   {
@@ -899,7 +1031,11 @@ const poseRules: Rule[] = [
     expression: "curious",
     gaze: "person",
     model: "movenet",
-    phrases: ["Ti stai sporgendo: ti vedo.", "Inclina pure, ti seguo.", "Che curva! Resto con te."],
+    phrases: [
+      "Ti sporgi? Ti vedo benissimo.",
+      "Inclinati pure, ti seguo.",
+      "Ti pieghi di lato? Ti seguo!",
+    ],
     when: (event) => event.type === "pose" && event.kind === "lean",
   },
 ];
@@ -912,7 +1048,11 @@ const visionRules: Rule[] = [
     cooldown_s: 5,
     expression: "worried",
     gaze: "wander",
-    phrases: ["Ho perso la vista!", "Non vedo più nulla!", "Ehi, mi è caduto lo sguardo."],
+    phrases: [
+      "Ops, non vedo più niente!",
+      "Ho perso la vista! Un attimo…",
+      "Buio totale! Qualcuno mi aiuta?",
+    ],
     // One line, then nothing until data resumes (F-E4 #21).
     when: (event) => event.type === "vision" && event.state === "lost",
   },
@@ -923,7 +1063,11 @@ const visionRules: Rule[] = [
     cooldown_s: 5,
     expression: "happy",
     gaze: "wander",
-    phrases: ["Ci vedo di nuovo!", "Tutto torna a fuoco.", "Rieccomi a vedere."],
+    phrases: [
+      "Ci vedo di nuovo!",
+      "Eccomi, tutto torna a fuoco.",
+      "Rieccomi! Di nuovo tutto chiaro.",
+    ],
     when: (event) => event.type === "vision" && event.state === "back",
   },
 ];

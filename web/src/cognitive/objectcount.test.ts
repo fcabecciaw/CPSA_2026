@@ -53,7 +53,7 @@ describe("object count — Italian agreement", () => {
     expect(phrases("bottiglia", 6)).toContain("Ecco la bottiglia numero sei.");
     expect(phrases("bottiglia", 6)).toContain("Sesta bottiglia di oggi.");
     expect(phrases("libro", 2)).toContain("Ecco il libro numero due.");
-    expect(phrases("forbici", 3)).toContain("Ancora forbici: siamo a tre volte.");
+    expect(phrases("forbici", 3)).toContain("Ancora forbici? Siamo a quota tre.");
     expect(phrases("forbici", 3)).toContain("Terzo paio di forbici di oggi.");
     expect(phrases("forbici", 3)).toContain("Ecco il paio di forbici numero tre.");
   });

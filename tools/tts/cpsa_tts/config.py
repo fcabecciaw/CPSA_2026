@@ -16,7 +16,7 @@ DEFAULT_ORIGINS = ("http://10.42.0.83:8080", "http://localhost:5173")
 DEFAULT_ENGINE = "kokoro"
 DEFAULT_VOICE = "if_sara"
 #: A dashboard sentence is <= 12 words (F-E4 #17); 600 characters is generous
-#: enough for a whole poem and keeps a single request bounded.
+#: enough for the longest fact and keeps a single request bounded.
 MAX_TEXT_CHARS = 600
 
 

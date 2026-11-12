@@ -8,11 +8,10 @@
 import { describe, expect, it } from "vitest";
 
 import { FACTS } from "./content/facts";
-import { POEMS } from "./content/poems";
 import type { CognitiveEvent } from "./events";
 import { CognitiveMemory } from "./memory";
 import { CognitiveEngine, type SceneLine, type Utterance } from "./rules";
-import { SceneMachine, type SceneWorld } from "./scene";
+import { SCENE_PHRASES, SceneMachine, type SceneWorld } from "./scene";
 
 function world(overrides: Partial<SceneWorld> = {}): SceneWorld {
   return {
@@ -59,8 +58,8 @@ function say(
   machine.noteSpoken(utterance(line, now), day, now);
 }
 
-describe("Attract — facts and poems, never twice a day", () => {
-  it("alternates fact and poem and keeps facts first", () => {
+describe("Attract — facts and short nudges, never twice a day", () => {
+  it("says facts, with a nudge every fourth idle line, and no poems", () => {
     const machine = new SceneMachine({ rng: () => 0, attractMinMs: 0, attractMaxMs: 0 });
     machine.reset(0);
     const day = memory();
@@ -71,11 +70,11 @@ describe("Attract — facts and poems, never twice a day", () => {
       kinds.push(line!.kind);
       say(machine, line!, day, step * 1_000);
     }
-    // Fact, poem, fact, invitation (every fourth idle line), poem.
-    expect(kinds).toEqual(["fact", "poem", "fact", "invitation", "poem"]);
+    // Facts, with a nudge as every fourth idle line.
+    expect(kinds).toEqual(["fact", "fact", "fact", "invitation", "fact"]);
   });
 
-  it("uses every fact and poem once, then stays quiet", () => {
+  it("uses every fact once, then stays quiet", () => {
     const machine = new SceneMachine({ rng: () => 0.4, attractMinMs: 0, attractMaxMs: 0 });
     machine.reset(0);
     const day = memory();
@@ -86,7 +85,8 @@ describe("Attract — facts and poems, never twice a day", () => {
       if (line === null) {
         continue;
       }
-      if (line.kind === "fact" || line.kind === "poem") {
+      expect(line.ruleId).not.toMatch(/poem/);
+      if (line.kind === "fact") {
         expect(seen.has(line.ruleId), `ripetuto: ${line.ruleId}`).toBe(false);
         seen.add(line.ruleId);
         kinds.set(line.kind, (kinds.get(line.kind) ?? 0) + 1);
@@ -94,8 +94,7 @@ describe("Attract — facts and poems, never twice a day", () => {
       say(machine, line, day, step * 1_000);
     }
     expect(kinds.get("fact")).toBe(FACTS.length);
-    expect(kinds.get("poem")).toBe(POEMS.length);
-    expect(seen.size).toBe(FACTS.length + POEMS.length);
+    expect(seen.size).toBe(FACTS.length);
   });
 
   it("says the invitation only now and then", () => {
@@ -107,7 +106,7 @@ describe("Attract — facts and poems, never twice a day", () => {
       const line = machine.step(step * 1_000, day, world());
       if (line?.kind === "invitation") {
         invitations += 1;
-        expect(line.text).toMatch(/Avvicinati|Vieni più vicino|ti racconto/);
+        expect(line.text).toMatch(/Avvicinati|vicino|salutarmi|mostrarmelo|racconto|giocare/);
       }
       if (line !== null) {
         say(machine, line, day, step * 1_000);
@@ -129,20 +128,21 @@ describe("Engage — one greeting adapted to the number of people", () => {
   it("addresses one person directly, two people together, groups as a group", () => {
     const single = engage(1);
     expect(single.ruleId).toBe("scene.greeting.single");
-    expect(single.text).toMatch(/ti|Benvenuto/i);
+    expect(single.text).toMatch(/ciao/i);
+    expect(single.text).not.toMatch(/Benvenut/);
     expect(single.expression).toBe("happy");
 
     const pair = engage(2);
     expect(pair.ruleId).toBe("scene.greeting.pair");
-    expect(pair.text).toMatch(/voi due|Siete arrivati in due|coppia/i);
+    expect(pair.text).toMatch(/due/);
 
     const group = engage(4);
     expect(group.ruleId).toBe("scene.greeting.group");
-    expect(group.text).toMatch(/Quattro|4|tutti|gruppo/);
+    expect(group.text).toBe("Ciao a tutti! Siete in quattro.");
 
     const crowd = engage(7);
     expect(crowd.ruleId).toBe("scene.greeting.crowd");
-    expect(crowd.text).toMatch(/tutti|folla|Benvenuti/);
+    expect(crowd.text).toMatch(/tutti|folla|Benvenuti|gente/);
   });
 
   it("greets once, then introduces itself the first time, then invites", () => {
@@ -163,7 +163,7 @@ describe("Engage — one greeting adapted to the number of people", () => {
 
     const prompt = machine.step(3_100, day, present);
     expect(prompt?.kind).toBe("prompt");
-    expect(prompt?.text).toMatch(/oggetto|salutarmi|gesto/);
+    expect(prompt?.text).toMatch(/oggetto|qualcosa/);
     say(machine, prompt!, day, 3_100);
     expect(machine.scene).toBe("play");
   });
@@ -188,7 +188,7 @@ describe("Engage — one greeting adapted to the number of people", () => {
     const pose = world({ people: 0, posePerson: true, mode: "movenet" });
     say(movenet, movenet.step(1_000, day, pose)!, day, 1_000);
     const prompt = movenet.step(1_000, day, pose);
-    expect(prompt?.text).toMatch(/salutarmi|mano|gesto/i);
+    expect(prompt?.text).toMatch(/salutarmi|braccia|gesto/i);
   });
 });
 
@@ -246,7 +246,7 @@ describe("Play — continuity, smiles and yes/no questions", () => {
     machine.noteSpoken(
       {
         ruleId: "object.cellulare",
-        text: "Ecco il cellulare: notifiche in arrivo.",
+        text: "Vedo il cellulare! Chissà quante notifiche.",
         expression: "curious",
         gaze: "object",
         event: { type: "appear", label: "cellulare", count: 1, score: 0.9, area: 0.02, scenery: false, doubtful: false, now: 0 },
@@ -263,8 +263,38 @@ describe("Play — continuity, smiles and yes/no questions", () => {
     ]);
     const line = machine.step(5_000, day, world({ people: 1 }));
     expect(line?.kind).toBe("continuity");
-    expect(line?.text).toBe("Prima il telefono, ora una tazza: pausa caffè?");
+    expect(line?.text).toBe("Telefono giù, tazza su: pausa caffè?");
     expect(line?.expression).toBe("curious");
+  });
+
+  it("stays quiet on a pair with no small story (no generic 'prima X, ora Y')", () => {
+    const machine = new SceneMachine({ rng: () => 0.2 });
+    machine.reset(0, true);
+    const day = memory();
+    machine.step(0, day, world({ people: 1 }));
+    machine.noteSpoken(
+      {
+        ruleId: "object.cellulare",
+        text: "Vedo il cellulare! Chissà quante notifiche.",
+        expression: "curious",
+        gaze: "object",
+        event: { type: "appear", label: "cellulare", count: 1, score: 0.9, area: 0.02, scenery: false, doubtful: false, now: 0 },
+        objectKey: "cellulare",
+        priority: 58,
+        utility: 60,
+        now: 0,
+      },
+      day,
+      0,
+    );
+    machine.observe([
+      { type: "appear", label: "sedia", count: 1, score: 0.9, area: 0.02, scenery: false, doubtful: false, now: 5_000 },
+    ]);
+    const line = machine.step(5_000, day, world({ people: 1 }));
+    expect(line?.kind).not.toBe("continuity");
+    for (const phrase of SCENE_PHRASES.CONTINUITY) {
+      expect(phrase).not.toMatch(/\{prima\}|\{ora\}/);
+    }
   });
 
   it("reacts to a smile, once per cooldown, and varies the repetition", () => {
@@ -319,7 +349,7 @@ describe("Play — continuity, smiles and yes/no questions", () => {
     second.observe([{ type: "face", kind: "head_shake", score: 0.8, faces: 1, now: 3_000 }]);
     const denied = second.step(3_000, day2, present);
     expect(denied?.kind).toBe("answer");
-    expect(denied?.text).toMatch(/Rispetto la tua scelta|Meglio la semplicità|resto comunque simpatico/);
+    expect(denied?.text).toBe("Nessun problema, magari ti convinco io.");
   });
 
   it("says 'che bel sorriso' only in Play, not while nobody is there", () => {

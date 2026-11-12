@@ -48,7 +48,6 @@ export interface DayTotals {
 /** Idle content already spoken today, so Attract never repeats itself (#14). */
 export interface DayIdleMemory {
   facts: string[];
-  poems: string[];
   questions: string[];
 }
 
@@ -121,7 +120,7 @@ export function emptyDay(date: string): DayMemory {
     classes: {},
     rules: {},
     totals: { peopleSeen: 0, maxPeople: 0, objectsSeen: 0, rulesFired: 0 },
-    idle: { facts: [], poems: [], questions: [] },
+    idle: { facts: [], questions: [] },
   };
 }
 
@@ -289,7 +288,7 @@ export class CognitiveMemory {
     return this.dayMemory.rules[ruleId]?.count ?? 0;
   }
 
-  /** Was this idle fact/poem/question already said today? (F-E4 #14) */
+  /** Was this idle fact/question already said today? (F-E4 #14) */
   idleUsed(kind: keyof DayIdleMemory, id: string): boolean {
     return this.dayMemory.idle[kind].includes(id);
   }
@@ -384,7 +383,6 @@ export class CognitiveMemory {
         // A day written before the scenes existed has no idle record.
         idle: {
           facts: parsed.idle?.facts ?? [],
-          poems: parsed.idle?.poems ?? [],
           questions: parsed.idle?.questions ?? [],
         },
       };

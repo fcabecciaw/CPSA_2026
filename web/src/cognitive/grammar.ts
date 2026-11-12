@@ -306,8 +306,8 @@ export function peopleWord(count: number): string {
 
 /**
  * A class with the indefinite article: "un telefono", "una tazza",
- * "uno zaino", "un'auto", "due tazze". Used by the scene continuity lines
- * ("Prima il telefono, ora una tazza").
+ * "uno zaino", "un'auto", "due tazze", "un paio di forbici". Fills the
+ * `{unoggetto}` slot of the generic and doubtful object lines.
  */
 export function indefinitePhrase(label: string, count = 1): string {
   const noun = nounGrammar(label);
@@ -315,7 +315,8 @@ export function indefinitePhrase(label: string, count = 1): string {
     return `${numberWord(count)} ${noun.plural}`;
   }
   if (noun.singular === null) {
-    return joinArticle(noun.pluralArticle, noun.plural);
+    // "un paio di forbici", never "una forbici".
+    return `un paio di ${noun.plural}`;
   }
   const article =
     noun.gender === "f"
@@ -331,6 +332,8 @@ export function indefinitePhrase(label: string, count = 1): string {
 /** Slots a rulebook phrase may use. */
 export interface PhraseSlots {
   oggetto?: string;
+  /** The class with the indefinite article: "una tazza", "uno zaino", "due tazze". */
+  unoggetto?: string;
   oggetto2?: string;
   n?: string | number;
   n2?: string | number;
