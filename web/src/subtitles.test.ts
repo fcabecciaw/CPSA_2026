@@ -103,7 +103,6 @@ describe("subtitles and avatar are independent of the objects panel", () => {
       counts: byId("showcase-counts"),
       objectsGroup: byId("showcase-objects-group"),
       objects: byId("showcase-objects"),
-      empty: byId("showcase-empty"),
       meta: byId("showcase-meta"),
     });
 

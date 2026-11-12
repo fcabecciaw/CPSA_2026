@@ -44,7 +44,6 @@ const showcase = new ShowcaseView({
   counts: byId("showcase-counts"),
   objectsGroup: byId("showcase-objects-group"),
   objects: byId("showcase-objects"),
-  empty: byId("showcase-empty"),
   meta: byId("showcase-meta"),
 });
 
@@ -496,7 +495,7 @@ async function boot(): Promise<void> {
       switching = null;
       renderMode();
     }
-    // `showcase.tick` also owns `showcase-empty`: restore the mode's note after it.
+    // `showcase-empty` belongs to the mode alone (ShowcaseView never touches it).
     syncViewNotes();
     renderVoice();
   }, 250);

@@ -27,7 +27,6 @@ export interface ShowcaseElements {
   counts: HTMLElement;
   objectsGroup: HTMLElement;
   objects: HTMLElement;
-  empty: HTMLElement;
   meta: HTMLElement;
 }
 
@@ -81,7 +80,9 @@ export class ShowcaseView {
   }
 
   private render(): void {
-    const { countsGroup, counts, objectsGroup, objects, empty, meta } = this.elements;
+    // The invitation note is main.ts's alone (mode and model swap): toggling
+    // it here too made it blink on every refresh.
+    const { countsGroup, counts, objectsGroup, objects, meta } = this.elements;
     const view = this.rendered;
     const objectList = view?.objects ?? [];
     const countList = view?.counts ?? [];
@@ -89,7 +90,6 @@ export class ShowcaseView {
 
     countsGroup.hidden = countList.length === 0;
     objectsGroup.hidden = objectList.length === 0;
-    empty.hidden = visible;
     meta.hidden = !visible;
 
     if (!visible) {
