@@ -28,7 +28,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import subprocess
 import sys
 import threading
 from collections.abc import Callable, Sequence
@@ -38,6 +37,7 @@ from typing import Any, Protocol
 
 import cv2
 import numpy as np
+from board_services import SERVICES, ServiceCheckError, active_services, services_refusal
 
 from cpsa.adapters.camera.devices import resolve_device
 from cpsa.adapters.camera.irdepth import INZI_FOURCC, IrDepthSource
@@ -62,20 +62,10 @@ IR_HEIGHT = 480
 FPS = 30.0
 """Requested camera rate."""
 
-SERVICES = ("cpsa-supervisor", "cpsa-dpu")
-"""Board units that must be stopped before the camera is opened."""
-
 DEFAULT_COUNT = 300
 DEFAULT_MAX_SECONDS = 120.0
 
-#: ``systemctl is-active`` states that mean the unit is (still) running.
-_BUSY_STATES = frozenset({"active", "activating", "reloading", "deactivating"})
-
 LOGGER = logging.getLogger("cpsa.capture_ir_frames")
-
-
-class ServiceCheckError(RuntimeError):
-    """The state of the demo services could not be determined."""
 
 
 class CaptureError(RuntimeError):
@@ -97,41 +87,6 @@ class _Source(Protocol):
 SourceFactory = Callable[[str, str], _Source]
 ServiceCheck = Callable[[], Sequence[str]]
 NodeResolver = Callable[[str, str], str]
-
-
-def active_services(
-    units: Sequence[str] = SERVICES,
-    *,
-    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> tuple[str, ...]:
-    """Return the units of ``units`` that ``systemctl is-active`` reports busy.
-
-    Args:
-        units: systemd unit names to query in one call.
-        run: Test seam; defaults to :func:`subprocess.run`.
-
-    Raises:
-        ServiceCheckError: If ``systemctl`` cannot be run or its output cannot be
-            mapped to the units.  The check fails closed: an unknown state must
-            not let a capture race the demo services.
-    """
-
-    try:
-        completed = run(
-            ["systemctl", "is-active", *units],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError as exc:
-        raise ServiceCheckError(f"cannot run systemctl: {exc}") from exc
-    states = completed.stdout.split()
-    if len(states) != len(units):
-        raise ServiceCheckError(
-            f"systemctl is-active printed {len(states)} states for {len(units)} units: "
-            f"{completed.stdout.strip()!r}"
-        )
-    return tuple(unit for unit, state in zip(units, states, strict=True) if state in _BUSY_STATES)
 
 
 def _resolve_node(device: str, match: str) -> str:
@@ -238,16 +193,6 @@ def metadata_payload(
     }
 
 
-def _refusal(busy: Sequence[str]) -> str:
-    names = ", ".join(busy)
-    return (
-        f"refusing to open the camera: {names} active. The board froze on 2026-11-11 when an IR\n"
-        "capture ran alongside the demo services. Stop them first:\n"
-        "    sudo systemctl stop cpsa-supervisor cpsa-dpu\n"
-        "then rerun this command (--allow-services skips this check)."
-    )
-
-
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True, help="output directory")
@@ -310,7 +255,7 @@ def main(
             print(f"{exc}; pass --allow-services to skip the check", file=sys.stderr)
             return 2
         if busy:
-            print(_refusal(busy), file=sys.stderr)
+            print(services_refusal(busy), file=sys.stderr)
             return 2
 
     try:

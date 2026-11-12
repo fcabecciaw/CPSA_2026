@@ -392,6 +392,53 @@ boot and after every restart, so no `mode.set` command is needed.
 files without interrupting a running demo; the new code is picked up at the
 next restart.
 
+## Recording RPS data
+
+`scripts/capture_studio.py` records labelled rock/paper/scissors runs from the
+F200 colour camera and shows the live video in a laptop browser, so you can see
+whether the framing is right while recording. It uses the same camera controls
+as the medical mode (exposure 300, gain 160, 50 Hz anti-flicker) and refuses to
+open the camera while `cpsa-supervisor` or `cpsa-dpu` is active.
+
+1. Stop the demo services, then start the studio:
+
+   ```bash
+   sudo systemctl stop cpsa-supervisor cpsa-dpu
+   cd ~/cpsa && .venv/bin/python scripts/capture_studio.py
+   # --port 8080, --out /home/kria/rps_capture_<YYYYMMDD>, --max-run-seconds 120
+   ```
+
+2. Open `http://10.42.0.83:8080/`. The page shows the live preview, a REC badge
+   with the remaining seconds and the frame count, the run form (label, tilt,
+   seconds, every-K, note) and the list of runs already recorded. Start counts
+   down 3-2-1 before the first frame is kept; Stop (or the run length) ends it.
+
+   Record `rock`, `paper`, `scissors` and `negative` at the three tilts: `top`
+   (near top-down), `bust` (tilted, part of the bust) and `frontal` (half-bust,
+   face visible). Faces may appear; the recordings are for training only.
+
+3. Each run lands in `<out>/<run_id>_<tilt>_<label>/` as `rgb_XXXXX.jpg` (q95,
+   640x480) plus `meta.json` (labels, tilt, note, ISO times, every-K, per-frame
+   `t_monotonic`, camera node and controls). `<out>/runs.json` indexes every run
+   and is rewritten atomically after each one.
+
+4. Ctrl-C: the camera is closed and a run in progress is still finalised, so its
+   `meta.json` and the index entry are written.
+
+5. Copy the day to the PC and keep it out of git (`build/` is ignored):
+
+   ```bash
+   scp -r kria@10.42.0.83:/home/kria/rps_capture_20261112 build/rps_capture_20261112
+   ```
+
+6. Restart the demo:
+
+   ```bash
+   sudo systemctl start cpsa-supervisor cpsa-dpu
+   ```
+
+Uploading the recordings to Kaggle for training is allowed; never commit them.
+
 ## Logs
 
 ```bash
