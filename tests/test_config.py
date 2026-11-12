@@ -87,8 +87,14 @@ def test_the_shipped_configuration_parses_and_names_the_machine() -> None:
     assert config.model.name == "yolox_nano"
     assert config.model.path == Path("models/yolox_nano.xmodel")
     assert config.model.conf_thr == 0.35
-    assert config.model.class_conf == {"person": 0.40}
-    assert config.model.object_conf == 0.25
+    assert config.model.class_conf == {
+        "person": 0.40,
+        "bottle": 0.30,
+        "cup": 0.30,
+        "cell phone": 0.35,
+        "book": 0.35,
+    }
+    assert config.model.object_conf == 0.45
     assert config.model.zoom == 1.5
     assert config.model.zoom_center == (0.5, 0.5)
     assert config.movenet.name == "movenet"
@@ -200,8 +206,10 @@ def test_the_class_thresholds_resolve_to_the_showcase_classes() -> None:
 
     assert len(thresholds) == len(COCO80_EN)
     assert thresholds[COCO80_EN.index("person")] == 0.40
-    assert thresholds[COCO80_EN.index("bottle")] == 0.25
-    assert set(thresholds.values()) == {0.40, 0.25}
+    assert thresholds[COCO80_EN.index("bottle")] == 0.30
+    assert thresholds[COCO80_EN.index("cell phone")] == 0.35
+    assert thresholds[COCO80_EN.index("tv")] == 0.45
+    assert set(thresholds.values()) == {0.40, 0.30, 0.35, 0.45}
 
 
 @pytest.mark.parametrize(

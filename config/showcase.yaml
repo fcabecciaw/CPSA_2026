@@ -36,7 +36,11 @@ model:                        # YOLOX-nano from the Vitis AI model zoo, COCO-80
   conf_thr: 0.35              # class-independent default of objectness * class score
   class_conf:                 # per-class overrides, by COCO name (0..1)
     person: 0.40              # a person is only reported above this score
-  object_conf: 0.25           # every class not named above: keeps a dim held bottle
+    bottle: 0.30              # objects people hold up stay easy to catch
+    cup: 0.30
+    cell phone: 0.35
+    book: 0.35
+  object_conf: 0.45           # every other class: high, so the room does not invent a tv
   iou_thr: 0.45               # class-aware NMS IoU threshold
   zoom: 1.5                   # centre crop before the letterbox: 1.3-1.5 makes small objects big (1.0 = off)
   zoom_center: [0.5, 0.5]     # crop centre as a fraction of the frame (1.0 = whole frame)
