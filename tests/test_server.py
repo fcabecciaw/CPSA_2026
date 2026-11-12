@@ -14,7 +14,7 @@ import socket
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,7 @@ from aiohttp import ClientSession
 from cpsa import protocol
 from cpsa.channel import CommandChannel, MessageChannel
 from cpsa.config import WebConfig
+from cpsa.protocol import ACTIVE_MODELS
 from cpsa.server import VIDEO_BOUNDARY, WebServer, serve
 from tests.contract.protocol_schemas import validate_server_message
 
@@ -112,7 +113,9 @@ def web_config(tmp_path: Path, **overrides: Any) -> WebConfig:
 class Running:
     """A ``WebServer`` started in its own thread and stopped at the end."""
 
-    def __init__(self, tmp_path: Path, **overrides: Any) -> None:
+    def __init__(
+        self, tmp_path: Path, *, models: Sequence[str] | None = None, **overrides: Any
+    ) -> None:
         self.frames = FakeFrames()
         self.messages = MessageChannel(FakeQueue())
         self.commands = CommandChannel(FakeQueue())
@@ -121,6 +124,7 @@ class Running:
             frames=self.frames,
             messages=self.messages,
             commands=self.commands,
+            models=models if models is not None else ACTIVE_MODELS,
             server_version="9.9.9",
         )
 
@@ -414,6 +418,30 @@ def test_model_set_is_routed_to_the_pipeline(tmp_path: Path) -> None:
 
     assert topic == "model.set"
     assert data == {"model": "movenet"}
+
+
+def test_a_disabled_model_is_a_bad_command_and_is_not_forwarded(tmp_path: Path) -> None:
+    with Running(tmp_path, models=("yolox",)) as running:
+
+        async def scenario() -> dict[str, Any]:
+            async with ClientSession() as session:
+                ws = await session.ws_connect(running.url("/ws"))
+                try:
+                    await receive(ws, "hello")
+                    await ws.send_json(
+                        {"v": 1, "type": "model.set", "seq": 6, "data": {"model": "movenet"}}
+                    )
+                    message = await receive(ws, "error")
+                finally:
+                    await ws.close()
+            return dict(message["data"])
+
+        data = run(scenario)
+
+    assert data["code"] == "bad_command"
+    assert data["ref_seq"] == 6
+    assert "not enabled" in data["message"]
+    assert running.commands.get_nowait() is None
 
 
 def test_an_unknown_model_is_a_bad_command_and_is_not_forwarded(tmp_path: Path) -> None:

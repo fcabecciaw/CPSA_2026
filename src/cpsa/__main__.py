@@ -25,7 +25,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from cpsa import __version__
+from cpsa import __version__, protocol
 from cpsa.channel import CommandChannel, FrameChannel, MessageChannel
 from cpsa.config import ConfigError, ShowcaseConfig, load
 from cpsa.pipeline import Pipeline, StartError
@@ -128,6 +128,7 @@ def run(
                 server_ready,
                 config.log.level,
                 __version__,
+                config.movenet.enabled,
             ),
             name="cpsa-web",
         )
@@ -183,6 +184,7 @@ def _server_process(
     ready: Any,
     log_level: str,
     version: str,
+    movenet_enabled: bool,
 ) -> None:
     """Entry point of process B: attach the shared state and serve until stopped."""
     _configure_logging(log_level)
@@ -197,6 +199,7 @@ def _server_process(
             commands=commands,
             stop=stop,
             ready=ready,
+            models=_models(bool(movenet_enabled)),
             server_version=version,
         )
     finally:
@@ -204,6 +207,13 @@ def _server_process(
         messages.close()
         commands.close()
     raise SystemExit(code)
+
+
+def _models(movenet_enabled: bool) -> tuple[str, ...]:
+    """The models ``model.set`` may load in this configuration (R2-G)."""
+    if movenet_enabled:
+        return tuple(protocol.ACTIVE_MODELS)
+    return (protocol.ACTIVE_MODELS[0],)
 
 
 def _install_signals(stop: threading.Event) -> Callable[[], None]:

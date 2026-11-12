@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import statistics
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -218,12 +221,68 @@ def _buffers(peaks: dict[int, tuple[int, int, float]] | None = None) -> dict[str
     dense["centers"][24, 24, 0] = _logit(0.9)
     for index, (row, column, probability) in peaks.items():
         dense["heatmaps"][row, column, index] = _logit(probability)
+    return _quantize_dense(dense)
+
+
+def _quantize_dense(dense: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Quantize NHWC float heads at their fix points, as the DPU buffers hold them."""
     return {
         name: np.clip(np.rint(head * (2.0 ** FIX_POINTS[name])), -128.0, 127.0).astype(np.int8)[
             None
         ]
         for name, head in dense.items()
     }
+
+
+def _buffers_of(heads: MovenetHeads) -> dict[str, np.ndarray]:
+    """The int8 buffers a DPU would write for these float heads."""
+    return _quantize_dense(
+        {
+            "heatmaps": np.moveaxis(heads.heatmaps, 0, -1),
+            "centers": np.moveaxis(heads.centers, 0, -1),
+            "regs": np.moveaxis(heads.regs, 0, -1),
+            "offsets": np.moveaxis(heads.offsets, 0, -1),
+        }
+    )
+
+
+def _head_tensors() -> list[OutputTensor]:
+    return [
+        OutputTensor(
+            name=f"head_{name}",
+            shape=(48, 48, HEAD_DIMS[name][3]),
+            fix_point=FIX_POINTS[name],
+            stride=4,
+        )
+        for name in OUTPUT_ORDER
+    ]
+
+
+def _timed_ms(function: Callable[[], object]) -> float:
+    """Return how long one call of ``function`` took, in milliseconds."""
+
+    started = time.perf_counter()
+    function()
+    return (time.perf_counter() - started) * 1000.0
+
+
+def _interleaved_ms(
+    fast: Callable[[], object], reference: Callable[[], object], runs: int = 40
+) -> tuple[float, float]:
+    """Time two functions alternately, after a warm-up, and return both medians.
+
+    Alternating the calls is what makes the comparison fair: both see the same
+    CPU frequency and allocator state, so a slow machine cannot pass or fail the
+    ratio by itself. The warm-up matters on a laptop, where the first calls run
+    at a lower clock.
+    """
+
+    for _ in range(25):
+        fast()
+        reference()
+    fast_ms = [_timed_ms(fast) for _ in range(runs)]
+    reference_ms = [_timed_ms(reference) for _ in range(runs)]
+    return statistics.median(fast_ms), statistics.median(reference_ms)
 
 
 def _payload(peaks: dict[int, tuple[int, int, float]] | None = None) -> list[NDArray[np.int8]]:
@@ -468,6 +527,125 @@ def test_dequantize_heads_rejects_a_bad_order(order: tuple[str, ...], message: s
 
 
 # --------------------------------------------------------------------------- #
+# The int8 decoder (the A53 path of R2-G); the float64 ``decode`` is the oracle
+# --------------------------------------------------------------------------- #
+
+
+def test_the_int8_decode_matches_the_reference_decoder() -> None:
+    heads = _heads(
+        center=(20, 18),
+        peaks={
+            0: (10, 30, 0.8),
+            1: (24, 24, 0.7),
+            2: (30, 10, 0.6),
+            3: (12, 12, 0.55),
+            4: (36, 40, 0.95),
+        },
+        regs={0: (6.0, -14.0), 2: (-2.0, 4.0), 4: (1.0, 1.0)},
+        offsets={0: (0.5, -0.25), 3: (0.125, 0.375), 4: (-0.75, 0.625), 9: (0.25, -0.5)},
+    )
+    # A second candidate near keypoint 0's regression target, and a weak cell
+    # above the threshold away from it: the weighted peak search must agree.
+    heads.heatmaps[0, 21, 18] = _logit(0.4)
+    heads.heatmaps[0, 40, 5] = _logit(0.15)
+    buffers = _buffers_of(heads)
+    tensors = _head_tensors()
+    ordered = [buffers[name] for name in OUTPUT_ORDER]
+
+    reference = movenet.decode(
+        movenet.dequantize_heads(ordered, tensors, OUTPUT_ORDER), size=(480, 640)
+    )
+    fast = movenet.decode_buffers(ordered, tensors, size=(480, 640), order=OUTPUT_ORDER)
+
+    np.testing.assert_allclose(fast.keypoints[:, :2], reference.keypoints[:, :2], atol=0.5)
+    np.testing.assert_allclose(fast.keypoints[:, 2], reference.keypoints[:, 2], atol=1e-3)
+    assert fast.score == pytest.approx(reference.score, abs=1e-3)
+    # Keypoint 9 is below the threshold, so both decoders score it zero and
+    # read the offset of cell (0, 0): the coordinates match, the score is 0.
+    assert fast.keypoints[9, 2] == 0.0
+    np.testing.assert_allclose(fast.keypoints[9, :2], reference.keypoints[9, :2], atol=0.5)
+
+
+def test_the_int8_decode_keeps_the_reference_threshold_and_prior() -> None:
+    heads = _heads(peaks={0: (40, 40, 0.09), 1: (24, 24, 0.9)})
+    buffers = _buffers_of(heads)
+    tensors = _head_tensors()
+    ordered = [buffers[name] for name in OUTPUT_ORDER]
+
+    pose = movenet.decode_buffers(ordered, tensors, size=(480, 640), order=OUTPUT_ORDER)
+
+    assert pose.keypoints[0, 2] == 0.0
+    assert pose.keypoints[1, 2] == pytest.approx(0.9, abs=0.01)
+    assert pose.keypoints[1, 0] == pytest.approx(320.0, abs=0.5)
+
+
+def test_the_int8_decode_is_at_least_ten_times_faster_than_the_reference() -> None:
+    """R2-G: the A53 decode is what buys the MoveNet view its frame rate.
+
+    Host micro-benchmark on the same int8 buffers: the reference is the path
+    the board ran before (``dequantize_heads`` to ``float64`` plus the zoo
+    ``decode``, 14.5 ms on the A53) and the fast path is
+    :func:`~cpsa.movenet.decode_quantized`, the int8 decode the runner calls
+    with the head views of its DPU slot. Interleaved medians, so a slower host
+    or one scheduler hiccup cannot fail the ratio by itself; the board numbers
+    are what ``scripts/profile_showcase.py`` prints.
+    """
+
+    buffers = _buffers(
+        peaks={
+            0: (12, 30, 0.80),
+            1: (24, 24, 0.70),
+            2: (30, 10, 0.60),
+            5: (20, 18, 0.95),
+            6: (22, 17, 0.75),
+        }
+    )
+    tensors = _head_tensors()
+    ordered = [buffers[name] for name in OUTPUT_ORDER]
+
+    def reference() -> MovenetPose:
+        return movenet.decode(
+            movenet.dequantize_heads(ordered, tensors, OUTPUT_ORDER), size=(480, 640)
+        )
+
+    # The pipeline decodes the same four buffers every frame, so the runner
+    # builds the int8 views of one slot once (:class:`~cpsa.movenet.DpuMovenet`)
+    # and the frame pays the decode alone.
+    heads = movenet.quantized_heads(ordered, tensors, OUTPUT_ORDER)
+
+    def fast() -> MovenetPose:
+        return movenet.decode_quantized(heads, size=(480, 640))
+
+    fast_ms, reference_ms = _interleaved_ms(fast, reference)
+
+    assert fast_ms > 0.0
+    assert reference_ms / fast_ms >= 10.0, (
+        f"the int8 decode is {reference_ms / fast_ms:.1f}x the reference "
+        f"({fast_ms:.3f} ms vs {reference_ms:.3f} ms)"
+    )
+
+
+def test_quantized_heads_rejects_a_bad_input() -> None:
+    buffers = _buffers()
+    tensors = _head_tensors()
+    ordered = [buffers[name] for name in OUTPUT_ORDER]
+    with pytest.raises(ValueError, match="permutation"):
+        movenet.quantized_heads(ordered, tensors, ("heatmaps", "centers", "regs", "heatmaps"))
+    with pytest.raises(ValueError, match="buffers"):
+        movenet.quantized_heads(ordered[:3], tensors[:3], OUTPUT_ORDER)
+    with pytest.raises(ValueError, match="int8"):
+        movenet.quantized_heads(
+            [buffer.astype(np.float32) for buffer in ordered], tensors, OUTPUT_ORDER
+        )
+    with pytest.raises(ValueError, match="shape"):
+        movenet.quantized_heads(
+            [ordered[0], ordered[1][..., 0], ordered[2], ordered[3]],
+            tensors,
+            OUTPUT_ORDER,
+        )
+
+
+# --------------------------------------------------------------------------- #
 # The detector
 # --------------------------------------------------------------------------- #
 
@@ -541,6 +719,17 @@ def test_wait_rejects_an_unknown_token(monkeypatch: pytest.MonkeyPatch, tmp_path
 
     with pytest.raises(ValueError, match="token"):
         detector.wait(1234)
+
+
+def test_close_releases_the_graph_and_the_buffers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    detector = _detector(monkeypatch, tmp_path)
+    detector.close()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        detector.submit(np.zeros((480, 640, 3), dtype=np.uint8))
+    detector.close()  # releasing twice is harmless: the loop may race a stop
 
 
 def test_the_detector_requires_the_model_file(

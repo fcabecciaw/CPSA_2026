@@ -123,6 +123,8 @@ def status(
     errors: Sequence[str],
     uptime_s: float,
     active_model: str = ACTIVE_MODELS[0],
+    switching: bool = False,
+    swap_ms: float | None = None,
 ) -> dict[str, Any]:
     """The process snapshot, published at 1 Hz and on change (F-K1).
 
@@ -130,14 +132,18 @@ def status(
     while frames arrive, ``missing`` when the node is not there and ``error``
     when it is but cannot be used. ``errors`` holds the codes of the conditions
     the process reports: ``model_missing``, ``dpu_error``, ``camera_missing``,
-    ``camera_error`` or ``internal``. ``active_model`` is the model whose
-    overlay the dashboard shows (R2-G): both run, the switch only picks the view.
+    ``camera_error`` or ``internal``. ``active_model`` is the model that is
+    loaded on the DPU (R2-G); ``switching`` is true while ``model.set`` releases
+    the old runner and loads the new one, and ``swap_ms`` is how long the last
+    swap took.
     """
     return {
         "state": str(state),
         "camera": str(camera),
         "model": str(model),
         "active_model": str(active_model),
+        "switching": bool(switching),
+        "swap_ms": _number(swap_ms),
         "fps": _number(fps),
         "dpu_ms": _number(dpu_ms),
         "errors": [str(code) for code in errors],

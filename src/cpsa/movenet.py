@@ -29,10 +29,28 @@ The compiled graph applies ``sigmoid`` to the heatmap and center heads in a CPU
 subgraph, so the runtime applies it too (see :func:`decode`), which is what
 makes :func:`decode` a pure function of the int8 head tensors.
 
+There are two decoders with the same result:
+
+* :func:`decode` is the reference: it takes the dequantized ``float64`` heads
+  and mirrors the zoo's ``movenetDecode`` line by line. It is the parity oracle
+  of the tests, not the path the loop runs.
+* :func:`decode_quantized` (and :func:`decode_buffers`) is the A53 path. The
+  int8 heads are used directly: the center prior multiplies the raw center
+  logits (``sigmoid`` is monotonic, so the argmax is the same), one 256-entry
+  table per fix point applies the sigmoid *and* drops the cells below the
+  threshold, only the cells that survive are scored -- over all 17 channels at
+  once, in ``float32`` -- and the regression/offset fields are read at the
+  center and peak cells only. That is where the 14 ms of the board's float64
+  decode went. The candidate scan reduces a channel-major copy of the 17
+  heatmaps, because a numpy reduction over the ``48x48x17`` C layout runs at a
+  byte per loop step and costs more than the rest of the decode; the runner
+  builds the int8 views of a DPU slot once, so a frame does not rebuild them.
+
 :class:`DpuMovenet` splits one frame into ``submit`` (preprocess and start the
 DPU) and ``wait`` (block, decode, map to source pixels), mirroring
 :class:`cpsa.yolox.YoloxDetector`: two buffer sets are in flight at most, so
-frame N runs on the DPU while frame N-1 is decoded.
+frame N runs on the DPU while frame N-1 is decoded. :meth:`DpuMovenet.close`
+releases the graph and its buffers, which is what a model swap needs (R2-G).
 """
 
 from __future__ import annotations
@@ -65,11 +83,15 @@ __all__ = [
     "MOVENET_STRIDE",
     "MovenetHeads",
     "MovenetPose",
+    "QuantizedHeads",
     "center_prior",
     "decode",
+    "decode_buffers",
+    "decode_quantized",
     "dequantize_heads",
     "preprocess",
     "preprocess_into",
+    "quantized_heads",
 ]
 
 #: Model input ``(height, width)`` of the zoo MoveNet graph.
@@ -114,6 +136,10 @@ KEYPOINTS: tuple[str, ...] = (
 )
 
 _NUM_KEYPOINTS = len(KEYPOINTS)
+_KEYPOINT_INDEX = np.arange(_NUM_KEYPOINTS, dtype=np.intp)
+_OFFSET_PAIRS = np.stack((2 * _KEYPOINT_INDEX, 2 * _KEYPOINT_INDEX + 1), axis=1)
+"""The ``(x, y)`` column pair of each keypoint in a 34-field offset cell."""
+_CELLS = MOVENET_FEATURE_SIZE * MOVENET_FEATURE_SIZE
 _HEATMAP_CHANNELS = _NUM_KEYPOINTS
 _CENTER_CHANNELS = 1
 _REGRESSION_CHANNELS = _NUM_KEYPOINTS * 2
@@ -173,6 +199,48 @@ class MovenetHeads:
                     f"{name} must be {MOVENET_FEATURE_SIZE}x{MOVENET_FEATURE_SIZE}, "
                     f"got {head.shape[1:]}"
                 )
+
+
+@dataclass(frozen=True)
+class QuantizedHeads:
+    """The four DPU heads exactly as the graph writes them: int8 ``(48, 48, C)``.
+
+    These are views of the DPU output buffers, not copies: the fast decoder of
+    :func:`decode_quantized` reads the quantized values directly.
+
+    Attributes:
+        heatmaps: ``(48, 48, 17)`` keypoint logits, xint8.
+        centers: ``(48, 48, 1)`` person-center logits, xint8.
+        regs: ``(48, 48, 34)`` center-relative ``(dx, dy)`` per keypoint.
+        offsets: ``(48, 48, 34)`` sub-cell ``(dx, dy)`` per keypoint.
+        heatmaps_fix_point: ``fix_point`` of the heatmap head.
+        centers_fix_point: ``fix_point`` of the center head.
+        regs_fix_point: ``fix_point`` of the regression head.
+        offsets_fix_point: ``fix_point`` of the offset head.
+    """
+
+    heatmaps: NDArray[np.int8]
+    centers: NDArray[np.int8]
+    regs: NDArray[np.int8]
+    offsets: NDArray[np.int8]
+    heatmaps_fix_point: int
+    centers_fix_point: int
+    regs_fix_point: int
+    offsets_fix_point: int
+
+    def __post_init__(self) -> None:
+        expected = (
+            (_HEATMAPS, self.heatmaps, _HEATMAP_CHANNELS),
+            (_CENTERS, self.centers, _CENTER_CHANNELS),
+            (_REGS, self.regs, _REGRESSION_CHANNELS),
+            (_OFFSETS, self.offsets, _REGRESSION_CHANNELS),
+        )
+        for name, head, channels in expected:
+            if head.dtype != np.int8:
+                raise ValueError(f"{name} must be int8, got {head.dtype}")
+            shape = (MOVENET_FEATURE_SIZE, MOVENET_FEATURE_SIZE, channels)
+            if head.shape != shape:
+                raise ValueError(f"{name} must be {shape}, got {head.shape}")
 
 
 @functools.lru_cache(maxsize=1)
@@ -254,8 +322,11 @@ def preprocess_into(
     if lut.shape != (256,):
         raise ValueError(f"lut must have 256 entries, got {lut.shape}")
 
-    resized = cv2.resize(image, (MOVENET_INPUT_SIZE[1], MOVENET_INPUT_SIZE[0]))
-    cv2.LUT(resized, np.ascontiguousarray(lut.view(np.uint8)), dst=out.view(np.uint8))
+    # Resize straight into the DPU input view and quantize it in place: no
+    # intermediate 192x192 frame is allocated or copied.
+    view = out.view(np.uint8)
+    cv2.resize(image, (MOVENET_INPUT_SIZE[1], MOVENET_INPUT_SIZE[0]), dst=view)
+    cv2.LUT(view, lut.view(np.uint8), dst=view)
 
 
 def dequantize_heads(
@@ -378,6 +449,206 @@ def decode(
     )
 
 
+def quantized_heads(
+    buffers: Sequence[NDArray[np.int8]],
+    tensors: Sequence[OutputTensor],
+    order: Sequence[str] = _HEAD_NAMES,
+) -> QuantizedHeads:
+    """View one set of DPU output buffers as int8 ``(48, 48, C)`` heads.
+
+    The buffers stay owned by the caller (the runner's slots): every head is a
+    view, so a decode costs no dequantization and no transpose.
+
+    Args:
+        buffers: int8 buffers ``(1, 48, 48, C)``, one per output tensor.
+        tensors: the graph's output metadata, in the same order as ``buffers``.
+        order: which head each entry of ``tensors`` holds, one of
+            ``"heatmaps"``, ``"centers"``, ``"regs"``, ``"offsets"``.
+
+    Returns:
+        The four heads as int8 NHWC views with their fix points.
+
+    Raises:
+        ValueError: If a buffer does not match its tensor or a head repeats.
+    """
+
+    if len(buffers) != len(tensors) or len(tensors) != len(order):
+        raise ValueError(
+            f"expected {len(order)} buffers and tensors, got {len(buffers)} and {len(tensors)}"
+        )
+    if sorted(order) != sorted(_HEAD_NAMES):
+        raise ValueError(f"order must be a permutation of {list(_HEAD_NAMES)}, got {list(order)}")
+    heads: dict[str, tuple[NDArray[np.int8], int]] = {}
+    for name, buffer, tensor in zip(order, buffers, tensors, strict=True):
+        if tuple(buffer.shape[1:]) != tensor.shape:
+            raise ValueError(
+                f"{name} buffer shape {tuple(buffer.shape[1:])} does not match "
+                f"tensor shape {tensor.shape}"
+            )
+        if buffer.dtype != np.int8:
+            raise ValueError(f"{name} buffer must be int8, got {buffer.dtype}")
+        heads[name] = (buffer.reshape(tensor.shape), int(tensor.fix_point))
+    heatmaps, heatmaps_fix_point = heads[_HEATMAPS]
+    centers, centers_fix_point = heads[_CENTERS]
+    regs, regs_fix_point = heads[_REGS]
+    offsets, offsets_fix_point = heads[_OFFSETS]
+    return QuantizedHeads(
+        heatmaps=heatmaps,
+        centers=centers,
+        regs=regs,
+        offsets=offsets,
+        heatmaps_fix_point=heatmaps_fix_point,
+        centers_fix_point=centers_fix_point,
+        regs_fix_point=regs_fix_point,
+        offsets_fix_point=offsets_fix_point,
+    )
+
+
+def decode_buffers(
+    buffers: Sequence[NDArray[np.int8]],
+    tensors: Sequence[OutputTensor],
+    *,
+    size: tuple[int, int] = MOVENET_INPUT_SIZE,
+    order: Sequence[str] = _HEAD_NAMES,
+) -> MovenetPose:
+    """Decode one set of DPU output buffers directly (see :func:`decode_quantized`)."""
+
+    return decode_quantized(quantized_heads(buffers, tensors, order), size=size)
+
+
+def decode_quantized(
+    heads: QuantizedHeads,
+    size: tuple[int, int] = MOVENET_INPUT_SIZE,
+) -> MovenetPose:
+    """Decode the int8 heads directly: the A53 path of :func:`decode`.
+
+    The result matches the reference decoder, with the same steps done in the
+    integer domain and over all 17 keypoints at once:
+
+    1. ``argmax(sigmoid(centers) * prior)`` equals ``argmax(centers * prior)``:
+       ``sigmoid`` is monotonic, so only the raw center logits and the
+       ``float32`` prior table are needed;
+    2. the ``float32`` sigmoid table of the heatmap fix point already zeroes
+       every value below :data:`MOVENET_HM_THRESHOLD`, so a cell below the
+       table's cutoff cannot win the weighted search and is not scored at all;
+    3. the regression and offset fields are dequantized at the center cell and
+       at the 17 peak cells only, not over the whole ``48x48x34`` heads.
+
+    Args:
+        heads: The four int8 heads, as :func:`quantized_heads` builds them.
+        size: Source frame ``(height, width)`` the keypoints are mapped to.
+
+    Returns:
+        The pose in source pixels, in :data:`KEYPOINTS` order.
+
+    Raises:
+        ValueError: If ``size`` is not positive.
+    """
+
+    height, width = int(size[0]), int(size[1])
+    if height <= 0 or width <= 0:
+        raise ValueError(f"size must be positive, got {size}")
+
+    # A monotonic transform does not move the argmax, so the raw int8 centers
+    # multiplied by the float32 prior pick the same cell as the reference.
+    center = int(np.argmax(heads.centers[:, :, 0] * _center_prior_f32()))
+    center_x = center % MOVENET_FEATURE_SIZE
+    center_y = center // MOVENET_FEATURE_SIZE
+
+    # The package casts ``value + 0.5`` to int32, which truncates towards zero;
+    # ``reshape(17, 2)`` turns the 34-field regression into an (x, y) pair.
+    regression = heads.regs[center_y, center_x].reshape(_NUM_KEYPOINTS, 2)
+    regression_scale = np.float32(2.0**-heads.regs_fix_point)
+    targets = (regression * regression_scale + np.float32(0.5)).astype(np.int32)
+    targets += (center_x, center_y)
+    target_x = targets[:, 0]
+    target_y = targets[:, 1]
+
+    lut, cutoff = _sigmoid_lut(heads.heatmaps_fix_point)
+    # The DPU writes the heatmaps as C-contiguous ``48x48x17``, and a numpy
+    # reduction over that 17-byte inner axis runs at about a byte per loop step:
+    # on the host that is 48 us for a frame, more than the whole decode. The
+    # channel-major copy reduces 48 contiguous bytes at a time instead (10 us
+    # with the copy), and only the cells that survive in some channel's peak
+    # search are kept: a cell under the cutoff holds zero in the table, so it can
+    # never win ``value / (distance + bias)``.
+    planes = np.ascontiguousarray(heads.heatmaps.transpose(2, 0, 1))
+    cells = np.flatnonzero(planes.max(axis=0).ravel() >= cutoff)
+    cells_y, cells_x = np.divmod(cells, MOVENET_FEATURE_SIZE)
+    peaks = np.zeros(_NUM_KEYPOINTS, dtype=np.intp)
+    scores = np.zeros(_NUM_KEYPOINTS, dtype=np.float32)
+    if cells.size:
+        values = lut[heads.heatmaps.reshape(_CELLS, _NUM_KEYPOINTS)[cells]]
+        # ``float32`` throughout and in place after the distance: the scoring
+        # pass allocates the two deltas and their length, nothing else.
+        delta_x = np.subtract(cells_x[:, None], target_x[None, :], dtype=np.float32)
+        delta_y = np.subtract(cells_y[:, None], target_y[None, :], dtype=np.float32)
+        weighted = np.hypot(delta_x, delta_y)
+        weighted += np.float32(MOVENET_CENTER_BIAS)
+        np.divide(values, weighted, out=weighted)
+        best = weighted.argmax(axis=0)
+        scores = values[best, _KEYPOINT_INDEX]
+        # A keypoint with no cell above the threshold scores zero and peaks on
+        # cell (0, 0), exactly as the reference's argmax over an all-zero plane:
+        # zeroing its flat cell is what both the offset read and the score need.
+        peaks = cells[best]
+        peaks *= scores > 0.0
+
+    # The offset field is read at the 17 peak cells only, one (x, y) pair per
+    # keypoint, by indexing the 34 columns of each cell with the pair table.
+    peak_y, peak_x = np.divmod(peaks, MOVENET_FEATURE_SIZE)
+    offsets = heads.offsets[peak_y[:, None], peak_x[:, None], _OFFSET_PAIRS] * np.float32(
+        2.0**-heads.offsets_fix_point
+    )
+    coords = offsets
+    coords[:, 0] += peak_x
+    coords[:, 1] += peak_y
+    np.multiply(
+        coords,
+        (width / MOVENET_FEATURE_SIZE, height / MOVENET_FEATURE_SIZE),
+        out=coords,
+    )
+    keypoints = np.empty((_NUM_KEYPOINTS, 3), dtype=np.float32)
+    keypoints[:, :2] = coords
+    keypoints[:, 2] = scores
+    return MovenetPose(keypoints=keypoints, score=float(scores.mean()))
+
+
+@functools.lru_cache(maxsize=1)
+def _center_prior_f32() -> NDArray[np.float32]:
+    """Return :func:`center_prior` as a read-only ``float32`` table."""
+
+    prior = center_prior().astype(np.float32)
+    prior.flags.writeable = False
+    return prior
+
+
+@functools.cache
+def _sigmoid_lut(fix_point: int) -> tuple[NDArray[np.float32], int]:
+    """Return a fix point's 256-entry sigmoid table and its threshold cutoff.
+
+    Entry ``u`` is ``sigmoid(signed(u) * 2 ** -fix_point)`` with the int8 byte
+    order folded in (``u >= 128`` addresses a negative value), and every value
+    below :data:`MOVENET_HM_THRESHOLD` is stored as zero. One ``take`` on the
+    uint8 view of a head therefore applies the sigmoid and the threshold in a
+    single pass.
+
+    The cutoff is the smallest int8 value whose table entry is not zero: a
+    cell whose raw logit is below it can never win the weighted peak search,
+    which is what lets the decoder ignore the background grid.
+    """
+
+    signed = np.arange(256, dtype=np.int16)
+    signed[signed >= 128] -= 256
+    probabilities = _sigmoid(signed.astype(np.float64) * (2.0 ** -int(fix_point)))
+    probabilities = np.where(probabilities < MOVENET_HM_THRESHOLD, 0.0, probabilities)
+    order = np.concatenate([np.arange(128, 256), np.arange(0, 128)])
+    cutoff_index = int(order[np.argmax(probabilities[order] > 0.0)])
+    lut = probabilities.astype(np.float32)
+    lut.flags.writeable = False
+    return lut, cutoff_index if cutoff_index < 128 else cutoff_index - 256
+
+
 class DpuMovenet:
     """Run one compiled MoveNet ``.xmodel`` graph on the KV260 DPU.
 
@@ -447,15 +718,21 @@ class DpuMovenet:
         return tuple(order[index] for index in range(len(outputs)))
 
     def _slot(self) -> _Slot:
-        """Allocate one input/output buffer set."""
+        """Allocate one input/output buffer set and the int8 views of its heads.
+
+        The views are built once per slot, not per frame: a slot's output
+        buffers are the same arrays for the life of the runner, so the decoder
+        can read the new values without rebuilding (and revalidating) the four
+        head views every frame.
+        """
 
         buffer = np.empty([1, *self._input_hw, 3], dtype=np.int8)
+        outputs = [np.empty([1, *tensor.shape], dtype=np.int8) for tensor in self._outputs]
         return _Slot(
             input_buffer=buffer,
             input_view=buffer.reshape((*self._input_hw, 3)),
-            output_buffers=[
-                np.empty([1, *tensor.shape], dtype=np.int8) for tensor in self._outputs
-            ],
+            output_buffers=outputs,
+            heads=quantized_heads(outputs, self._outputs, self._order),
         )
 
     @property
@@ -487,6 +764,8 @@ class DpuMovenet:
         """
 
         image = _validate_frame(rgb)
+        if not self._slots:
+            raise RuntimeError("the DPU runner is closed")
         if len(self._pending) >= len(self._slots):
             raise RuntimeError("both DPU slots are busy; call wait() before submitting again")
         slot = self._slots[self._next_slot]
@@ -523,14 +802,22 @@ class DpuMovenet:
         self._stage_ms["dpu"] = (time.perf_counter() - job.dpu_started) * 1000.0
 
         started = time.perf_counter()
-        heads = dequantize_heads(job.slot.output_buffers, self._outputs, self._order)
-        pose = decode(heads, size=job.source_hw)
+        pose = decode_quantized(job.slot.heads, size=job.source_hw)
         self._stage_ms["decode"] = (time.perf_counter() - started) * 1000.0
         return pose
 
     def detect(self, rgb: NDArray[np.uint8]) -> MovenetPose:
         """Run the DPU model on an ``(H, W, 3)`` RGB uint8 frame."""
         return self.wait(self.submit(rgb))
+
+    def close(self) -> None:
+        """Release the DPU runner and the two buffer sets (R2-G model swap)."""
+
+        if not self._slots:
+            return
+        self._pending.clear()
+        self._slots = []
+        self._runner.close()
 
 
 @dataclass
@@ -540,6 +827,8 @@ class _Slot:
     input_buffer: NDArray[np.int8]
     input_view: NDArray[np.int8]
     output_buffers: list[NDArray[np.int8]]
+    heads: QuantizedHeads
+    """The int8 head views of :attr:`output_buffers`, built once per slot."""
 
 
 @dataclass(frozen=True)

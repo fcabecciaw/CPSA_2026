@@ -161,11 +161,12 @@ class ModelConfig:
 
 @dataclass(frozen=True)
 class MovenetConfig:
-    """The single-pose skeleton model that runs alongside YOLOX (R2-G).
+    """The single-pose skeleton model that ``model.set`` loads in place of YOLOX (R2-G).
 
-    ``path`` is the compiled ``.xmodel`` the second DPU runner loads;
-    ``enabled: false`` leaves it out of the process (YOLOX only) and
-    ``publish_hz`` caps ``pose.state``, independently of the frame rate.
+    ``path`` is the compiled ``.xmodel`` the DPU runner loads on a swap;
+    ``enabled: false`` rejects ``model.set movenet`` and leaves the process
+    YOLOX-only, and ``publish_hz`` caps ``pose.state``, independently of the
+    frame rate.
     """
 
     path: Path

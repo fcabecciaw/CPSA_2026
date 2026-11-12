@@ -30,7 +30,8 @@ Options (`deploy/deploy.sh --help`): `--host` (default `10.42.0.83`), `--user`
 The model basenames must be the ones `config/showcase.yaml` names
 (`models/yolox_nano.xmodel`, `models/movenet.xmodel`), because the configuration
 is the only place the paths appear. `movenet.enabled: false` in that file runs
-the YOLOX-only showcase without a compiled MoveNet model.
+the YOLOX-only showcase without a compiled MoveNet model and answers
+`model.set movenet` with `error bad_command`.
 
 ## Prerequisites
 

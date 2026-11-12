@@ -102,6 +102,25 @@ def test_an_unknown_active_model_is_rejected() -> None:
         validate_server_message(_server("status", data))
 
 
+def test_a_swapping_status_validates_and_needs_the_swap_fields() -> None:
+    data = protocol.status(
+        state="running",
+        camera="ok",
+        model="m",
+        fps=None,
+        dpu_ms=None,
+        errors=[],
+        uptime_s=1.0,
+        switching=True,
+        swap_ms=61.4,
+    )
+    validate_server_message(_server("status", data))
+
+    del data["switching"]
+    with pytest.raises(ValidationError):
+        validate_server_message(_server("status", data))
+
+
 def test_envelope_rejects_zero_seq() -> None:
     message = json.loads((SCHEMA_DIR / "examples" / "status.json").read_text(encoding="utf-8"))
     message["seq"] = 0

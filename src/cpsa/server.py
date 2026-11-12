@@ -26,7 +26,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -95,6 +95,8 @@ class WebServer:
         messages: The snapshot channel the pipeline publishes into.
         commands: The control channel ``model.set`` is queued on (R2-G); ``None``
             rejects the command with ``bad_command``.
+        models: The models this process accepts in ``model.set``; a disabled
+            MoveNet is not in the list and the client gets ``bad_command``.
         server_version: Value of ``hello.server_version``.
         url: Optional host name the dashboard is served from; unused.
     """
@@ -106,12 +108,14 @@ class WebServer:
         frames: FrameSource,
         messages: MessageChannel,
         commands: CommandChannel | None = None,
+        models: Sequence[str] = protocol.ACTIVE_MODELS,
         server_version: str = "0.1.0",
     ) -> None:
         self._config = config
         self._frames = frames
         self._messages = messages
         self._commands = commands
+        self._models = tuple(models)
         self._server_version = server_version
         self._latest: dict[str, dict[str, Any]] = {}
         self._clients: set[_Client] = set()
@@ -531,19 +535,22 @@ class WebServer:
     ) -> None:
         """Validate ``model.set`` and hand it to process A (R2-G).
 
-        The view switch belongs to the pipeline, which owns both DPU runners:
-        the server only checks the name and queues the command, so a malformed
-        or unknown model is rejected here and never reaches the board.
+        The swap belongs to the pipeline, which owns the DPU runner: the server
+        only checks the name and queues the command, so a malformed or unknown
+        model is rejected here and never reaches the board.
         """
         model = data.get("model")
         if not isinstance(model, str) or model not in protocol.ACTIVE_MODELS:
             self._bad_command(client, ref_seq, f"unknown model {model!r}")
             return
+        if model not in self._models:
+            self._bad_command(client, ref_seq, f"model {model!r} is not enabled")
+            return
         if self._commands is None:
             self._bad_command(client, ref_seq, "model switching is not available")
             return
         self._commands.put("model.set", {"model": model})
-        logger.info("client asked for the %s view (seq=%s peer=%s)", model, ref_seq, client.peer)
+        logger.info("client asked to load %s (seq=%s peer=%s)", model, ref_seq, client.peer)
 
     def _bad_command(self, client: _Client, ref_seq: int | None, message: str) -> None:
         self._queue(client, "error", protocol.error("bad_command", message, ref_seq))
@@ -638,6 +645,7 @@ def serve(
     commands: CommandChannel | None = None,
     stop: threading.Event,
     ready: threading.Event | None = None,
+    models: Sequence[str] = protocol.ACTIVE_MODELS,
     server_version: str = "0.1.0",
 ) -> int:
     """Run process B until ``stop`` is set; the target of the child process.
@@ -647,6 +655,7 @@ def serve(
         frames: The shared frame channel, attached by this process.
         messages: The snapshot channel the pipeline publishes into.
         commands: The control channel ``model.set`` goes to (process A drains it).
+        models: The models ``model.set`` accepts; a disabled MoveNet is left out.
         stop: Set by process A (or a signal) to end the run.
         ready: Set once the server listens, so A can start the pipeline.
         server_version: Value of ``hello.server_version``.
@@ -660,6 +669,7 @@ def serve(
         frames=frames,
         messages=messages,
         commands=commands,
+        models=models,
         server_version=server_version,
     )
     try:

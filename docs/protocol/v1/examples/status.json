@@ -9,6 +9,8 @@
     "camera": "ok",
     "model": "yolox_nano",
     "active_model": "yolox",
+    "switching": false,
+    "swap_ms": 61.4,
     "fps": 59.4,
     "dpu_ms": 4.7,
     "errors": [],

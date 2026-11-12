@@ -13,6 +13,7 @@ The quantization convention of the Vitis AI DPU is a signed ``fix_point``:
 
 from __future__ import annotations
 
+import gc
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -183,6 +184,18 @@ class DpuRunner:
         self._outputs = tuple(output_tensors)
         self._executions = 0
 
+    def close(self) -> None:
+        """Release the VART runner and the xir graph (R2-G model swap).
+
+        VART owns the DPU memory of the graph and frees it when the runner and
+        the graph are destroyed, so dropping the references and collecting is
+        the release path of the Python bindings.
+        """
+
+        self._runner = None
+        self._graph = None
+        gc.collect()
+
     @property
     def input_hw(self) -> tuple[int, int]:
         """Model input ``(height, width)``."""
@@ -209,8 +222,12 @@ class DpuRunner:
         back to :meth:`wait` unchanged, exactly as VART expects.
         """
         self._executions += 1
+        if self._runner is None:
+            raise RuntimeError("the DPU runner is closed")
         return self._runner.execute_async(inputs, outputs)
 
     def wait(self, job: Any) -> None:
         """Wait for a job started by :meth:`execute`."""
+        if self._runner is None:
+            raise RuntimeError("the DPU runner is closed")
         self._runner.wait(job)

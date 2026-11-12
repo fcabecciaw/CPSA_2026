@@ -28,13 +28,13 @@ optional `seq` (`client-envelope.schema.json`): the server echoes it as
 | Type | Direction | Payload |
 |---|---|---|
 | `hello` | server → client | `server_version`, `protocol_version` (`1`). Sent first, on every connection. |
-| `status` | server | `state` (`starting`, `running`, `error`), `camera` (`ok`, `missing`, `error`), `model`, `active_model` (`yolox`, `movenet`), `fps`, `dpu_ms`, `errors`, `uptime_s`. 1 Hz and on change. |
-| `showcase.state` | server | `model`, `width`, `height`, `fps`, `dpu_ms`, `total_ms`, `objects`, `counts`. At most 10 Hz, while the YOLOX view is active. |
-| `pose.state` | server | `model`, `width`, `height`, `fps`, `dpu_ms`, `total_ms`, `score`, `keypoints` (17 × `[x, y, score]`). At most `movenet.publish_hz`; both models run, so it flows in both views (R2-G). |
+| `status` | server | `state` (`starting`, `running`, `error`), `camera` (`ok`, `missing`, `error`), `model`, `active_model` (`yolox`, `movenet`), `switching`, `swap_ms`, `fps`, `dpu_ms`, `errors`, `uptime_s`. 1 Hz and on change. |
+| `showcase.state` | server | `model`, `width`, `height`, `fps`, `dpu_ms`, `total_ms`, `objects`, `counts`. At most 10 Hz, while YOLOX is loaded. |
+| `pose.state` | server | `model`, `width`, `height`, `fps`, `dpu_ms`, `total_ms`, `score`, `keypoints` (17 × `[x, y, score]`). At most `movenet.publish_hz`, while MoveNet is loaded (R2-G). |
 | `error` | server | `code`, `message`, optional `ref_seq`. |
 | `pong` | server | `id`, the value of the `ping` it answers. |
 | `ping` | client → server | `id`, echoed back unchanged. |
-| `model.set` | client → server | `model` (`yolox`, `movenet`): switches the overlay on the video and the dashboard pane. Both DPU models keep running; an unknown model is `error bad_command` and nothing is switched. |
+| `model.set` | client → server | `model` (`yolox`, `movenet`): releases the loaded DPU model and loads the other one. An unknown or disabled model is `error bad_command` and nothing is switched. |
 
 `errors` lists the conditions the process reports, once each:
 `model_missing`, `dpu_error`, `camera_missing`, `camera_error`, `internal`.
@@ -51,7 +51,12 @@ so the two panes of the dashboard always agree.
 pixels (nose, eyes, ears, shoulders, elbows, wrists, hips, knees, ankles);
 `score` is their mean and is below `0.2` when nobody is in the frame. The
 skeleton is drawn on the video while `active_model` is `movenet`, the boxes
-while it is `yolox`.
+while it is `yolox`; only the loaded model publishes its state (`showcase.state`
+for YOLOX, `pose.state` for MoveNet).
+
+`status.switching` is true during a `model.set` swap, `status.swap_ms` is how
+long the last swap took, and `status.model` is the stem of the loaded
+`.xmodel`.
 
 A measurement that does not exist yet is `null`, never an absent key. `t` is
 monotonic seconds on the board; `wall` is the UTC wall clock.

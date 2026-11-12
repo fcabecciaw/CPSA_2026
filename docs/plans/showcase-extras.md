@@ -143,7 +143,7 @@ it differently etc. Identify all possible corners and possible problems and hand
   layout integration in the showcase view, mock scenario, vitest setup). AC-E3 (YOLO part; pose rules driven by the
   mock's `pose.state`).
 - **M2 — MoveNet in the app + room view** (after M1 and C1): backend `model.set`, `pose.state`, `status.active_model`,
-  both runners preloaded in process A; web YOLO/MoveNet switch + skeleton room (perspective room, floor grid, glow;
+  one runner loaded at a time in process A (see R2-G); web YOLO/MoveNet switch + skeleton room (perspective room, floor grid, glow;
   style of the deleted `web/src/hologram.ts`, available in git history at `fded0e7`). AC-E2, AC-E3.
 - **K-board** (coordinator): deploy, measure, user test. AC-E2, AC-E4.
 
@@ -171,5 +171,16 @@ detection on the laptop. "The random facts are especially interesting."
   repeated within a day; gesture/face events from pose (MoveNet, board) and from MediaPipe Face Landmarker running in
   the laptop browser on `/video.mjpeg` (smile, mouth open, nod, head shake, looking at the camera); F-E4 corner cases
   still hold.
-- **R2-G (board):** MoveNet runs every frame alongside YOLOX (DPU ~4.7 + ~2–3 ms) so gestures work in both views;
-  `pose.state` always published; the YOLO/MoveNet switch only changes the view.
+- **R2-G (board):** the two models are exclusive: exactly one DPU runner is loaded at a time. YOLOX is the
+  default; `model.set` waits for the job in flight, releases the current runner (graph and buffers) and
+  builds the other one (swap time in the log and in `status.swap_ms`/`switching`; a failed load restores
+  the previous model and publishes `dpu_error`; a set for the loaded model is a no-op). The YOLOX view runs
+  YOLOX only (boxes, tracker, `showcase.state`); the MoveNet view runs MoveNet only (skeleton overlay,
+  `pose.state` at most 30 Hz), and both views must reach >= 55 fps on the board. The MoveNet CPU stages are
+  rewritten for the A53: int8 center argmax with the prior table, a 256-entry sigmoid/threshold LUT per fix
+  point, candidate-only heatmap scoring over all 17 channels in float32 (<= 1.0 ms, >= 10x the float64
+  reference), `cv2.resize` into the DPU input view plus an in-place `cv2.LUT` (<= 1.5 ms), and an overlay
+  that dims the camera frame to 35 % and draws the skeleton in a per-part neon palette (magenta head, cyan
+  arms, lime torso, purple legs; a 10 px halo, a 3 px bright core and a white-centred dot per joint) in one
+  `polylines` and one `fillPoly` pass per part (<= 1.5 ms for dim plus draw).
+

@@ -929,6 +929,8 @@ class YoloxDetector:
         """
 
         image = _validate_frame(rgb)
+        if not self._slots:
+            raise RuntimeError("the DPU runner is closed")
         if len(self._pending) >= len(self._slots):
             raise RuntimeError("both DPU slots are busy; call wait() before submitting again")
         slot = self._slots[self._next_slot]
@@ -992,6 +994,15 @@ class YoloxDetector:
     def detect(self, rgb: NDArray[np.uint8]) -> list[Detection]:
         """Run the DPU model on an ``(H, W, 3)`` RGB uint8 frame."""
         return self.wait(self.submit(rgb))
+
+    def close(self) -> None:
+        """Release the DPU runner and the two buffer sets (R2-G model swap)."""
+
+        if not self._slots:
+            return
+        self._pending.clear()
+        self._slots = []
+        self._runner.close()
 
 
 @dataclass

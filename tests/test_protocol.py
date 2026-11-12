@@ -151,6 +151,33 @@ def test_status_names_the_active_model_and_defaults_to_yolox() -> None:
     assert switched["active_model"] == "movenet"
 
 
+def test_status_reports_the_swap_of_the_loaded_model() -> None:
+    idle = protocol.status(
+        state="running",
+        camera="ok",
+        model="yolox_nano",
+        fps=None,
+        dpu_ms=None,
+        errors=[],
+        uptime_s=1.0,
+    )
+    swapping = protocol.status(
+        state="running",
+        camera="ok",
+        model="yolox_nano",
+        fps=None,
+        dpu_ms=None,
+        errors=[],
+        uptime_s=1.0,
+        switching=True,
+        swap_ms=61.44,
+    )
+
+    assert idle["switching"] is False and idle["swap_ms"] is None
+    assert swapping["switching"] is True
+    assert swapping["swap_ms"] == 61.4
+
+
 def test_pose_state_rounds_clamps_and_keeps_seventeen_keypoints() -> None:
     keypoints = [[1.234, 2.0, 0.913] for _ in range(17)]
     keypoints[0] = [math.nan, -5.0, 2.0]

@@ -1,18 +1,19 @@
 """The detection loop: camera frames in, overlaid video and states out.
 
-One loop processes frames from a :class:`~cpsa.camera.UvcCamera` with two DPU
-models: :class:`~cpsa.yolox.YoloxDetector` for the boxes and
-:class:`~cpsa.movenet.DpuMovenet` for the 17-keypoint skeleton (R2-G). Both run
-on every frame, each with its own two-slot pipelining, and the tracker stabilizes
-the YOLOX boxes. The loop publishes the overlay of the active view into the
-shared :class:`~cpsa.channel.FrameChannel` and the snapshot messages into the
-:class:`~cpsa.channel.MessageChannel`; ``model.set`` arrives the other way
-through the :class:`~cpsa.channel.CommandChannel`.
+One loop processes frames from a :class:`~cpsa.camera.UvcCamera` with **one**
+DPU model at a time (R2-G): :class:`~cpsa.yolox.YoloxDetector` for the boxes or
+:class:`~cpsa.movenet.DpuMovenet` for the 17-keypoint skeleton. ``model.set``
+swaps the loaded model: the loop waits for the frame in flight, releases the
+current runner (graph and buffers) and builds the other one, then resumes. The
+tracker stabilizes the YOLOX boxes. The loop publishes the overlay of the active
+model into the shared :class:`~cpsa.channel.FrameChannel` and the snapshot
+messages into the :class:`~cpsa.channel.MessageChannel`; ``model.set`` arrives
+the other way through the :class:`~cpsa.channel.CommandChannel`.
 
 The 60 fps target needs the DPU and the CPU to work on different frames:
 
 ```text
-submit YOLOX and MoveNet for frame N (preprocess + execute_async)
+submit the model for frame N (preprocess + execute_async)
 decode + draw + publish frame N-1   (while the DPU runs on N)
 next iteration: submit N+1, then wait N
 ```
@@ -23,12 +24,12 @@ The camera slot keeps only the newest frame, so a slow frame is dropped, never
 queued.
 
 The loop also owns the process status: ``status`` once per second and on change
-(state, camera, errors, ``active_model``) into the message channel,
-``showcase.state`` at most ten times per second while the YOLOX view is active,
-``pose.state`` at most ``movenet.publish_hz`` times per second, and the per-stage
-timing line every five seconds. A camera that stops (unplugged, a driver error)
-is reopened with a capped backoff, which is how a re-plug recovers without
-restarting the process.
+(state, camera, errors, ``active_model``, ``switching``) into the message
+channel, ``showcase.state`` at most ten times per second while YOLOX is loaded,
+``pose.state`` at most ``movenet.publish_hz`` times per second while MoveNet is
+loaded, and the per-stage timing line every five seconds. A camera that stops
+(unplugged, a driver error) is reopened with a capped backoff, which is how a
+re-plug recovers without restarting the process.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -178,8 +179,8 @@ class _PendingFrame:
     token: int
     started: float
     camera_ms: float
-    movenet_token: int | None = None
-    """MoveNet job of the same frame, ``None`` when the pose model is off."""
+    model: str
+    """Which runner owns ``token``: ``yolox`` or ``movenet``."""
 
 
 class _LatestSlot:
@@ -203,7 +204,7 @@ class _LatestSlot:
 
 
 class Pipeline:
-    """Camera, detector, overlay and status of the showcase.
+    """Camera, one DPU model, overlay and status of the showcase.
 
     Args:
         config: The validated F-K3 configuration.
@@ -212,14 +213,14 @@ class Pipeline:
         monitor: Where ``status`` and ``showcase.state`` go; defaults to
             ``messages``. The process gives the pipeline both the same channel
             and keeps the interface separate for tests.
-        detector_factory: Builds the detector from the model config; defaults
-            to :class:`~cpsa.yolox.YoloxDetector`.
+        detector_factory: Builds the YOLOX runner from the model config;
+            defaults to :class:`~cpsa.yolox.YoloxDetector`.
         movenet_factory: Builds the MoveNet runner from the ``movenet`` config;
             defaults to :class:`~cpsa.movenet.DpuMovenet`.
         camera_factory: Builds the camera from the camera config; defaults to
             :class:`~cpsa.camera.UvcCamera`.
         commands: The control channel the server writes ``model.set`` into; the
-            loop drains it every frame. ``None`` means the view never switches.
+            loop drains it every frame. ``None`` means the model never switches.
         labels: Label table; defaults to the configured language.
 
     The pipeline does not create or release the channel: the process owns it.
@@ -253,8 +254,7 @@ class Pipeline:
         self._lock = threading.Lock()
         self._slot = _LatestSlot()
         self._stop = threading.Event()
-        self._detector: Detector | None = None
-        self._pose_detector: PoseDetector | None = None
+        self._runner: Detector | PoseDetector | None = None
         self._camera: Camera | None = None
         self._running = False
         self._camera_error: str | None = None
@@ -264,10 +264,16 @@ class Pipeline:
         self._last_dpu_ms: float | None = None
         self._last_state = 0.0
         self._last_pose = 0.0
-        self._pose_failed = False
+        self._frame_error = False
+        """A frame failed; the next good frame clears the ``dpu_error`` it raised."""
+        self._swap_error = False
+        """A ``model.set`` load failed: ``dpu_error`` stays until a swap succeeds."""
         self._active_model = protocol.ACTIVE_MODELS[0]
+        self._requested_model: str | None = None
+        self._switching = False
+        self._swap_ms: float | None = None
         self._last_status = 0.0
-        self._status_key: tuple[str, str, str, tuple[str, ...]] | None = None
+        self._status_key: tuple[str, str, str, bool, tuple[str, ...]] | None = None
         self._started_at = 0.0
         self._next_camera_attempt = 0.0
         self._camera_retry_s = CAMERA_RETRY_S
@@ -278,7 +284,7 @@ class Pipeline:
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
-        """Open the camera and both DPU models.
+        """Open the camera and the default DPU model (YOLOX).
 
         Raises:
             StartError: With ``model_missing`` before the camera is touched (the
@@ -291,30 +297,20 @@ class Pipeline:
         model = self._config.model
         if not model.path.is_file():
             raise StartError("model_missing", f"model not found: {model.path}")
+        movenet = self._config.movenet
+        if movenet.enabled and not movenet.path.is_file():
+            raise StartError("model_missing", f"movenet model not found: {movenet.path}")
+
+        active = protocol.ACTIVE_MODELS[0]
         try:
-            detector = self._detector_factory(model)
+            runner = self._build_runner(active)
         except FileNotFoundError as exc:
             raise StartError("model_missing", str(exc)) from exc
         except RuntimeError as exc:
             raise StartError("dpu_error", str(exc)) from exc
         except Exception as exc:
-            logger.exception("the detector could not be built")
+            logger.exception("the %s runner could not be built", active)
             raise StartError("internal", str(exc)) from exc
-
-        pose_detector: PoseDetector | None = None
-        movenet = self._config.movenet
-        if movenet.enabled:
-            if not movenet.path.is_file():
-                raise StartError("model_missing", f"movenet model not found: {movenet.path}")
-            try:
-                pose_detector = self._movenet_factory(movenet)
-            except FileNotFoundError as exc:
-                raise StartError("model_missing", str(exc)) from exc
-            except RuntimeError as exc:
-                raise StartError("dpu_error", str(exc)) from exc
-            except Exception as exc:
-                logger.exception("the MoveNet runner could not be built")
-                raise StartError("internal", str(exc)) from exc
 
         camera = self._camera_factory(self._config.camera)
         try:
@@ -326,11 +322,11 @@ class Pipeline:
         except Exception as exc:
             logger.exception("the camera could not be opened")
             _release_quietly(camera)
+            self._release_runner(runner)
             raise StartError("camera_error", str(exc)) from exc
 
         with self._lock:
-            self._detector = detector
-            self._pose_detector = pose_detector
+            self._runner = runner
             self._camera = camera
             self._started_at = time.monotonic()
             self._last_arrival = time.monotonic()
@@ -339,7 +335,12 @@ class Pipeline:
             self._camera_error = None
             self._status_key = None
             self._tracker.reset()
-            self._active_model = protocol.ACTIVE_MODELS[0]
+            self._active_model = active
+            self._requested_model = None
+            self._switching = False
+            self._swap_ms = None
+            self._swap_error = False
+            self._frame_error = False
             self._last_state = 0.0
             self._last_pose = 0.0
             self._timing_sums = {}
@@ -357,20 +358,22 @@ class Pipeline:
         )
 
     def stop(self) -> None:
-        """Stop the loop, then release the camera and the detectors."""
+        """Stop the loop, then release the camera and the DPU runner."""
         with self._lock:
             self._running = False
             self._stop.set()
             camera = self._camera
             self._camera = None
-            self._detector = None
-            self._pose_detector = None
+            runner = self._runner
+            self._runner = None
+            self._requested_model = None
             self._errors = []
             self._camera_error = None
             self._processed.clear()
             self._last_arrival = 0.0
             self._last_dpu_ms = None
         _release_quietly(camera)
+        self._release_runner(runner)
 
     def status(self) -> dict[str, Any]:
         """Return the F-K1 ``status`` payload for the current instant."""
@@ -383,6 +386,8 @@ class Pipeline:
             dpu_ms = self._last_dpu_ms
             started_at = self._started_at
             active_model = self._active_model
+            switching = self._switching
+            swap_ms = self._swap_ms
         if not running:
             camera = "missing"
         elif camera_error is not None:
@@ -394,12 +399,14 @@ class Pipeline:
         return protocol.status(
             state="running" if running else "starting",
             camera=camera,
-            model=self._config.model.name,
+            model=self._model_name(active_model),
             fps=_rate(stamps) if running else None,
             dpu_ms=dpu_ms,
             errors=errors,
             uptime_s=max(0.0, time.monotonic() - started_at) if running else 0.0,
             active_model=active_model,
+            switching=switching,
+            swap_ms=swap_ms,
         )
 
     def publish(self, state: str, errors: Sequence[str], camera: str) -> None:
@@ -409,28 +416,32 @@ class Pipeline:
         running pipeline publishes from :meth:`run`.
         """
 
-        self._status_key = (state, camera, self._active_model, tuple(errors))
+        self._status_key = (state, camera, self._active_model, self._switching, tuple(errors))
         self._last_status = time.monotonic()
         self._messages.put(
             "status",
             protocol.status(
                 state=state,
                 camera=camera,
-                model=self._config.model.name,
+                model=self._model_name(self._active_model),
                 fps=None,
                 dpu_ms=None,
                 errors=list(errors),
                 uptime_s=0.0,
                 active_model=self._active_model,
+                switching=self._switching,
+                swap_ms=self._swap_ms,
             ),
         )
 
     def set_model(self, model: str) -> bool:
-        """Switch the dashboard view; both models keep running (R2-G).
+        """Ask the loop to load ``model`` in place of the current one (R2-G).
 
-        ``yolox`` draws the tracked boxes, ``movenet`` the glowing skeleton, and
-        ``status.active_model`` tells the dashboard which pane to show. This
-        never stops or restarts a DPU runner.
+        The swap itself happens in the loop thread, between frames: it waits for
+        the job in flight, releases the current runner and builds the other one,
+        so `status.switching` is true while it runs. Asking for the model that
+        is already loaded is a no-op, and it also drops a swap still waiting for
+        the loop: two quick clicks end on the model of the second one.
 
         Returns:
             ``False`` for an unknown model or when MoveNet is disabled, so the
@@ -439,12 +450,16 @@ class Pipeline:
 
         if model not in protocol.ACTIVE_MODELS:
             return False
+        if model == "movenet" and not self._config.movenet.enabled:
+            return False
         with self._lock:
-            if model == "movenet" and self._pose_detector is None:
-                return False
-            self._active_model = model
-        self._publish_status(force=True)
-        logger.info("dashboard view switched to %s", model)
+            if model == self._active_model and not self._switching:
+                # Asking for the loaded model drops a swap still queued for the
+                # loop; during a swap it queues the way back instead, so the
+                # second of two quick clicks is the one that wins.
+                self._requested_model = None
+            else:
+                self._requested_model = model
         return True
 
     # -- frame loop --------------------------------------------------------
@@ -472,6 +487,7 @@ class Pipeline:
             while not stop.is_set() and not self._stop.is_set():
                 self._keep_camera_alive(stop)
                 self._drain_commands()
+                pending = self._apply_model_request(pending)
                 frame = self._slot.get(timeout=_SLOT_TIMEOUT_S)
                 if frame is not None:
                     admit, next_due = cap_admits(time.perf_counter(), next_due, period)
@@ -480,18 +496,27 @@ class Pipeline:
                             pending = self._step(frame, pending)
                         except Exception:
                             logger.exception("the detector failed on frame %d", frame.seq)
+                            self._frame_error = True
                             self._note_error("dpu_error")
                         else:
                             with self._lock:
-                                if not self._pose_failed and "dpu_error" in self._errors:
+                                # A frame clears the ``dpu_error`` of a previous
+                                # frame, never the one a failed model swap left
+                                # behind: only a swap that works clears that.
+                                if (
+                                    not self._frame_error
+                                    and not self._swap_error
+                                    and "dpu_error" in self._errors
+                                ):
                                     self._errors = [
                                         code for code in self._errors if code != "dpu_error"
                                     ]
                 self._publish_status()
         finally:
+            with self._lock:
+                runner = self._runner
             if pending is not None:
-                _drain_quietly(self._detector, pending.token)
-                _drain_pose_quietly(self._pose_detector, pending.movenet_token)
+                _drain_quietly(runner, pending.token)
             sys.setswitchinterval(previous_interval)
             self.stop()
             logger.info("showcase stopped")
@@ -500,48 +525,34 @@ class Pipeline:
         """Start frame N on the DPU, then finish frame N-1 while it runs."""
 
         with self._lock:
-            detector = self._detector
-            pose_detector = self._pose_detector
-        if detector is None:
+            runner = self._runner
+            model = self._active_model
+        if runner is None:
             return None
-        self._pose_failed = False
+        self._frame_error = False
 
         started = time.perf_counter()
         rgb = frame.decode()
         camera_ms = (time.perf_counter() - started) * 1000.0
 
-        submit = getattr(detector, "submit", None)
-        wait = getattr(detector, "wait", None)
+        submit = getattr(runner, "submit", None)
+        wait = getattr(runner, "wait", None)
         if not callable(submit) or not callable(wait):
-            detections = detector.detect(rgb)  # type: ignore[attr-defined]
-            pose = None
-            if pose_detector is not None:
-                pose = pose_detector.wait(pose_detector.submit(rgb))
+            detect = getattr(runner, "detect")  # noqa: B009 - a test double may only have detect
             self._finish(
                 frame.seq,
                 frame.width,
                 frame.height,
                 rgb,
-                detections,
-                pose,
-                detector.stage_ms,
-                _stage(pose_detector),
+                runner,
+                model,
+                detect(rgb),
                 started,
                 camera_ms,
             )
             return None
 
         token = submit(rgb)
-        movenet_token: int | None = None
-        if pose_detector is not None:
-            try:
-                movenet_token = pose_detector.submit(rgb)
-            except Exception:
-                # A MoveNet failure must never strand the YOLOX token, which
-                # still has to be waited for on the next frame.
-                logger.exception("MoveNet failed to submit frame %d", frame.seq)
-                self._pose_failed = True
-                self._note_error("dpu_error")
         current = _PendingFrame(
             seq=frame.seq,
             width=frame.width,
@@ -550,45 +561,39 @@ class Pipeline:
             token=token,
             started=started,
             camera_ms=camera_ms,
-            movenet_token=movenet_token,
+            model=model,
         )
         if pending is not None:
             # A failure while finishing frame N-1 must not cost frame N its
             # token, or the slot would stay busy for ever.
             try:
-                self._finish_pending(detector, pose_detector, pending)
+                self._finish_pending(pending)
             except Exception:
                 logger.exception("the detector failed on frame %d", pending.seq)
+                self._frame_error = True
+                self._note_error("dpu_error")
         return current
 
-    def _finish_pending(
-        self,
-        detector: Detector,
-        pose_detector: PoseDetector | None,
-        pending: _PendingFrame,
-    ) -> None:
+    def _finish_pending(self, pending: _PendingFrame) -> None:
         """Wait for, draw and publish a frame the DPU has been working on."""
-        # MoveNet is submitted after YOLOX, so waiting for it first also waits
-        # for the YOLOX job; each wait is isolated so one failure cannot leave
-        # the other runner's slot busy.
-        pose: MovenetPose | None = None
-        if pose_detector is not None and pending.movenet_token is not None:
-            try:
-                pose = pose_detector.wait(pending.movenet_token)
-            except Exception:
-                logger.exception("MoveNet failed on frame %d", pending.seq)
-                self._pose_failed = True
-                self._note_error("dpu_error")
-        detections = detector.wait(pending.token)
+
+        with self._lock:
+            runner = self._runner
+        if runner is None:
+            return
+        if pending.model != self._active_model:
+            # A swap drains the frame in flight before it releases a runner, so
+            # this is only reachable after an external stop().
+            _drain_quietly(runner, pending.token)
+            return
         self._finish(
             pending.seq,
             pending.width,
             pending.height,
             pending.rgb,
-            detections,
-            pose,
-            detector.stage_ms,
-            _stage(pose_detector),
+            runner,
+            pending.model,
+            runner.wait(pending.token),
             pending.started,
             pending.camera_ms,
         )
@@ -599,28 +604,34 @@ class Pipeline:
         width: int,
         height: int,
         rgb: NDArray[np.uint8],
-        detections: Sequence[Detection],
-        pose: MovenetPose | None,
-        stage: Mapping[str, float],
-        pose_stage: Mapping[str, float],
+        runner: Detector | PoseDetector,
+        model: str,
+        output: Sequence[Detection] | MovenetPose,
         started: float,
         camera_ms: float,
     ) -> None:
         """Draw, publish and time one decoded frame."""
 
-        track_started = time.perf_counter()
-        tracked = self._tracker.update(detections)
-        track_ms = (time.perf_counter() - track_started) * 1000.0
-        objects = _objects(tracked, self._labels)
-        with self._lock:
-            active_model = self._active_model
+        track_ms = 0.0
+        pose: MovenetPose | None = None
+        objects: list[protocol.ShowcaseObject] = []
+        if model == "movenet":
+            pose = cast(MovenetPose, output)
+        else:
+            detections = cast(Sequence[Detection], output)
+            track_started = time.perf_counter()
+            tracked = self._tracker.update(detections)
+            track_ms = (time.perf_counter() - track_started) * 1000.0
+            objects = _objects(tracked, self._labels)
+
         draw_started = time.perf_counter()
-        if active_model == "movenet" and pose is not None:
+        if pose is not None:
             overlay = draw_skeleton(rgb, pose.keypoints.tolist())
         else:
             overlay = draw_overlay(rgb, objects)
         draw_ms = (time.perf_counter() - draw_started) * 1000.0
         total_ms = (time.perf_counter() - started) * 1000.0
+        stage = runner.stage_ms
         dpu_ms = stage.get("dpu")
         self._channel.write(overlay)
         now = time.monotonic()
@@ -629,8 +640,7 @@ class Pipeline:
             self._last_dpu_ms = None if dpu_ms is None else float(dpu_ms)
             stamps = tuple(self._processed)
             last_dpu = self._last_dpu_ms
-            active_model = self._active_model
-            publish_state = now - self._last_state >= STATE_PERIOD_S
+            publish_state = model == "yolox" and now - self._last_state >= STATE_PERIOD_S
             pose_period = _pose_period(self._config.movenet.publish_hz)
             publish_pose = pose is not None and now - self._last_pose >= pose_period
             if publish_state:
@@ -643,17 +653,16 @@ class Pipeline:
                 "preprocess": stage.get("preprocess", 0.0),
                 "dpu": stage.get("dpu", 0.0),
                 "decode": stage.get("decode", 0.0),
-                "movenet_dpu": pose_stage.get("dpu", 0.0),
-                "movenet_decode": pose_stage.get("decode", 0.0),
                 "track": track_ms,
                 "draw": draw_ms,
                 "total": total_ms,
             },
             stamps,
         )
-        # F-E1: the objects pane only receives states while YOLOX is the view;
-        # R2-G keeps the pose flowing in both views so gestures never stop.
-        if publish_state and active_model == "yolox":
+        # F-E1: each state belongs to the model that produced it -- the objects
+        # pane only receives showcase.state while YOLOX is loaded, and the
+        # skeleton only pose.state while MoveNet is loaded.
+        if publish_state:
             self._messages.put(
                 "showcase.state",
                 protocol.showcase_state(
@@ -676,7 +685,7 @@ class Pipeline:
                     pose.keypoints.tolist(),
                     score=pose.score,
                     fps=_rate(stamps),
-                    dpu_ms=pose_stage.get("dpu"),
+                    dpu_ms=stage.get("dpu"),
                     total_ms=total_ms,
                 ),
             )
@@ -695,6 +704,109 @@ class Pipeline:
             model = data.get("model")
             if not isinstance(model, str) or not self.set_model(model):
                 logger.warning("ignoring model.set with model %r", model)
+
+    # -- model swap --------------------------------------------------------
+
+    def _apply_model_request(self, pending: _PendingFrame | None) -> _PendingFrame | None:
+        """Perform a queued ``model.set`` between frames (R2-G)."""
+
+        with self._lock:
+            requested = self._requested_model
+            self._requested_model = None
+            active = self._active_model
+        if requested is None or requested == active:
+            return pending
+        if pending is not None:
+            # The job in flight belongs to the runner about to be released:
+            # wait for it (the frame is dropped, its model is going away) so the
+            # DPU is idle and its buffers are free before the graph disappears.
+            _drain_quietly(self._runner, pending.token)
+            pending = None
+        self._swap_model(requested)
+        return None
+
+    def _swap_model(self, target: str) -> None:
+        """Release the loaded runner and build ``target`` in its place.
+
+        A failed load restores the previous runner, so a bad ``model.set``
+        never leaves the showcase without a model.
+        """
+
+        with self._lock:
+            previous = self._active_model
+        logger.info("model swap: %s -> %s", previous, target)
+        with self._lock:
+            self._switching = True
+        self._publish_status(force=True)
+
+        started = time.perf_counter()
+        with self._lock:
+            old = self._runner
+            self._runner = None
+        self._release_runner(old)
+
+        loaded = target
+        failed = False
+        try:
+            runner: Detector | PoseDetector | None = self._build_runner(target)
+        except Exception:
+            logger.exception("the %s runner could not be loaded; restoring %s", target, previous)
+            failed = True
+            loaded = previous
+            try:
+                runner = self._build_runner(previous)
+            except Exception:
+                logger.exception("the %s runner could not be restored", previous)
+                runner = None
+
+        swap_ms = (time.perf_counter() - started) * 1000.0
+        with self._lock:
+            self._runner = runner
+            self._active_model = loaded
+            self._switching = False
+            self._swap_ms = swap_ms
+            self._swap_error = failed
+            self._frame_error = False
+            self._last_state = 0.0
+            self._last_pose = 0.0
+            if loaded == "yolox":
+                self._tracker.reset()
+        if failed:
+            # Stays in ``status.errors`` until a swap succeeds: frames keep
+            # coming from the restored model, so they must not clear it.
+            self._note_error("dpu_error")
+        self._publish_status(force=True)
+        logger.info("model swap to %s done in %.1f ms", loaded, swap_ms)
+
+    def _build_runner(self, model: str) -> Detector | PoseDetector:
+        """Build the runner of ``model`` from the configuration."""
+
+        if model == "movenet":
+            config = self._config.movenet
+            if not config.enabled:
+                raise ValueError("movenet is disabled in the configuration")
+            return self._movenet_factory(config)
+        return self._detector_factory(self._config.model)
+
+    def _release_runner(self, runner: Detector | PoseDetector | None) -> None:
+        """Release a runner's graph and buffers without masking a failure."""
+
+        if runner is None:
+            return
+        close = getattr(runner, "close", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except Exception:
+            logger.exception("failed to release the DPU runner")
+
+    def _model_name(self, model: str) -> str:
+        """The ``.xmodel`` stem of the loaded model."""
+
+        if model == "movenet":
+            return self._config.movenet.name
+        return self._config.model.name
 
     # -- camera recovery ---------------------------------------------------
 
@@ -749,10 +861,11 @@ class Pipeline:
     def _publish_status(self, *, force: bool = False) -> None:
         """Publish ``status`` at 1 Hz and whenever the situation changes."""
         payload = self.status()
-        key: tuple[str, str, str, tuple[str, ...]] = (
+        key: tuple[str, str, str, bool, tuple[str, ...]] = (
             str(payload["state"]),
             str(payload["camera"]),
             str(payload["active_model"]),
+            bool(payload["switching"]),
             tuple(str(code) for code in payload["errors"]),
         )
         now = time.monotonic()
@@ -789,15 +902,12 @@ class Pipeline:
             self._timing_since = time.monotonic()
         logger.info(
             "showcase stages over %d frames: camera=%.2f preprocess=%.2f dpu=%.2f "
-            "decode=%.2f movenet_dpu=%.2f movenet_decode=%.2f track=%.2f draw=%.2f "
-            "total=%.2f total_fps=%.1f",
+            "decode=%.2f track=%.2f draw=%.2f total=%.2f total_fps=%.1f",
             counted,
             means.get("camera", 0.0),
             means.get("preprocess", 0.0),
             means.get("dpu", 0.0),
             means.get("decode", 0.0),
-            means.get("movenet_dpu", 0.0),
-            means.get("movenet_decode", 0.0),
             means.get("track", 0.0),
             means.get("draw", 0.0),
             means.get("total", 0.0),
@@ -838,14 +948,6 @@ def _pose_period(publish_hz: float) -> float:
     return 1.0 / max(float(publish_hz), 1e-6)
 
 
-def _stage(detector: PoseDetector | None) -> Mapping[str, float]:
-    """The stage timings of a MoveNet runner, or zeros when it is off."""
-    return detector.stage_ms if detector is not None else _NO_STAGE
-
-
-_NO_STAGE: Mapping[str, float] = {"preprocess": 0.0, "dpu": 0.0, "decode": 0.0}
-
-
 def _default_detector(model: ModelConfig) -> Detector:
     """Build the DPU detector of F-S1 (imported here: it binds the VART runtime)."""
     return YoloxDetector(model.path, conf_thr=model.conf_thr, iou_thr=model.iou_thr)
@@ -871,21 +973,11 @@ def _release_quietly(camera: Camera | None) -> None:
         logger.exception("failed to release the camera")
 
 
-def _drain_quietly(detector: Detector | None, token: int) -> None:
-    """Wait for the last submitted DPU job so the buffers are free before release."""
+def _drain_quietly(detector: Detector | PoseDetector | None, token: int) -> None:
+    """Wait for a submitted DPU job so the buffers are free before release."""
     if detector is None:
         return
     try:
         detector.wait(token)
     except Exception:
         logger.warning("the last DPU job did not finish cleanly", exc_info=True)
-
-
-def _drain_pose_quietly(pose_detector: PoseDetector | None, token: int | None) -> None:
-    """Wait for the last MoveNet job so its buffers are free before release."""
-    if pose_detector is None or token is None:
-        return
-    try:
-        pose_detector.wait(token)
-    except Exception:
-        logger.warning("the last MoveNet job did not finish cleanly", exc_info=True)

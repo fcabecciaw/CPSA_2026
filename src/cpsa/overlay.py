@@ -6,10 +6,18 @@ is a 2 px rectangle in the class colour plus a ``"<label> <score>%"`` tag; the
 colours come from a fixed palette indexed by class, so a class keeps its colour
 across frames and runs.
 
-In the MoveNet view the overlay is the COCO-17 skeleton instead (R2-G): the bones
-are drawn twice, a wide dim line under a thin bright one, which reads as a glow
-on the video, and every reliable joint gets a dot. Keypoints below
-:data:`SKELETON_MIN_SCORE` are dropped, as F-E4 requires.
+In the MoveNet view the frame is dimmed to 35 % and the COCO-17 skeleton is
+drawn on top in a neon palette, one colour per body part (magenta head, cyan
+arms, lime torso, an electric purple left leg and an orange right one): every
+bone is a thick darker halo under a thin bright core, every reliable joint a
+coloured dot with a white centre.
+Keypoints below :data:`SKELETON_MIN_SCORE` are dropped, as F-E4 requires.
+
+The whole overlay is a handful of OpenCV calls -- the dim is one
+``convertScaleAbs`` into the output frame and each part is one ``polylines`` and
+one ``fillPoly`` pass -- instead of two calls per bone plus one per joint: the
+per-call rasterizer setup, not the pixels, was the board's 2.8 ms. R2-G budgets
+1.5 ms for dim plus draw.
 """
 
 from __future__ import annotations
@@ -20,7 +28,7 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from cpsa.protocol import ShowcaseObject
+from cpsa.protocol import NUM_KEYPOINTS, ShowcaseObject
 
 __all__ = [
     "COCO_SKELETON",
@@ -40,38 +48,68 @@ _LABEL_GAP = 4
 SKELETON_MIN_SCORE = 0.3
 """A keypoint below this score is not drawn (F-E4 #25)."""
 
-COCO_SKELETON: tuple[tuple[int, int], ...] = (
-    (0, 1),
-    (0, 2),
-    (1, 3),
-    (2, 4),
-    (5, 6),
-    (5, 7),
-    (7, 9),
-    (6, 8),
-    (8, 10),
-    (5, 11),
-    (6, 12),
-    (11, 12),
-    (11, 13),
-    (13, 15),
-    (12, 14),
-    (14, 16),
+_GLOW_THICKNESS = 10
+_BONE_THICKNESS = 3
+_JOINT_RADIUS = 3
+_CORE_RADIUS = 1
+
+_DIM_FACTOR = 0.35
+"""Brightness of the video under the skeleton: the pose has to win the frame."""
+
+_GLOW_FACTOR = 0.4
+"""A bone's halo is its neon colour at 40 %."""
+
+_JOINT_CORE_COLOR = (255, 255, 255)
+"""White centre of a joint dot."""
+
+#: ``(keypoints, bones, neon colour)``, in skeleton drawing order. The keypoint
+#: lists decide each dot's colour: a joint shared by two parts keeps the colour
+#: of the part it appears in first.
+_Part = tuple[tuple[int, ...], tuple[tuple[int, int], ...], tuple[int, int, int]]
+_PARTS: tuple[_Part, ...] = (
+    ((0, 1, 2, 3, 4), ((0, 1), (0, 2), (1, 3), (2, 4)), (255, 20, 255)),  # head
+    (
+        (5, 6, 7, 8, 9, 10),
+        ((5, 7), (7, 9), (6, 8), (8, 10)),
+        (0, 245, 255),
+    ),  # arms
+    ((5, 6, 11, 12), ((5, 6), (5, 11), (6, 12), (11, 12)), (120, 255, 45)),  # torso
+    ((11, 13, 15), ((11, 13), (13, 15)), (185, 40, 255)),  # left leg, purple
+    ((12, 14, 16), ((12, 14), (14, 16)), (255, 145, 0)),  # right leg, orange
 )
+
+COCO_SKELETON: tuple[tuple[int, int], ...] = tuple(bone for _, bones, _ in _PARTS for bone in bones)
 """COCO-17 bone pairs, in :data:`cpsa.protocol.KEYPOINTS` order."""
 
-_GLOW_COLOR = (0, 90, 120)
-"""Dim cyan of the wide line under each bone (RGB)."""
+_DOT_OFFSETS = np.array(
+    (
+        (_JOINT_RADIUS, 0),
+        (2, 2),
+        (0, _JOINT_RADIUS),
+        (-2, 2),
+        (-_JOINT_RADIUS, 0),
+        (-2, -2),
+        (0, -_JOINT_RADIUS),
+        (2, -2),
+    ),
+    dtype=np.int32,
+)
+"""Octagon around a joint cell: a filled circle in one ``fillPoly`` call."""
 
-_BONE_COLOR = (40, 255, 245)
-"""Bright cyan of the skeleton (RGB)."""
-
-_JOINT_COLOR = (235, 250, 255)
-"""Near-white dots on the reliable joints (RGB)."""
-
-_GLOW_THICKNESS = 7
-_BONE_THICKNESS = 2
-_JOINT_RADIUS = 3
+_CORE_OFFSETS = np.array(
+    (
+        (_CORE_RADIUS, 0),
+        (_CORE_RADIUS, _CORE_RADIUS),
+        (0, _CORE_RADIUS),
+        (-_CORE_RADIUS, _CORE_RADIUS),
+        (-_CORE_RADIUS, 0),
+        (-_CORE_RADIUS, -_CORE_RADIUS),
+        (0, -_CORE_RADIUS),
+        (_CORE_RADIUS, -_CORE_RADIUS),
+    ),
+    dtype=np.int32,
+)
+"""The white centre of a dot, in the same shape as :data:`_DOT_OFFSETS`."""
 
 _PALETTE: tuple[tuple[int, int, int], ...] = (
     (230, 25, 75),
@@ -147,46 +185,64 @@ def draw_skeleton(
             :data:`cpsa.protocol.KEYPOINTS` order.
 
     Returns:
-        The frame the video shows: bones as a wide dim line under a thin bright
-        one, plus a dot on every joint whose score is at least
-        :data:`SKELETON_MIN_SCORE`.
+        The frame the video shows: the camera frame dimmed to
+        :data:`_DIM_FACTOR`, plus the neon skeleton and a dot on every joint
+        whose score is at least :data:`SKELETON_MIN_SCORE`.
     """
 
-    overlay = np.array(rgb, copy=True)
+    overlay = np.empty_like(rgb)
+    cv2.convertScaleAbs(rgb, dst=overlay, alpha=_DIM_FACTOR)
     height, width = overlay.shape[:2]
-    points = [_to_point(point, width, height) for point in keypoints]
+    points, drawable = _skeleton_points(keypoints, width, height)
+    if not drawable.any():
+        return overlay
 
-    for first, second in COCO_SKELETON:
-        if first >= len(points) or second >= len(points):
-            continue
-        start, end = points[first], points[second]
-        if start is None or end is None:
-            continue
-        cv2.line(overlay, start, end, _GLOW_COLOR, _GLOW_THICKNESS, cv2.LINE_AA)
-        cv2.line(overlay, start, end, _BONE_COLOR, _BONE_THICKNESS, cv2.LINE_AA)
+    for _, bones, colour in _PARTS:
+        segments: list[NDArray[np.int32]] = [
+            np.stack((points[first], points[second]))
+            for first, second in bones
+            if first < len(drawable)
+            and second < len(drawable)
+            and drawable[first]
+            and drawable[second]
+        ]
+        if segments:
+            halo = tuple(int(channel * _GLOW_FACTOR) for channel in colour)
+            # The halo is an aliased pass: at 10 px its edge is invisible, while
+            # the thin bright core keeps LINE_AA. On the A53 the AA rasterizer
+            # was most of the board's old 2.8 ms, not the drawing itself.
+            cv2.polylines(overlay, segments, False, halo, _GLOW_THICKNESS, cv2.LINE_8)
+            cv2.polylines(overlay, segments, False, colour, _BONE_THICKNESS, cv2.LINE_AA)
 
-    for point in points:
-        if point is None:
+    for joints, _, colour in _PARTS:
+        visible = [index for index in joints if index < len(drawable) and drawable[index]]
+        if not visible:
             continue
-        cv2.circle(overlay, point, _JOINT_RADIUS, _JOINT_COLOR, -1, cv2.LINE_AA)
+        dots: NDArray[np.int32] = points[visible]
+        circles: NDArray[np.int32] = dots[:, None, :] + _DOT_OFFSETS[None, :, :]
+        cv2.fillPoly(overlay, list(circles), colour, cv2.LINE_8)
+    all_dots: NDArray[np.int32] = points[drawable]
+    core: NDArray[np.int32] = all_dots[:, None, :] + _CORE_OFFSETS[None, :, :]
+    cv2.fillPoly(overlay, list(core), _JOINT_CORE_COLOR, cv2.LINE_8)
     return overlay
 
 
-def _to_point(
-    point: Sequence[float],
+def _skeleton_points(
+    keypoints: Sequence[Sequence[float]],
     width: int,
     height: int,
-) -> tuple[int, int] | None:
-    """Clip one ``(x, y, score)`` keypoint to the image, or drop it."""
-    if len(point) < 3 or float(point[2]) < SKELETON_MIN_SCORE:
-        return None
-    x, y = float(point[0]), float(point[1])
-    if not (np.isfinite(x) and np.isfinite(y)):
-        return None
-    return (
-        min(max(int(round(x)), 0), max(width - 1, 0)),
-        min(max(int(round(y)), 0), max(height - 1, 0)),
-    )
+) -> tuple[NDArray[np.int32], NDArray[np.bool_]]:
+    """Clip the keypoints to the image and say which ones may be drawn."""
+
+    array = np.asarray(keypoints, dtype=np.float64)
+    if array.ndim != 2 or array.shape[1] < 3 or not len(array):
+        return np.zeros((0, 2), dtype=np.int32), np.zeros(0, dtype=bool)
+    count = min(len(array), NUM_KEYPOINTS)
+    coordinates = np.rint(array[:count, :2])
+    drawable = (array[:count, 2] >= SKELETON_MIN_SCORE) & np.isfinite(array[:count]).all(axis=1)
+    np.clip(coordinates, 0.0, (max(width - 1, 0), max(height - 1, 0)), out=coordinates)
+    coordinates[~drawable] = 0.0
+    return coordinates.astype(np.int32), drawable
 
 
 def _clip(

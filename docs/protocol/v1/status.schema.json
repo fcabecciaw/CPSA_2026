@@ -27,7 +27,19 @@
         "yolox",
         "movenet"
       ],
-      "description": "The view the dashboard shows (R2-G): both models keep running, model.set only switches the overlay and the pane."
+      "description": "The model loaded on the DPU (R2-G); model.set releases it and loads the other one."
+    },
+    "switching": {
+      "type": "boolean",
+      "description": "True while model.set waits for the frame in flight, releases the old runner and loads the new one."
+    },
+    "swap_ms": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Duration of the last model swap in milliseconds, or null before the first one."
     },
     "fps": {
       "type": [
@@ -68,6 +80,8 @@
     "camera",
     "model",
     "active_model",
+    "switching",
+    "swap_ms",
     "fps",
     "dpu_ms",
     "errors",
