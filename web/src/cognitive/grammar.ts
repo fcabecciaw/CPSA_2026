@@ -261,6 +261,30 @@ export function peopleWord(count: number): string {
   return count === 1 ? "persona" : "persone";
 }
 
+/**
+ * A class with the indefinite article: "un telefono", "una tazza",
+ * "uno zaino", "un'auto", "due tazze". Used by the scene continuity lines
+ * ("Prima il telefono, ora una tazza").
+ */
+export function indefinitePhrase(label: string, count = 1): string {
+  const noun = nounGrammar(label);
+  if (count > 1) {
+    return `${numberWord(count)} ${noun.plural}`;
+  }
+  if (noun.singular === null) {
+    return joinArticle(noun.pluralArticle, noun.plural);
+  }
+  const article =
+    noun.gender === "f"
+      ? noun.article === "l'"
+        ? "un'"
+        : "una"
+      : noun.article === "lo"
+        ? "uno"
+        : "un";
+  return joinArticle(article, noun.singular);
+}
+
 /** Slots a rulebook phrase may use. */
 export interface PhraseSlots {
   oggetto?: string;
@@ -275,6 +299,8 @@ export interface PhraseSlots {
   /** Day total, used by the "circa" memory lines. */
   totale?: string | number;
   altro?: string;
+  /** A whole sentence a scene already rendered (`scene.ts`). */
+  testo?: string;
 }
 
 /** Fill `{slot}` placeholders; unknown slots stay visible for the test suite. */

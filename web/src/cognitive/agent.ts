@@ -6,12 +6,13 @@
  */
 
 import type { PoseStatePayload, ShowcaseStatePayload, StatusPayload } from "../protocol";
-import type { CognitiveEvent, WorldModelName } from "./events";
+import type { CognitiveEvent, FaceCueKind, SceneName, WorldModelName } from "./events";
 import { describeEvent } from "./events";
 import { CognitiveMemory } from "./memory";
 import { Perception } from "./perception";
 import type { Expression, Utterance } from "./rules";
 import { CognitiveEngine } from "./rules";
+import { SceneMachine } from "./scene";
 
 export interface MindSnapshot {
   event: string | null;
@@ -19,6 +20,10 @@ export interface MindSnapshot {
   utility: number | null;
   people: number;
   mode: WorldModelName;
+  /** The scene the dialogue is in (R2-D). */
+  scene: SceneName;
+  /** Whether the laptop face cues are on, for the "mente" strip. */
+  face: string;
 }
 
 export interface SpeechHandlers {
@@ -31,6 +36,8 @@ export interface AgentOptions {
   engine: CognitiveEngine;
   memory?: CognitiveMemory;
   perception?: Perception;
+  /** The dialogue scenes; tests inject a machine with short timings. */
+  scene?: SceneMachine;
   /** Speak one sentence; `main.ts` bridges this to `VoiceEngine`. */
   speak?: (text: string, handlers: SpeechHandlers) => void;
   onUtterance?: (utterance: Utterance, mind: MindSnapshot) => void;
@@ -46,6 +53,7 @@ export class CognitiveAgent {
   readonly engine: CognitiveEngine;
   readonly memory: CognitiveMemory;
   readonly perception: Perception;
+  readonly scene: SceneMachine;
 
   private readonly options: AgentOptions;
   private mode: WorldModelName = "yolox";
@@ -58,11 +66,15 @@ export class CognitiveAgent {
   private speechTimer: TimerHandle | null = null;
   private readonly speechTimers = new Set<TimerHandle>();
 
+  /** Face cues come from the laptop browser, never from the board (R2-D). */
+  private faceStatus = "spento";
+
   constructor(options: AgentOptions) {
     this.options = options;
     this.engine = options.engine;
     this.memory = options.memory ?? new CognitiveMemory();
     this.perception = options.perception ?? new Perception();
+    this.scene = options.scene ?? new SceneMachine();
   }
 
   get isVisionLost(): boolean {
@@ -76,7 +88,14 @@ export class CognitiveAgent {
       utility: this.lastUtterance?.utility ?? null,
       people: this.memory.working.focus.people,
       mode: this.mode,
+      scene: this.scene.scene,
+      face: this.faceStatus,
     };
+  }
+
+  /** The "mente" strip says where the face cues run. */
+  setFaceStatus(status: string): void {
+    this.faceStatus = status;
   }
 
   /**
@@ -126,6 +145,15 @@ export class CognitiveAgent {
     this.prepare(events, now);
     this.emit([...modeEvents, ...events], now);
     return events;
+  }
+
+  /** A face cue confirmed by the laptop face tracker (MediaPipe, R2-D). */
+  onFace(kind: FaceCueKind, score: number, faces: number, now: number): CognitiveEvent[] {
+    this.begin(now);
+    const event: CognitiveEvent = { type: "face", kind, score, faces, now };
+    this.prepare([event], now);
+    this.emit([event], now);
+    return [event];
   }
 
   /** `status` at 1 Hz: self-facts and camera errors. */
@@ -205,10 +233,16 @@ export class CognitiveAgent {
   }
 
   private switchMode(model: WorldModelName, now: number): CognitiveEvent[] {
+    // A mode switch must not look like an arrival: the scene keeps the person
+    // it can still see and skips the greeting (F-E4 #22).
+    const wasPresent =
+      this.perception.world.people > 0 || this.perception.world.posePerson;
     this.mode = model;
     this.perception.reset(now, model);
     this.memory.setFocus({ mode: model, people: 0, crowd: false, present: [] });
     this.engine.clear();
+    this.scene.reset(now, wasPresent);
+    this.scene.silence(now);
     const event: CognitiveEvent = { type: "mode", model, now };
     this.lastEvent = event;
     return [event];
@@ -220,6 +254,7 @@ export class CognitiveAgent {
     }
     this.visionLost = true;
     this.engine.clear();
+    this.scene.reset(now);
     const event: CognitiveEvent = { type: "vision", state: "lost", reason, now };
     this.lastEvent = event;
     this.memory.observe([event], now);
@@ -268,6 +303,7 @@ export class CognitiveAgent {
   }
 
   private emit(events: readonly CognitiveEvent[], now: number): void {
+    this.scene.observe(events);
     if (events.length === 0 && this.started) {
       this.pump(now);
       return;
@@ -279,9 +315,11 @@ export class CognitiveAgent {
   private pump(now: number): void {
     this.memory.rollover(now);
     this.clock(now);
+    this.offerScene(now);
     const utterance = this.engine.tick(now, this.memory);
     if (utterance !== null) {
       this.lastUtterance = utterance;
+      this.scene.noteSpoken(utterance, this.memory, now);
       this.options.onExpression?.(utterance.expression);
       const handlers: SpeechHandlers = {
         onStart: () => this.options.onExpression?.(utterance.expression),
@@ -300,6 +338,20 @@ export class CognitiveAgent {
       this.options.onUtterance?.(utterance, this.mind);
     }
     this.options.onMind?.(this.mind);
+  }
+
+  /** Ask the scene machine what it wants to say; the engine decides when. */
+  private offerScene(now: number): void {
+    const world = this.perception.world;
+    const line = this.scene.step(now, this.memory, {
+      people: world.people,
+      crowd: world.crowd,
+      posePerson: world.posePerson,
+      mode: this.mode,
+    });
+    if (line !== null) {
+      this.engine.offerScene(line, this.memory, now);
+    }
   }
 
   /** Clock greetings: one event at start and one per hour change. */

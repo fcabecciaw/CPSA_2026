@@ -16,6 +16,7 @@
  */
 
 import type { SocketLike } from "./client";
+import type { FaceCue } from "./cognitive/facecues";
 import {
   type PoseStatePayload,
   type ServerMessage,
@@ -377,8 +378,59 @@ function compareText(a: string, b: string): number {
  * boxes and Italian labels the board draws on the stream. Clearly a mock: the
  * dashboard shows the mock badge while it runs.
  */
-export function createMockVideo(image: HTMLImageElement, note: HTMLElement): VideoSource {
-  if (PARAMS.get("video") === "0") {
+/**
+ * Scripted face cues for the mock (the drawn room has no real faces): the
+ * MediaPipe tracker cannot detect anything in the fake picture, so the mock
+ * plays the same smiles and nods a person would show.
+ */
+export function createMockFaceCues(onCue: (cue: FaceCue) => void): VideoSource {
+  const schedule: Array<{ at: number; kind: FaceCue["kind"] }> = [
+    { at: SCRIPT.personAt + 1.5, kind: "looking_at_me" },
+    { at: SCRIPT.phoneAt + 1, kind: "mouth_open" },
+    { at: SCRIPT.cupAt + 1, kind: "smile" },
+    { at: SCRIPT.groupAt + 1, kind: "smile" },
+    { at: SCRIPT.movenetAt + 1.5, kind: "nod" },
+    { at: SCRIPT.waveAt + 2, kind: "head_shake" },
+  ];
+  let timer: number | null = null;
+  const fired = new Set<string>();
+  const tick = (): void => {
+    const raw = scenarioSeconds() % SCRIPT.loopAt;
+    const loop = Math.floor(scenarioSeconds() / SCRIPT.loopAt);
+    for (const cue of schedule) {
+      const key = `${loop}:${cue.at}`;
+      if (raw >= cue.at && !fired.has(key)) {
+        fired.add(key);
+        onCue({
+          kind: cue.kind,
+          score: 0.8,
+          faces: 1,
+          at: Date.now(),
+        });
+      }
+    }
+    if (fired.size > 64) {
+      fired.clear();
+    }
+  };
+  return {
+    start(): void {
+      if (timer !== null) {
+        return;
+      }
+      tick();
+      timer = window.setInterval(tick, 200);
+    },
+    stop(): void {
+      if (timer !== null) {
+        window.clearInterval(timer);
+        timer = null;
+      }
+    },
+  };
+}
+
+export function createMockVideo(image: HTMLImageElement, note: HTMLElement): VideoSource {  if (PARAMS.get("video") === "0") {
     // Same pane, no picture: the placeholder stays, for comparing the layout.
     return { start: () => undefined, stop: () => undefined };
   }

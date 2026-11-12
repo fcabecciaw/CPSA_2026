@@ -13,6 +13,7 @@ import { RULEBOOK } from "./cognitive/rulebook";
 import { CognitiveEngine, type Expression } from "./cognitive/rules";
 import { byId } from "./dom";
 import { FaceView } from "./face";
+import { FaceCueTracker } from "./facepipeline";
 import { formatNumber } from "./labels";
 import { MetricsTracker } from "./metrics";
 import { ShowcaseView } from "./showcase";
@@ -52,6 +53,8 @@ const mente = byId("mente");
 const menteEvent = byId("mente-event");
 const menteRule = byId("mente-rule");
 const menteUtility = byId("mente-utility");
+const menteScene = byId("mente-scene");
+const menteFace = byId("mente-face");
 
 const mind = new CognitiveAgent({
   engine: new CognitiveEngine(RULEBOOK),
@@ -99,13 +102,44 @@ let lastActivityAt = Date.now();
 /** In MoveNet the objects panel would freeze on its last frame: clear it. */
 let poseMode = false;
 
+/**
+ * Face cues run in this laptop browser (MediaPipe on `/video.mjpeg`), never on
+ * the board; `faceCues` is the tracker or the scripted mock of `?mock=1`.
+ */
+const faceTracker = new FaceCueTracker({
+  onCue: (cue) => {
+    mind.onFace(cue.kind, cue.score, cue.faces, Date.now());
+  },
+  onStatus: () => {
+    mind.setFaceStatus(faceTracker.label);
+    renderMind();
+  },
+});
+
+let faceCues: VideoSource = {
+  start: () => {
+    void faceTracker.start(videoImage).then(() => {
+      mind.setFaceStatus(faceTracker.label);
+      renderMind();
+    });
+  },
+  stop: () => {
+    faceTracker.stop();
+    mind.setFaceStatus(faceTracker.label);
+    renderMind();
+  },
+};
+
 function renderMind(): void {
   const snapshot = mind.mind;
-  mente.hidden = snapshot.event === null && snapshot.ruleId === null;
+  mente.hidden =
+    snapshot.event === null && snapshot.ruleId === null && snapshot.scene === "attract";
   menteEvent.textContent = snapshot.event ?? "—";
   menteRule.textContent = snapshot.ruleId ?? "—";
   menteUtility.textContent =
     snapshot.utility === null ? "—" : formatNumber(snapshot.utility, 2);
+  menteScene.textContent = snapshot.scene;
+  menteFace.textContent = snapshot.face;
 }
 
 /** The badge, the click gate and the mute button, from the voice snapshot. */
@@ -163,8 +197,10 @@ function refreshVideo(): void {
   streaming = wanted;
   if (wanted) {
     video.start();
+    faceCues.start();
   } else {
     video.stop();
+    faceCues.stop();
   }
 }
 
@@ -193,6 +229,11 @@ async function boot(): Promise<void> {
     factory = mock.createMockSocket;
     sourceLabel = mock.MOCK_BADGE;
     video = mock.createMockVideo(videoImage, videoNote);
+    faceCues = mock.createMockFaceCues((cue) => {
+      mind.onFace(cue.kind, cue.score, cue.faces, Date.now());
+    });
+    mind.setFaceStatus("mock");
+    renderMind();
   }
 
   new DashboardClient({
@@ -274,6 +315,9 @@ async function boot(): Promise<void> {
     if (document.hidden) {
       voice.cancel();
       mind.interrupt();
+      faceCues.stop();
+    } else if (streaming) {
+      faceCues.start();
     }
   });
 

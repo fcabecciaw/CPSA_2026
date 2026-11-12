@@ -19,6 +19,34 @@ export type PoseKind =
   | "hands_on_head"
   | "lean";
 
+/**
+ * Face cues confirmed by the laptop browser (MediaPipe Face Landmarker): they
+ * never come from the board, only from `/video.mjpeg` sampled in the dashboard.
+ */
+export type FaceCueKind =
+  | "smile"
+  | "mouth_open"
+  | "nod"
+  | "head_shake"
+  | "looking_at_me";
+
+/** The four scenes of the dialogue (`scene.ts`). */
+export type SceneName = "attract" | "engage" | "play" | "farewell";
+
+/** What a scene line is for, shown in the "mente" strip and used by the tests. */
+export type SceneLineKind =
+  | "fact"
+  | "poem"
+  | "invitation"
+  | "greeting"
+  | "intro"
+  | "prompt"
+  | "reaction"
+  | "goodbye"
+  | "question"
+  | "answer"
+  | "continuity";
+
 interface EventBase {
   /** Monotonic milliseconds of the dashboard clock. */
   now: number;
@@ -60,6 +88,21 @@ export type CognitiveEvent =
   | (EventBase & { type: "idle"; seconds: number })
   | (EventBase & { type: "milestone"; name: string; value: number })
   | (EventBase & { type: "pose"; kind: PoseKind; score: number })
+  | (EventBase & {
+      type: "face";
+      kind: FaceCueKind;
+      /** Blendshape or head-pose confidence of the cue, [0, 1]. */
+      score: number;
+      /** Faces in the frame when the cue was confirmed. */
+      faces: number;
+    })
+  | (EventBase & {
+      type: "scene";
+      scene: SceneName;
+      kind: SceneLineKind;
+      /** The sentence, already rendered by `scene.ts`. */
+      text: string;
+    })
   | (EventBase & { type: "mode"; model: WorldModelName })
   | (EventBase & { type: "clock"; hour: number })
   | (EventBase & {
@@ -97,6 +140,15 @@ export function classOf(event: CognitiveEvent): string | null {
   return objectKeyOf(event) === "persona" ? "persona" : objectKeyOf(event);
 }
 
+/** Italian names of the face cues, for the "mente" strip. */
+const FACE_CUE_LABEL: Record<FaceCueKind, string> = {
+  smile: "sorriso",
+  mouth_open: "bocca aperta",
+  nod: "cenno sì",
+  head_shake: "cenno no",
+  looking_at_me: "mi guarda",
+};
+
 /** One short line for the "mente" strip. */
 export function describeEvent(event: CognitiveEvent): string {
   switch (event.type) {
@@ -120,6 +172,10 @@ export function describeEvent(event: CognitiveEvent): string {
       return `traguardo: ${event.name}`;
     case "pose":
       return `postura: ${event.kind}`;
+    case "face":
+      return `volto: ${FACE_CUE_LABEL[event.kind]}`;
+    case "scene":
+      return `scena ${event.scene}: ${event.kind}`;
     case "mode":
       return `modello: ${event.model}`;
     case "clock":

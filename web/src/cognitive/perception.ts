@@ -158,6 +158,7 @@ export class Perception {
   private readonly idleEmitted = new Set<number>();
   private largestPerson: Box | null = null;
   private rawPeople = 0;
+  private posePerson = false;
 
   constructor(options: Partial<PerceptionOptions> = {}) {
     this.options = { ...DEFAULT_PERCEPTION_OPTIONS, ...options };
@@ -169,6 +170,8 @@ export class Perception {
     rawPeople: number;
     crowd: boolean;
     largestPerson: Box | null;
+    /** MoveNet sees a body: MoveNet has no count, only presence (F-E4 #22). */
+    posePerson: boolean;
   } {
     return {
       mode: this.mode,
@@ -176,6 +179,7 @@ export class Perception {
       rawPeople: this.rawPeople,
       crowd: this.stablePeople >= 5,
       largestPerson: this.largestPerson,
+      posePerson: this.posePerson,
     };
   }
 
@@ -213,6 +217,7 @@ export class Perception {
     this.idleEmitted.clear();
     this.largestPerson = null;
     this.rawPeople = 0;
+    this.posePerson = false;
   }
 
   /** Feed one `showcase.state`; returns the events it produced. */
@@ -299,6 +304,7 @@ export class Perception {
     if (pose.score < this.options.poseMinScore) {
       this.poseHolds.clear();
       this.poseSamples = [];
+      this.posePerson = false;
       return [];
     }
     const points = pose.keypoints.map(([x, y, score]) =>
@@ -310,8 +316,10 @@ export class Perception {
     if (leftShoulder === null || rightShoulder === null || nose === null) {
       this.poseHolds.clear();
       this.poseSamples = [];
+      this.posePerson = false;
       return [];
     }
+    this.posePerson = true;
     const width = Math.max(1, Math.abs(rightShoulder[0] - leftShoulder[0]));
     const shoulderMidX = (leftShoulder[0] + rightShoulder[0]) / 2;
     const shoulderMidY = (leftShoulder[1] + rightShoulder[1]) / 2;

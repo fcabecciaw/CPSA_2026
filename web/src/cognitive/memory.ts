@@ -45,12 +45,20 @@ export interface DayTotals {
   rulesFired: number;
 }
 
+/** Idle content already spoken today, so Attract never repeats itself (#14). */
+export interface DayIdleMemory {
+  facts: string[];
+  poems: string[];
+  questions: string[];
+}
+
 export interface DayMemory {
   /** Local calendar day, `YYYY-MM-DD`. */
   date: string;
   classes: Record<string, DayClassMemory>;
   rules: Record<string, DayRuleMemory>;
   totals: DayTotals;
+  idle: DayIdleMemory;
 }
 
 /** What the rules see of the world right now, refreshed every tick. */
@@ -113,6 +121,7 @@ export function emptyDay(date: string): DayMemory {
     classes: {},
     rules: {},
     totals: { peopleSeen: 0, maxPeople: 0, objectsSeen: 0, rulesFired: 0 },
+    idle: { facts: [], poems: [], questions: [] },
   };
 }
 
@@ -278,6 +287,20 @@ export class CognitiveMemory {
     return this.dayMemory.rules[ruleId]?.count ?? 0;
   }
 
+  /** Was this idle fact/poem/question already said today? (F-E4 #14) */
+  idleUsed(kind: keyof DayIdleMemory, id: string): boolean {
+    return this.dayMemory.idle[kind].includes(id);
+  }
+
+  /** Remember one idle line for the rest of the day. */
+  markIdleUsed(kind: keyof DayIdleMemory, id: string): void {
+    const used = this.dayMemory.idle[kind];
+    if (!used.includes(id)) {
+      used.push(id);
+      this.save();
+    }
+  }
+
   lastFiredAt(ruleId: string): number | null {
     return this.dayMemory.rules[ruleId]?.lastFiredAt ?? null;
   }
@@ -355,6 +378,12 @@ export class CognitiveMemory {
           maxPeople: parsed.totals?.maxPeople ?? 0,
           objectsSeen: parsed.totals?.objectsSeen ?? 0,
           rulesFired: parsed.totals?.rulesFired ?? 0,
+        },
+        // A day written before the scenes existed has no idle record.
+        idle: {
+          facts: parsed.idle?.facts ?? [],
+          poems: parsed.idle?.poems ?? [],
+          questions: parsed.idle?.questions ?? [],
         },
       };
     } catch {

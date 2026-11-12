@@ -9,7 +9,7 @@
  * caller gives it the clock and a random source.
  */
 
-import type { CognitiveEvent } from "./events";
+import type { CognitiveEvent, SceneLineKind, SceneName } from "./events";
 import { objectKeyOf } from "./events";
 import { nounPhrase, renderPhrase, type PhraseSlots } from "./grammar";
 import type { CognitiveMemory } from "./memory";
@@ -75,6 +75,35 @@ export interface Utterance {
   utility: number;
   /** Engine clock when the utterance was chosen. */
   now: number;
+  /** Set when the line comes from a scene rather than from the rulebook. */
+  scene?: SceneName;
+  sceneKind?: SceneLineKind;
+  /** Instances the object line is about ("due tazze"), for continuity. */
+  objectCount?: number;
+}
+
+/**
+ * One sentence a scene wants to say, already phrased (`scene.ts`). The engine
+ * still owns the voice: it gates the line with the global gap, the single
+ * in-flight utterance, the one queue slot and the 3 s expiry (F-E4 #13), so
+ * scenes and rulebook rules can never speak at the same time.
+ */
+export interface SceneLine {
+  /** Also the memory id: no-repeat and cooldowns work exactly as for rules. */
+  ruleId: string;
+  scene: SceneName;
+  kind: SceneLineKind;
+  text: string;
+  expression: Expression;
+  gaze: GazeTarget;
+  priority: number;
+  cooldown_s?: number;
+  /** Object the line is about, for novelty, habituation and presence. */
+  objectKey?: string | null;
+  /** Instances of the object, for the follow-up noun phrase. */
+  objectCount?: number;
+  /** Drop the line if the world changed while it waited. */
+  valid?: (memory: CognitiveMemory, now: number) => boolean;
 }
 
 interface Candidate {
@@ -82,6 +111,7 @@ interface Candidate {
   event: CognitiveEvent;
   objectKey: string | null;
   utility: number;
+  scene?: SceneLine;
 }
 
 interface Queued {
@@ -166,6 +196,9 @@ export function slotsFor(event: CognitiveEvent): PhraseSlots {
       return { n: it(Math.round(event.score * 100)) };
     case "mode":
       return {};
+    case "face":
+    case "scene":
+      return { testo: event.type === "scene" ? event.text : "" };
     case "clock":
       return { ora: two(event.hour), n: it(event.hour) };
     case "self":
@@ -267,6 +300,55 @@ export class CognitiveEngine {
     }
   }
 
+  /**
+   * Offer one scene line to the engine. It competes with the rulebook
+   * candidates on utility and obeys the very same speech contract, so a scene
+   * can never overlap with a rule or with another scene line (F-E4 #13).
+   */
+  offerScene(line: SceneLine, memory: CognitiveMemory, now: number): void {
+    const event: CognitiveEvent = {
+      type: "scene",
+      scene: line.scene,
+      kind: line.kind,
+      text: line.text,
+      now,
+    };
+    const rule: Rule = {
+      id: line.ruleId,
+      category: "special",
+      when: () => true,
+      priority: line.priority,
+      cooldown_s: line.cooldown_s ?? 0,
+      expression: line.expression,
+      gaze: line.gaze,
+      phrases: ["{testo}"],
+    };
+    if (!this.canFire(rule, event, memory, now)) {
+      return;
+    }
+    const key = line.objectKey ?? null;
+    const label = key !== null && !key.includes("+") ? key : null;
+    const novelty = label === null ? 0 : memory.novelty(label, now);
+    const habituation = label === null ? 0 : memory.habituation(label, now);
+    const utility =
+      line.priority +
+      novelty -
+      habituation +
+      this.options.rng() * this.options.noise;
+    const candidate: Candidate = {
+      rule,
+      event,
+      objectKey: key,
+      utility,
+      scene: line,
+    };
+    if (this.speaking || now - this.lastSpokeAt < this.gap(memory)) {
+      this.enqueue(candidate, now);
+    } else if (this.pending === null || candidate.utility > this.pending.utility) {
+      this.pending = { ...candidate, seenAt: now };
+    }
+  }
+
   /** Choose the next utterance, if the gap and the queue allow one. */
   tick(now: number, memory: CognitiveMemory): Utterance | null {
     if (this.speaking) {
@@ -350,6 +432,9 @@ export class CognitiveEngine {
   }
 
   private stillValid(candidate: Candidate, memory: CognitiveMemory, now: number): boolean {
+    if (candidate.scene !== undefined) {
+      return candidate.scene.valid === undefined || candidate.scene.valid(memory, now);
+    }
     if (candidate.rule.model !== undefined && candidate.rule.model !== memory.working.focus.mode) {
       return false;
     }
@@ -388,17 +473,27 @@ export class CognitiveEngine {
   }
 
   private speak(candidate: Candidate, memory: CognitiveMemory, now: number): Utterance {
-    const text = renderRulePhrase(candidate.rule, candidate.event, memory);
+    const text =
+      candidate.scene !== undefined
+        ? candidate.scene.text
+        : renderRulePhrase(candidate.rule, candidate.event, memory);
     const utterance: Utterance = {
       ruleId: candidate.rule.id,
       text,
-      expression: candidate.rule.expression,
-      gaze: candidate.rule.gaze ?? "object",
+      expression: candidate.scene?.expression ?? candidate.rule.expression,
+      gaze: candidate.scene?.gaze ?? candidate.rule.gaze ?? "object",
       event: candidate.event,
       objectKey: candidate.objectKey,
       priority: candidate.rule.priority,
       utility: candidate.utility,
       now,
+      ...(candidate.scene === undefined
+        ? {}
+        : {
+            scene: candidate.scene.scene,
+            sceneKind: candidate.scene.kind,
+            objectCount: candidate.scene.objectCount,
+          }),
     };
     this.inFlight = utterance;
     this.lastSpokeAt = now;
