@@ -79,6 +79,22 @@ export interface ShowcaseStatePayload {
   counts: ShowcaseCount[];
 }
 
+/**
+ * F-E1 `pose.state`: the MoveNet skeleton while that model is active, at most
+ * 30 Hz. Keypoints are source-pixel `[x, y, score]` in COCO-17 order; `score`
+ * is their mean and is below 0.2 when nobody is in the frame.
+ */
+export interface PoseStatePayload {
+  model: string;
+  width: number;
+  height: number;
+  fps: number | null;
+  dpu_ms: number | null;
+  total_ms: number | null;
+  score: number;
+  keypoints: Array<[number, number, number]>;
+}
+
 interface Envelope<T extends string, P> {
   v: typeof PROTOCOL_VERSION;
   type: T;
@@ -93,6 +109,7 @@ export type ServerMessage =
   | Envelope<"hello", HelloPayload>
   | Envelope<"status", StatusPayload>
   | Envelope<"showcase.state", ShowcaseStatePayload>
+  | Envelope<"pose.state", PoseStatePayload>
   | Envelope<"error", ErrorPayload>
   | Envelope<"pong", PongPayload>;
 
@@ -127,6 +144,7 @@ const KNOWN_TYPES: readonly ServerMessageType[] = [
   "hello",
   "status",
   "showcase.state",
+  "pose.state",
   "error",
   "pong",
 ];
@@ -180,6 +198,15 @@ export function parseServerMessage(raw: string): ParseResult {
           t,
           wall,
           data: parseShowcaseState(data),
+        });
+      case "pose.state":
+        return message({
+          v: PROTOCOL_VERSION,
+          type,
+          seq,
+          t,
+          wall,
+          data: parsePoseState(data),
         });
       case "error":
         return message({ v: PROTOCOL_VERSION, type, seq, t, wall, data: parseError(data) });
@@ -261,6 +288,37 @@ function parseShowcaseState(data: JsonObject): ShowcaseStatePayload {
         count: reqInteger(count, "count", 0),
       };
     }),
+  };
+}
+
+/**
+ * F-E1 `pose.state`. The keypoints are load-bearing for the gaze and the pose
+ * rules; exactly 17 triplets are required, and a malformed one invalidates the
+ * message instead of taking the dashboard down (IF-103).
+ */
+function parsePoseState(data: JsonObject): PoseStatePayload {
+  const keypoints = reqArray(data, "keypoints", (value) => {
+    if (!Array.isArray(value) || value.length < 3) {
+      throw new PayloadError("keypoints[]: attesa una terna [x, y, score]");
+    }
+    return [
+      numberValue(value[0], "keypoints[][0]"),
+      numberValue(value[1], "keypoints[][1]"),
+      numberValue(value[2], "keypoints[][2]"),
+    ] as [number, number, number];
+  });
+  if (keypoints.length !== 17) {
+    throw new PayloadError(`keypoints: attesi 17 punti, ricevuti ${keypoints.length}`);
+  }
+  return {
+    model: reqString(data, "model"),
+    width: reqInteger(data, "width", 1),
+    height: reqInteger(data, "height", 1),
+    fps: nullableNumberField(data, "fps"),
+    dpu_ms: nullableNumberField(data, "dpu_ms"),
+    total_ms: nullableNumberField(data, "total_ms"),
+    score: reqNumber(data, "score"),
+    keypoints,
   };
 }
 

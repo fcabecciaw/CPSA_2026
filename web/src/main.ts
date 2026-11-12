@@ -6,12 +6,22 @@ import {
   type ConnectionInfo,
   type SocketFactory,
 } from "./client";
+import { CognitiveAgent } from "./cognitive/agent";
+import { CognitiveMemory } from "./cognitive/memory";
+import { Perception } from "./cognitive/perception";
+import { RULEBOOK } from "./cognitive/rulebook";
+import { CognitiveEngine, type Expression } from "./cognitive/rules";
 import { byId } from "./dom";
+import { FaceView } from "./face";
+import { formatNumber } from "./labels";
 import { MetricsTracker } from "./metrics";
 import { ShowcaseView } from "./showcase";
 import { DashboardStore } from "./state";
+import { VoiceEngine } from "./voice";
 import { collectElements, renderAll, renderConnection, renderMetrics, renderNotice } from "./views";
 import { VideoFeed, type VideoSource } from "./video";
+
+const params = new URLSearchParams(window.location.search);
 
 const elements = collectElements();
 const store = new DashboardStore();
@@ -28,6 +38,97 @@ const showcase = new ShowcaseView({
   objects: byId("showcase-objects"),
   empty: byId("showcase-empty"),
   meta: byId("showcase-meta"),
+});
+
+const face = new FaceView(byId("face"), byId("bubble"));
+// `?voice=1` marks this tab as the speaking one; the click gate still applies.
+const voice = new VoiceEngine({ enabled: params.get("voice") === "1" });
+
+const voiceBadge = byId("voice-badge");
+const voiceGate = byId<HTMLButtonElement>("voice-gate");
+const muteToggle = byId<HTMLButtonElement>("mute-toggle");
+const showcaseEmpty = byId("showcase-empty");
+const mente = byId("mente");
+const menteEvent = byId("mente-event");
+const menteRule = byId("mente-rule");
+const menteUtility = byId("mente-utility");
+
+const mind = new CognitiveAgent({
+  engine: new CognitiveEngine(RULEBOOK),
+  memory: new CognitiveMemory(),
+  perception: new Perception(),
+  speak: (text, handlers) => {
+    if (bubbleTimer !== null) {
+      clearTimeout(bubbleTimer);
+      bubbleTimer = null;
+    }
+    face.setBubble(text);
+    face.beginUtterance(expression, Date.now());
+    voice.speak(text, {
+      onStart: () => {
+        handlers.onStart?.();
+        face.setSpeaking(true);
+      },
+      onBoundary: () => handlers.onBoundary?.(),
+      onEnd: (reason) => {
+        handlers.onEnd?.(reason);
+        face.endUtterance(Date.now());
+        if (bubbleTimer !== null) {
+          clearTimeout(bubbleTimer);
+        }
+        bubbleTimer = window.setTimeout(() => {
+          bubbleTimer = null;
+          face.clearBubble();
+        }, 4_500);
+      },
+    });
+    renderVoice();
+  },
+  onExpression: (next) => {
+    expression = next;
+    face.hold(next, Date.now());
+  },
+  onMind: () => renderMind(),
+});
+
+let expression: Expression = "neutral";
+let bubbleTimer: number | null = null;
+let frameWidth = 640;
+let frameHeight = 480;
+let lastActivityAt = Date.now();
+/** In MoveNet the objects panel would freeze on its last frame: clear it. */
+let poseMode = false;
+
+function renderMind(): void {
+  const snapshot = mind.mind;
+  mente.hidden = snapshot.event === null && snapshot.ruleId === null;
+  menteEvent.textContent = snapshot.event ?? "—";
+  menteRule.textContent = snapshot.ruleId ?? "—";
+  menteUtility.textContent =
+    snapshot.utility === null ? "—" : formatNumber(snapshot.utility, 2);
+}
+
+/** The badge, the click gate and the mute button, from the voice snapshot. */
+function renderVoice(): void {
+  const snapshot = voice.snapshot();
+  voiceBadge.textContent = snapshot.label;
+  voiceBadge.dataset.status = snapshot.status;
+  const gate = !snapshot.enabled || snapshot.status === "locked";
+  voiceGate.hidden = !gate;
+  muteToggle.hidden = !snapshot.enabled;
+  muteToggle.setAttribute("aria-pressed", String(snapshot.muted));
+  muteToggle.textContent = snapshot.muted ? "Muto" : "Voce";
+}
+
+/** One gesture is enough for this page: audio and the tab's voice switch. */
+voiceGate.addEventListener("click", () => {
+  voice.activate();
+  renderVoice();
+});
+
+muteToggle.addEventListener("click", () => {
+  voice.toggleMute();
+  renderVoice();
 });
 
 const socketUrl = defaultSocketUrl();
@@ -87,10 +188,7 @@ function showTransportNotice(text: string): void {
 async function boot(): Promise<void> {
   let factory: SocketFactory | undefined;
 
-  if (
-    import.meta.env.DEV &&
-    new URLSearchParams(window.location.search).get("mock") === "1"
-  ) {
+  if (import.meta.env.DEV && params.get("mock") === "1") {
     const mock = await import("./mock");
     factory = mock.createMockSocket;
     sourceLabel = mock.MOCK_BADGE;
@@ -105,9 +203,25 @@ async function boot(): Promise<void> {
         const now = Date.now();
         if (message.type === "status") {
           metrics.status(message.data);
+          mind.onStatus(message.data, now);
         }
         if (message.type === "showcase.state") {
           metrics.showcase(message.data);
+          poseMode = false;
+          frameWidth = message.data.width;
+          frameHeight = message.data.height;
+          if (message.data.objects.length > 0) {
+            lastActivityAt = now;
+          }
+          mind.onShowcase(message.data, now);
+        }
+        if (message.type === "pose.state") {
+          lastActivityAt = now;
+          if (!poseMode) {
+            poseMode = true;
+            showcase.setState(null);
+          }
+          mind.onPose(message.data, now);
         }
         for (const region of store.apply(message, now)) {
           if (region === "showcase") {
@@ -121,6 +235,7 @@ async function boot(): Promise<void> {
       },
       onConnection: (info) => {
         connection = info;
+        mind.onConnection(info.phase === "open", Date.now());
         refreshVideo();
         renderConnection(elements, info);
         renderMetrics(elements, metrics.read());
@@ -130,7 +245,41 @@ async function boot(): Promise<void> {
     },
   }).start();
 
+  // The cognitive heartbeat: rule candidates, face, calm panel, voice label.
+  window.setInterval(() => {
+    const now = Date.now();
+    mind.tick(now);
+    const world = mind.perception.world;
+    const idleS = (now - lastActivityAt) / 1_000;
+    face.tick(now, idleS);
+    face.updateGaze(
+      world.largestPerson === null ? [] : [world.largestPerson],
+      { width: frameWidth, height: frameHeight },
+      now,
+      world.largestPerson === null,
+    );
+    showcase.tick();
+    // The empty invitation changes meaning while the pose model is active.
+    const note =
+      world.mode === "movenet"
+        ? "Modalità postura: guardo i gesti"
+        : "Mostra un oggetto alla telecamera";
+    if (showcaseEmpty.textContent !== note) {
+      showcaseEmpty.textContent = note;
+    }
+    renderVoice();
+  }, 250);
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      voice.cancel();
+      mind.interrupt();
+    }
+  });
+
   renderAll(elements, input());
+  renderVoice();
+  renderMind();
   refreshVideo();
 }
 

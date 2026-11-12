@@ -49,6 +49,11 @@ export class DashboardStore {
         this.state.showcase = message.data;
         return ["showcase"];
 
+      case "pose.state":
+        // The cognitive layer consumes pose frames directly; the stateless
+        // renderer keeps no skeleton snapshot of its own.
+        return [];
+
       case "error":
         this.state.lastError = { error: message.data, receivedAt };
         return ["bar"];

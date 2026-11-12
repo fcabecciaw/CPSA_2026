@@ -5,12 +5,15 @@
  * The boxes and their Italian labels are drawn by the board on the MJPEG
  * stream, so this pane adds what the picture cannot say at a glance: how many
  * objects of each kind are in the frame, and the most confident detections with
- * their score bar.
+ * their score bar. `CalmShowcase` debounces the 10 Hz feed into a calm view
+ * (500 ms text, 5 % scores, stable order, 1 s leave hold), so the panel does not
+ * flicker (coordinator feedback, 2026-11-12).
  */
 
+import { CalmShowcase, type CalmObject, type CalmView } from "./calm";
 import { clear, el } from "./dom";
 import { SHOWCASE_LABELS, formatNumber } from "./labels";
-import type { ShowcaseCount, ShowcaseObject, ShowcaseStatePayload } from "./protocol";
+import type { ShowcaseStatePayload } from "./protocol";
 
 /** A booth reads a short list: the rest stays on the video overlay. */
 const MAX_COUNTS = 6;
@@ -25,9 +28,19 @@ export interface ShowcaseElements {
   meta: HTMLElement;
 }
 
+interface ObjectNode {
+  row: HTMLElement;
+  label: HTMLElement;
+  score: HTMLElement;
+  fill: HTMLElement;
+}
+
 export class ShowcaseView {
   private readonly elements: ShowcaseElements;
-  private state: ShowcaseStatePayload | null = null;
+  private readonly calm = new CalmShowcase();
+  private readonly objectNodes = new Map<string, ObjectNode>();
+  private more: HTMLElement | null = null;
+  private rendered: CalmView | null = null;
 
   constructor(elements: ShowcaseElements) {
     this.elements = elements;
@@ -35,53 +48,126 @@ export class ShowcaseView {
   }
 
   setState(state: ShowcaseStatePayload | null): void {
-    this.state = state;
-    this.render();
+    if (state === null) {
+      this.calm.reset();
+      this.rendered = null;
+      this.dropAllObjects();
+      this.render();
+      return;
+    }
+    const view = this.calm.update(state, Date.now());
+    if (view !== null) {
+      this.rendered = view;
+      this.render();
+    }
+  }
+
+  /** Keep the 1 s leave hold and the 500 ms refresh alive between frames. */
+  tick(): void {
+    const view = this.calm.tick(Date.now());
+    if (view !== null) {
+      this.rendered = view;
+      this.render();
+    }
   }
 
   private render(): void {
     const { countsGroup, counts, objectsGroup, objects, empty, meta } = this.elements;
-    const state = this.state;
-    const detections = state?.objects ?? [];
-    const counted = state === null ? [] : countsOf(state);
-    const visible = detections.length > 0;
+    const view = this.rendered;
+    const objectList = view?.objects ?? [];
+    const countList = view?.counts ?? [];
+    const visible = objectList.length > 0 || countList.length > 0;
 
-    countsGroup.hidden = !visible;
-    objectsGroup.hidden = !visible;
+    countsGroup.hidden = countList.length === 0;
+    objectsGroup.hidden = objectList.length === 0;
     empty.hidden = visible;
     meta.hidden = !visible;
 
-    if (state === null || !visible) {
+    if (!visible) {
       clear(counts);
       clear(objects);
+      this.objectNodes.clear();
+      this.more = null;
       meta.textContent = "";
       return;
     }
 
-    renderCounts(counts, counted);
-    renderObjects(objects, detections);
-    meta.textContent = `${state.model} · ${state.width}×${state.height}`;
+    renderCounts(counts, countList);
+    this.renderObjects(objectList);
+    meta.textContent =
+      view?.meta === null || view?.meta === undefined
+        ? ""
+        : `${view.meta.model} · ${view.meta.width}×${view.meta.height}`;
+  }
+
+  private renderObjects(list: readonly CalmObject[]): void {
+    const container = this.elements.objects;
+    const shown = list.slice(0, MAX_OBJECTS);
+    const keys = new Set(shown.map((object) => object.key));
+
+    for (const [key, node] of this.objectNodes) {
+      if (!keys.has(key)) {
+        node.row.remove();
+        this.objectNodes.delete(key);
+      }
+    }
+
+    for (const object of shown) {
+      let node = this.objectNodes.get(object.key);
+      if (node === undefined) {
+        node = createObjectNode(object);
+        this.objectNodes.set(object.key, node);
+        node.row.classList.add("showcase-object-entering");
+        window.setTimeout(() => node?.row.classList.remove("showcase-object-entering"), 320);
+      }
+      node.row.classList.toggle("showcase-object-leaving", object.leaving);
+      node.row.dataset.key = object.key;
+      node.label.textContent = object.label;
+      node.score.textContent = `${formatNumber(object.scorePercent, 0)}%`;
+      const score = Math.min(1, Math.max(0, object.score));
+      node.row.style.setProperty("--score", String(score));
+      container.append(node.row);
+    }
+    if (list.length > MAX_OBJECTS) {
+      if (this.more === null) {
+        this.more = el("li", "showcase-more");
+      }
+      this.more.textContent = `e altri ${formatNumber(list.length - MAX_OBJECTS, 0)}`;
+      container.append(this.more);
+    } else if (this.more !== null) {
+      this.more.remove();
+      this.more = null;
+    }
+  }
+
+  private dropAllObjects(): void {
+    for (const node of this.objectNodes.values()) {
+      node.row.remove();
+    }
+    this.objectNodes.clear();
+    if (this.more !== null) {
+      this.more.remove();
+      this.more = null;
+    }
   }
 }
 
-/**
- * The server groups the detections by label; a server that sent objects but no
- * counts still gets a correct panel, because the counts are cheap to derive.
- */
-function countsOf(state: ShowcaseStatePayload): ShowcaseCount[] {
-  if (state.counts.length > 0) {
-    return state.counts;
-  }
-  const grouped = new Map<string, number>();
-  for (const object of state.objects) {
-    grouped.set(object.label, (grouped.get(object.label) ?? 0) + 1);
-  }
-  return [...grouped.entries()]
-    .map(([label, count]) => ({ label, count }))
-    .sort((a, b) => b.count - a.count || compareLabels(a.label, b.label));
+function createObjectNode(object: CalmObject): ObjectNode {
+  const row = el("li", "showcase-object");
+  row.dataset.key = object.key;
+  const head = el("div", "showcase-object-head");
+  const label = el("span", "showcase-object-label", object.label);
+  const score = el("span", "showcase-object-score", `${formatNumber(object.scorePercent, 0)}%`);
+  head.append(label, score);
+  const bar = el("div", "showcase-bar");
+  bar.setAttribute("aria-hidden", "true");
+  const fill = el("span", "showcase-bar-fill");
+  bar.append(fill);
+  row.append(head, bar);
+  return { row, label, score, fill };
 }
 
-function renderCounts(list: HTMLElement, counts: ShowcaseCount[]): void {
+function renderCounts(list: HTMLElement, counts: CalmView["counts"]): void {
   // The visible heading and the list's accessible name say the same thing.
   list.setAttribute("aria-label", SHOWCASE_LABELS.countsLabel);
   clear(list);
@@ -94,45 +180,13 @@ function renderCounts(list: HTMLElement, counts: ShowcaseCount[]): void {
     );
     list.append(row);
   }
-  appendOverflow(list, counts.length - MAX_COUNTS, "showcase-more");
-}
-
-function renderObjects(list: HTMLElement, objects: ShowcaseObject[]): void {
-  list.setAttribute("aria-label", SHOWCASE_LABELS.objectsLabel);
-  clear(list);
-  for (const object of objects.slice(0, MAX_OBJECTS)) {
-    const score = clamp01(object.score);
-    const row = el("li", "showcase-object");
-    row.style.setProperty("--score", String(score));
-
-    const head = el("div", "showcase-object-head");
-    head.append(
-      el("span", "showcase-object-label", object.label),
-      el("span", "showcase-object-score", `${formatNumber(score * 100, 0)}%`),
-    );
-
-    const bar = el("div", "showcase-bar");
-    bar.setAttribute("aria-hidden", "true");
-    bar.append(el("span", "showcase-bar-fill"));
-    row.append(head, bar);
-    list.append(row);
-  }
-  appendOverflow(list, objects.length - MAX_OBJECTS, "showcase-more");
+  appendOverflow(list, counts.length - MAX_COUNTS);
 }
 
 /** "... e altri 3": the entries that did not fit above keep a trace. */
-function appendOverflow(list: HTMLElement, hidden: number, className: string): void {
+function appendOverflow(list: HTMLElement, hidden: number): void {
   if (hidden <= 0) {
     return;
   }
-  list.append(el("li", className, `e altri ${formatNumber(hidden, 0)}`));
-}
-
-function clamp01(value: number): number {
-  return Math.min(1, Math.max(0, value));
-}
-
-/** Deterministic label order, so equal counts do not shuffle between frames. */
-function compareLabels(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0;
+  list.append(el("li", "showcase-more", `e altri ${formatNumber(hidden, 0)}`));
 }

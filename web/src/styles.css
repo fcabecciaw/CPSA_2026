@@ -426,3 +426,385 @@ body {
     animation: none;
   }
 }
+
+/* --- the holographic face and the voice (C1) ---------------------------- */
+
+.mute {
+  padding: 0.25em 0.7em;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: rgba(79, 214, 255, 0.06);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.78em;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+
+.mute[aria-pressed="true"] {
+  border-color: rgba(255, 208, 122, 0.5);
+  color: var(--warn);
+}
+
+.pane-showcase {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.hologram {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  align-items: center;
+  gap: clamp(8px, 1vw, 18px);
+  flex: 0 0 auto;
+  height: clamp(150px, 23vh, 250px);
+  padding: clamp(8px, 1vw, 16px) clamp(14px, 1.6vw, 26px) clamp(4px, 0.6vh, 8px);
+  border-bottom: 1px solid var(--hairline);
+  background:
+    radial-gradient(ellipse at 30% 45%, rgba(79, 214, 255, 0.12), transparent 62%),
+    linear-gradient(180deg, rgba(79, 214, 255, 0.04), transparent 70%);
+  overflow: hidden;
+}
+
+.hologram::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(79, 214, 255, 0.055) 0,
+    rgba(79, 214, 255, 0.055) 1px,
+    transparent 1px,
+    transparent 4px
+  );
+  mix-blend-mode: screen;
+}
+
+.hologram-face {
+  position: relative;
+  min-width: 0;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  transition: opacity 320ms ease;
+}
+
+.face-svg {
+  width: 100%;
+  height: 100%;
+  max-height: 100%;
+  overflow: visible;
+  color: var(--beam);
+  filter: drop-shadow(0 0 18px rgba(79, 214, 255, 0.28));
+  animation: holo-flicker 7s ease-in-out infinite;
+}
+
+.face-halo {
+  fill: rgba(79, 214, 255, 0.09);
+  opacity: 0.7;
+}
+
+.face-head {
+  fill: rgba(79, 214, 255, 0.055);
+  stroke: rgba(79, 214, 255, 0.65);
+  stroke-width: 1.6;
+}
+
+.face-head-line,
+.face-chin {
+  fill: none;
+  stroke: rgba(79, 214, 255, 0.25);
+  stroke-width: 1;
+}
+
+.face-antenna-stem {
+  stroke: rgba(79, 214, 255, 0.5);
+  stroke-width: 1.4;
+}
+
+.face-antenna-tip {
+  fill: var(--beam);
+}
+
+.face-ear {
+  fill: rgba(79, 214, 255, 0.12);
+  stroke: rgba(79, 214, 255, 0.4);
+}
+
+.face-eye {
+  fill: rgba(79, 214, 255, 0.18);
+  stroke: rgba(79, 214, 255, 0.85);
+  stroke-width: 1.5;
+  transition: ry 140ms ease, cy 140ms ease;
+}
+
+.face-pupil {
+  fill: #d8f7ff;
+}
+
+.face-brow {
+  stroke: rgba(79, 214, 255, 0.6);
+  stroke-width: 2;
+  stroke-linecap: round;
+  transition: transform 180ms ease;
+}
+
+.face-mouth {
+  fill: none;
+  stroke: rgba(79, 214, 255, 0.9);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  transition: d 180ms ease;
+  transform-origin: 130px 116px;
+}
+
+.face-speaking .face-mouth {
+  animation: face-talk 280ms steps(2, end) infinite;
+}
+
+.face-blinking .face-eye {
+  ry: 1.2;
+}
+
+.face-scanlines line {
+  stroke: rgba(79, 214, 255, 0.09);
+  stroke-width: 2.2;
+}
+
+.face-corners path {
+  fill: none;
+  stroke: rgba(79, 214, 255, 0.35);
+  stroke-width: 1.2;
+}
+
+.face-svg[data-expression="happy"] .face-halo,
+.face-svg[data-expression="happy"] .face-head {
+  stroke: rgba(116, 224, 168, 0.7);
+}
+
+.face-svg[data-expression="worried"] .face-head {
+  stroke: rgba(255, 143, 143, 0.75);
+}
+
+.face-svg[data-expression="sleepy"] {
+  opacity: 0.82;
+}
+
+@keyframes face-talk {
+  50% {
+    transform: scaleY(0.55);
+  }
+}
+
+@keyframes holo-flicker {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  47% {
+    opacity: 0.96;
+  }
+  48% {
+    opacity: 0.82;
+  }
+  49% {
+    opacity: 1;
+  }
+  73% {
+    opacity: 0.92;
+  }
+  74% {
+    opacity: 1;
+  }
+}
+
+.hologram-info {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: clamp(4px, 0.7vh, 10px);
+  min-width: 0;
+}
+
+.hologram-id {
+  margin: 0;
+  font-size: clamp(14px, 1.05vw, 20px);
+  font-weight: 500;
+  letter-spacing: 0.26em;
+  color: var(--beam);
+}
+
+.hologram-id span {
+  color: var(--dim);
+  font-weight: 400;
+  letter-spacing: 0.12em;
+}
+
+.voice-badge {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.72em;
+  color: var(--muted);
+}
+
+.voice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5em;
+}
+
+.voice-gate {
+  padding: 0.4em 0.9em;
+  border: 1px solid rgba(79, 214, 255, 0.55);
+  border-radius: 999px;
+  background: rgba(79, 214, 255, 0.1);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82em;
+  cursor: pointer;
+  box-shadow: 0 0 18px rgba(79, 214, 255, 0.12) inset;
+}
+
+.voice-gate:hover {
+  background: rgba(79, 214, 255, 0.18);
+}
+
+.bubble {
+  position: relative;
+  margin: 0 clamp(14px, 1.6vw, 26px) clamp(6px, 0.8vh, 10px);
+  padding: clamp(8px, 1vh, 12px) clamp(12px, 1.2vw, 18px);
+  min-height: 2.5em;
+  border: 1px solid rgba(79, 214, 255, 0.28);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(79, 214, 255, 0.08), rgba(4, 8, 15, 0.35));
+  color: #dff6ff;
+  font-size: clamp(0.95rem, 1.1vw, 1.25rem);
+  line-height: 1.35;
+  box-shadow: 0 0 26px rgba(79, 214, 255, 0.08);
+  transition: opacity 260ms ease;
+}
+
+.bubble::before {
+  content: "";
+  position: absolute;
+  top: -7px;
+  left: 22px;
+  width: 12px;
+  height: 12px;
+  border-top: 1px solid rgba(79, 214, 255, 0.28);
+  border-left: 1px solid rgba(79, 214, 255, 0.28);
+  background: #071019;
+  transform: rotate(45deg);
+}
+
+.bubble-empty {
+  opacity: 0;
+  visibility: hidden;
+}
+
+.pane-showcase .showcase {
+  position: static;
+  inset: auto;
+  flex: 1;
+  min-height: 0;
+  padding: clamp(4px, 0.6vh, 8px) clamp(16px, 1.8vw, 30px) clamp(6px, 1vh, 12px);
+}
+
+.pane-showcase .showcase-count {
+  font-size: clamp(1.3rem, 1.9vw, 2.3rem);
+}
+
+.pane-showcase .showcase-objects {
+  gap: clamp(6px, 0.9vh, 11px);
+}
+
+.pane-showcase .view-note {
+  position: static;
+  inset: auto;
+  flex: 1;
+  display: grid;
+  place-content: center;
+  min-height: 0;
+}
+
+.pane-showcase .view-meta {
+  position: static;
+  margin: 0;
+  padding-bottom: clamp(4px, 0.6vh, 8px);
+}
+
+.mente {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4em 1.2em;
+  margin: 0 clamp(14px, 1.6vw, 26px);
+  padding-top: clamp(4px, 0.6vh, 8px);
+  border-top: 1px solid var(--hairline);
+  font-family: var(--mono);
+  font-size: 0.68em;
+  color: var(--dim);
+}
+
+.mente-key {
+  color: rgba(79, 214, 255, 0.55);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.showcase-object {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 300ms ease, transform 300ms ease;
+}
+
+.showcase-object-entering {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+.showcase-object-leaving {
+  opacity: 0;
+}
+
+.showcase-bar-fill {
+  transition: width 300ms ease, background 300ms ease;
+}
+
+@media (max-width: 900px) {
+  .hologram {
+    grid-template-columns: minmax(0, 1fr);
+    height: clamp(120px, 20vh, 190px);
+  }
+
+  .hologram-info {
+    position: absolute;
+    right: clamp(10px, 2vw, 20px);
+    bottom: clamp(6px, 1vh, 12px);
+    align-items: flex-end;
+  }
+
+  .hologram-id {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .face-svg,
+  .face-speaking .face-mouth,
+  .showcase-object,
+  .showcase-bar-fill {
+    animation: none;
+    transition: none;
+  }
+}
+
+.voice-badge[data-status="no-voice"],
+.voice-badge[data-status="unsupported"] {
+  color: var(--warn);
+}

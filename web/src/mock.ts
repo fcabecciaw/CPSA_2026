@@ -10,12 +10,14 @@
  * production bundle.
  *
  * Query parameters, used for deterministic screenshots:
+ *   `at=<s>`     fast-forwards the scripted scenario by that many seconds;
  *   `objects=0`  leaves the showcase pane on its invitation (nothing in view);
  *   `video=0`    leaves the camera pane on its placeholder.
  */
 
 import type { SocketLike } from "./client";
 import {
+  type PoseStatePayload,
   type ServerMessage,
   type ShowcaseObject,
   type ShowcaseStatePayload,
@@ -28,12 +30,40 @@ const PARAMS = new URLSearchParams(window.location.search);
 const WIDTH = 640;
 const HEIGHT = 480;
 
+/**
+ * One clock for the scripted scenario, shared by the socket and the fake
+ * picture. `?at=<seconds>` fast-forwards it, for deterministic screenshots.
+ */
+const AT_SECONDS = Number(PARAMS.get("at") ?? "0");
+const STARTED_AT = Date.now() - (Number.isFinite(AT_SECONDS) ? AT_SECONDS : 0) * 1_000;
+
+export function scenarioSeconds(now = Date.now()): number {
+  return (now - STARTED_AT) / 1_000;
+}
+
 export const MOCK_BADGE = "Dati di esempio (mock): nessun server connesso.";
 
 /** F-S2: `showcase.state` is published at most at 10 Hz. */
 const SHOWCASE_TICK_MS = 100;
+/** F-E1: `pose.state` is published at most at 30 Hz. */
+const POSE_TICK_MS = 33;
 /** F-K1: `status` at 1 Hz. */
 const STATUS_TICK_MS = 1_000;
+
+/** Scripted scenario (seconds), used by the screenshots and the demo. */
+export const SCRIPT = {
+  personAt: 5,
+  phoneAt: 12,
+  cupAt: 19,
+  groupAt: 25,
+  leaveAt: 34,
+  returnAt: 68,
+  movenetAt: 76,
+  armsUpAt: 80,
+  waveAt: 84,
+  endAt: 92,
+  loopAt: 96,
+} as const;
 
 /** One object of the mock showcase scene: where it stands and how sure it is. */
 interface SceneObject {
@@ -41,21 +71,113 @@ interface SceneObject {
   classId: number;
   box: readonly [number, number, number, number];
   score: number;
+  /** The picture of this object, so boxes and pixels stay together. */
+  draw: (context: CanvasRenderingContext2D) => void;
+}
+
+function sceneObject(
+  label: string,
+  classId: number,
+  box: readonly [number, number, number, number],
+  score: number,
+  draw: (context: CanvasRenderingContext2D) => void,
+): SceneObject {
+  return { label, classId, box, score, draw };
+}
+
+const PERSON = sceneObject("persona", 0, [48, 30, 236, 424], 0.94, (context) => {
+  drawPerson(context, 140, 82, 34, "#6c7883");
+});
+const PERSON_2 = sceneObject("persona", 0, [252, 116, 372, 424], 0.88, (context) => {
+  drawPerson(context, 310, 166, 26, "#5f6a74");
+});
+const PERSON_3 = sceneObject("persona", 0, [408, 156, 516, 424], 0.9, (context) => {
+  drawPerson(context, 460, 200, 22, "#57626c");
+});
+const PHONE = sceneObject("cellulare", 67, [330, 384, 372, 418], 0.82, drawPhone);
+const CUP = sceneObject("tazza", 41, [428, 344, 502, 412], 0.78, drawCup);
+const BOTTLE = sceneObject("bottiglia", 39, [520, 256, 582, 404], 0.8, drawBottle);
+
+/**
+ * The scripted scenario: empty → one person → phone → cup → three people →
+ * leave → idle → return → MoveNet arms up and wave. The same timeline drives
+ * the detections, the fake picture and `pose.state`.
+ */
+export function scriptedObjects(seconds: number): SceneObject[] {
+  const t = ((seconds % SCRIPT.loopAt) + SCRIPT.loopAt) % SCRIPT.loopAt;
+  if (PARAMS.get("objects") === "0") {
+    return [];
+  }
+  if (t < SCRIPT.personAt || t >= SCRIPT.leaveAt) {
+    return t >= SCRIPT.returnAt && t < SCRIPT.movenetAt ? [PERSON] : [];
+  }
+  if (t >= SCRIPT.groupAt) {
+    return [PERSON, PERSON_2, PERSON_3, PHONE, CUP, BOTTLE];
+  }
+  const objects: SceneObject[] = [PERSON];
+  if (t >= SCRIPT.phoneAt) {
+    objects.push(PHONE);
+  }
+  if (t >= SCRIPT.cupAt) {
+    objects.push(CUP, BOTTLE);
+  }
+  return objects;
+}
+
+/** Is the mock streaming the MoveNet segment? */
+export function scriptedMovenet(seconds: number): boolean {
+  const t = ((seconds % SCRIPT.loopAt) + SCRIPT.loopAt) % SCRIPT.loopAt;
+  return t >= SCRIPT.movenetAt && t < SCRIPT.endAt;
 }
 
 /**
- * The mock scene: two people behind a table with a bottle, a cup, a book and a
- * phone. The same coordinates drive the fake RGB picture and the detection
- * boxes, so the boxes sit on the objects they name.
+ * Frames of the MoveNet segment: arms up for four seconds, then the wave.
+ * COCO-17 order, source pixels of the 640×480 picture.
  */
-const SHOWCASE_SCENE: readonly SceneObject[] = [
-  { label: "persona", classId: 0, box: [48, 30, 236, 424], score: 0.94 },
-  { label: "persona", classId: 0, box: [252, 116, 372, 424], score: 0.88 },
-  { label: "bottiglia", classId: 39, box: [520, 256, 582, 404], score: 0.82 },
-  { label: "tazza", classId: 41, box: [428, 344, 502, 412], score: 0.78 },
-  { label: "libro", classId: 73, box: [168, 376, 288, 418], score: 0.64 },
-  { label: "cellulare", classId: 67, box: [330, 384, 372, 418], score: 0.57 },
-];
+export function scriptedKeypoints(seconds: number): Array<[number, number, number]> {
+  const t = ((seconds % SCRIPT.loopAt) + SCRIPT.loopAt) % SCRIPT.loopAt;
+  const waving = t >= SCRIPT.waveAt;
+  const waveX = 424 + Math.sin((t - SCRIPT.waveAt) * 7) * 26;
+  const wristY = waving ? 44 : 58;
+  const points: Array<[number, number, number]> = [
+    [320, 82, 0.94], // nose
+    [308, 76, 0.92],
+    [332, 76, 0.92],
+    [292, 84, 0.85],
+    [348, 84, 0.85],
+    [278, 142, 0.93], // shoulders
+    [362, 142, 0.93],
+    [252, 108, 0.9], // elbows: up, above the shoulders
+    [388, 108, 0.9],
+    [238, wristY, 0.88], // wrists: up
+    [waving ? waveX : 402, wristY, 0.88],
+    [286, 292, 0.9], // hips
+    [354, 292, 0.9],
+    [290, 372, 0.86],
+    [350, 372, 0.86],
+    [292, 442, 0.82],
+    [348, 442, 0.82],
+  ];
+  return points.map(([x, y, score]) => [round(x, 1), round(y, 1), score]);
+}
+
+function poseState(seconds: number): PoseStatePayload {
+  const keypoints = scriptedKeypoints(seconds);
+  const score = keypoints.reduce((sum, point) => sum + point[2], 0) / keypoints.length;
+  const drift = Math.sin(Date.now() / 900);
+  return {
+    model: "movenet",
+    width: WIDTH,
+    height: HEIGHT,
+    fps: round(29.8 + drift * 0.3, 1),
+    dpu_ms: round(7.4 + drift * 0.3, 1),
+    total_ms: round(24.6 + drift * 0.9, 1),
+    score: round(score, 2),
+    keypoints,
+  };
+}
+
+
 
 let sequence = 0;
 let monotonic = 2000;
@@ -81,7 +203,7 @@ export function createMockSocket(_url: string): SocketLike {
   const intervals = new Set<ReturnType<typeof setInterval>>();
 
   let closed = false;
-  const startedAt = Date.now();
+  const startedAt = STARTED_AT;
 
   const socket: SocketLike = {
     onopen: null,
@@ -131,19 +253,20 @@ export function createMockSocket(_url: string): SocketLike {
 
   function status(): StatusPayload {
     const drift = Math.sin(Date.now() / 900);
+    const movenet = scriptedMovenet(scenarioSeconds());
     return {
       state: "running",
       camera: "ok",
-      model: "yolox_nano",
-      fps: round(59.6 + drift * 0.5, 1),
-      dpu_ms: round(4.1 + drift * 0.2, 1),
+      model: movenet ? "movenet" : "yolox_nano",
+      fps: round((movenet ? 29.8 : 59.6) + drift * 0.5, 1),
+      dpu_ms: round((movenet ? 7.4 : 4.1) + drift * 0.2, 1),
       errors: [],
       uptime_s: round(125.4 + (Date.now() - startedAt) / 1000, 1),
     };
   }
 
   function showcaseState(now: number): ShowcaseStatePayload {
-    const objects = showcaseObjects(now);
+    const objects = showcaseObjects(scenarioSeconds(), now);
     const grouped = new Map<string, number>();
     for (const object of objects) {
       grouped.set(object.label, (grouped.get(object.label) ?? 0) + 1);
@@ -197,30 +320,47 @@ export function createMockSocket(_url: string): SocketLike {
     socket.onopen?.();
     emit(message("hello", { server_version: "mock", protocol_version: 1 }));
     emit(message("status", status()));
-    every(SHOWCASE_TICK_MS, () => emit(message("showcase.state", showcaseState(Date.now()))));
+    // One clock: `pose.state` at 30 Hz during the MoveNet segment, otherwise
+    // `showcase.state` at 10 Hz, as the board does.
+    let lastShowcase = Number.NEGATIVE_INFINITY;
+    let lastPose = Number.NEGATIVE_INFINITY;
+    every(POSE_TICK_MS, () => {
+      const now = Date.now();
+      const seconds = scenarioSeconds();
+      if (scriptedMovenet(seconds)) {
+        if (now - lastPose >= POSE_TICK_MS) {
+          lastPose = now;
+          emit(message("pose.state", poseState(seconds)));
+        }
+        return;
+      }
+      if (now - lastShowcase >= SHOWCASE_TICK_MS) {
+        lastShowcase = now;
+        emit(message("showcase.state", showcaseState(now)));
+      }
+    });
     every(STATUS_TICK_MS, () => emit(message("status", status())));
   });
 
   return socket;
 }
 
-/** Detections of the mock scene, score-descending as the server sends them. */
-function showcaseObjects(now: number): ShowcaseObject[] {
-  if (PARAMS.get("objects") === "0") {
-    return [];
-  }
-  return SHOWCASE_SCENE.map((scene, index) => {
-    const sway = Math.sin(now / 1_100 + index * 0.9) * 1.5;
-    const breath = Math.sin(now / 830 + index * 1.7) * 0.02;
-    const [x1, y1, x2, y2] = scene.box;
-    const score = Math.min(0.99, Math.max(0.35, scene.score + breath));
-    return {
-      label: scene.label,
-      class_id: scene.classId,
-      score: round(score, 2),
-      box: [x1 + sway, y1, x2 + sway, y2] as [number, number, number, number],
-    };
-  }).sort((a, b) => b.score - a.score);
+/** Detections of the scripted scene, score-descending as the server sends them. */
+function showcaseObjects(seconds: number, now: number): ShowcaseObject[] {
+  return scriptedObjects(seconds)
+    .map((scene, index) => {
+      const sway = Math.sin(now / 1_100 + index * 0.9) * 1.5;
+      const breath = Math.sin(now / 830 + index * 1.7) * 0.02;
+      const [x1, y1, x2, y2] = scene.box;
+      const score = Math.min(0.99, Math.max(0.35, scene.score + breath));
+      return {
+        label: scene.label,
+        class_id: scene.classId,
+        score: round(score, 2),
+        box: [x1 + sway, y1, x2 + sway, y2] as [number, number, number, number],
+      };
+    })
+    .sort((a, b) => b.score - a.score);
 }
 
 function round(value: number, digits: number): number {
@@ -253,7 +393,7 @@ export function createMockVideo(image: HTMLImageElement, note: HTMLElement): Vid
     if (context === null) {
       return;
     }
-    drawShowcaseFrame(context, Date.now());
+    drawShowcaseFrame(context, scenarioSeconds());
     image.hidden = false;
     note.hidden = true;
     image.src = canvas.toDataURL("image/jpeg", 0.72);
@@ -283,7 +423,7 @@ export function createMockVideo(image: HTMLImageElement, note: HTMLElement): Vid
  * The RGB room of the showcase mock: the scene the detections name, with the
  * same boxes and Italian labels the board draws on the stream.
  */
-function drawShowcaseFrame(context: CanvasRenderingContext2D, now: number): void {
+function drawShowcaseFrame(context: CanvasRenderingContext2D, seconds: number): void {
   const background = context.createLinearGradient(0, 0, 0, HEIGHT);
   background.addColorStop(0, "#242b31");
   background.addColorStop(0.62, "#171c20");
@@ -291,10 +431,29 @@ function drawShowcaseFrame(context: CanvasRenderingContext2D, now: number): void
   context.fillStyle = background;
   context.fillRect(0, 0, WIDTH, HEIGHT);
 
-  // Two people standing behind the table, face on.
-  drawPerson(context, 140, 82, 34, "#6c7883");
-  drawPerson(context, 310, 166, 26, "#5f6a74");
+  if (scriptedMovenet(seconds)) {
+    drawTable(context);
+    drawPoseFigure(context, scriptedKeypoints(seconds));
+    return;
+  }
 
+  const objects = scriptedObjects(seconds);
+  for (const object of objects) {
+    if (object.label === "persona") {
+      object.draw(context);
+    }
+  }
+
+  drawTable(context);
+  for (const object of objects) {
+    if (object.label !== "persona") {
+      object.draw(context);
+    }
+  }
+  drawShowcaseOverlay(context, showcaseObjects(seconds, Date.now()));
+}
+
+function drawTable(context: CanvasRenderingContext2D): void {
   // The table: a lit top surface and a darker front face.
   context.fillStyle = "#35312c";
   context.fillRect(0, 352, WIDTH, 68);
@@ -302,12 +461,55 @@ function drawShowcaseFrame(context: CanvasRenderingContext2D, now: number): void
   context.fillRect(0, 420, WIDTH, 60);
   context.fillStyle = "rgba(255, 255, 255, 0.07)";
   context.fillRect(0, 352, WIDTH, 2);
+}
 
-  drawBottle(context);
-  drawCup(context);
-  drawBook(context);
-  drawPhone(context);
-  drawShowcaseOverlay(context, showcaseObjects(now));
+/** The MoveNet segment: the skeleton the board would draw over the person. */
+function drawPoseFigure(
+  context: CanvasRenderingContext2D,
+  keypoints: ReadonlyArray<readonly [number, number, number]>,
+): void {
+  const edges: ReadonlyArray<readonly [number, number]> = [
+    [5, 7],
+    [7, 9],
+    [6, 8],
+    [8, 10],
+    [5, 6],
+    [5, 11],
+    [6, 12],
+    [11, 12],
+    [11, 13],
+    [13, 15],
+    [12, 14],
+    [14, 16],
+    [0, 5],
+    [0, 6],
+  ];
+  context.lineWidth = 5;
+  context.lineCap = "round";
+  context.strokeStyle = "rgba(79, 214, 255, 0.85)";
+  for (const [a, b] of edges) {
+    const from = keypoints[a];
+    const to = keypoints[b];
+    if (from === undefined || to === undefined || from[2] < 0.3 || to[2] < 0.3) {
+      continue;
+    }
+    context.beginPath();
+    context.moveTo(from[0], from[1]);
+    context.lineTo(to[0], to[1]);
+    context.stroke();
+  }
+  context.fillStyle = "#dff6ff";
+  for (const [x, y, score] of keypoints) {
+    if (score < 0.3) {
+      continue;
+    }
+    context.beginPath();
+    context.arc(x, y, 4.5, 0, Math.PI * 2);
+    context.fill();
+  }
+  context.font = "600 15px 'Ubuntu Mono', ui-monospace, 'DejaVu Sans Mono', monospace";
+  context.fillStyle = "rgba(79, 214, 255, 0.9)";
+  context.fillText("movenet · postura", 20, 34);
 }
 
 function drawPerson(
@@ -354,16 +556,6 @@ function drawCup(context: CanvasRenderingContext2D): void {
   context.stroke();
   context.fillStyle = "#e6ebee";
   context.fillRect(434, 348, 56, 6);
-}
-
-function drawBook(context: CanvasRenderingContext2D): void {
-  // Box [168, 376, 288, 418]: a closed book lying flat.
-  context.fillStyle = "#8a5f4a";
-  context.fillRect(172, 380, 112, 34);
-  context.fillStyle = "rgba(255, 255, 255, 0.18)";
-  context.fillRect(176, 384, 104, 3);
-  context.fillStyle = "#e8e1d6";
-  context.fillRect(276, 382, 8, 30);
 }
 
 function drawPhone(context: CanvasRenderingContext2D): void {
