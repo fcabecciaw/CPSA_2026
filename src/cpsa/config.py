@@ -13,7 +13,8 @@ camera:  { device: auto, match: RealSense, width: 640, height: 480, fps: 60,
            backlight_compensation: 0, saturation: 110, power_line_hz: 50 }
 tracker: { enabled: true, iou_match: 0.3, alpha: 0.35, fast_alpha: 0.8,
            deadband_iou: 0.9, min_hits: 2, max_misses: 6 }
-model:   { path: models/yolox_nano.xmodel, conf_thr: 0.35, iou_thr: 0.45 }
+model:   { path: models/yolox_nano.xmodel, conf_thr: 0.35,
+           class_conf: {person: 0.40}, object_conf: 0.25, iou_thr: 0.45 }
 movenet: { path: models/movenet.xmodel, enabled: true, publish_hz: 30,
            smoothing: { enabled: true, min_cutoff: 1.0, beta: 0.02,
                         d_cutoff: 1.0, deadband_px: 1.5, show_score: 0.35,
@@ -29,7 +30,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -177,11 +178,22 @@ class ModelConfig:
     ``path`` is the compiled ``.xmodel`` the DPU loads (relative paths resolve
     against the process working directory, which the unit sets to the repository
     root); :attr:`name` is what ``status.model`` and ``showcase.state`` report.
+
+    ``conf_thr`` is the class-independent minimum ``objectness * class`` score
+    and stays the default. ``object_conf`` is the threshold of every object
+    class, and ``class_conf`` overrides single classes by their canonical
+    COCO-80 English name (``{"person": 0.40}``); both are optional, so a config
+    without them keeps ``conf_thr`` for every class. The precedence is
+    ``class_conf``, then ``object_conf``, then ``conf_thr``. The names are
+    checked against the COCO-80 table when the detector is built
+    (:func:`cpsa.yolox.class_thresholds`), so a typo cannot reach the board.
     """
 
     path: Path
     conf_thr: float
     iou_thr: float
+    class_conf: Mapping[str, float] = field(default_factory=dict)
+    object_conf: float | None = None
 
     @property
     def name(self) -> str:
@@ -318,6 +330,8 @@ def _model_config(model: _Section) -> ModelConfig:
         path=Path(model.text("path")).expanduser(),
         conf_thr=model.fraction("conf_thr"),
         iou_thr=model.fraction("iou_thr"),
+        class_conf=model.fraction_map("class_conf"),
+        object_conf=model.optional_fraction("object_conf"),
     )
     model.reject_unknown()
     return config
@@ -427,6 +441,32 @@ class _Section:
         if not math.isfinite(number) or not 0.0 <= number <= 1.0:
             raise ConfigError(self._key(name), "expected a number between 0 and 1")
         return number
+
+    def optional_fraction(self, name: str) -> float | None:
+        """Return the fraction at ``name``, or ``None`` when the key is absent."""
+        if name not in self._data:
+            return None
+        return self.fraction(name)
+
+    def fraction_map(self, name: str) -> dict[str, float]:
+        """Return a ``class name -> fraction`` mapping, empty when the key is absent."""
+        if name not in self._data:
+            return {}
+        value = self._get(name)
+        if not isinstance(value, Mapping):
+            raise ConfigError(self._key(name), "expected a mapping of class names to fractions")
+        fractions: dict[str, float] = {}
+        for class_name, raw_threshold in value.items():
+            key = f"{self._key(name)}.{class_name}"
+            if not isinstance(class_name, str) or not class_name.strip():
+                raise ConfigError(key, "expected a non-empty COCO class name")
+            if isinstance(raw_threshold, bool) or not isinstance(raw_threshold, (int, float)):
+                raise ConfigError(key, "expected a number between 0 and 1")
+            number = float(raw_threshold)
+            if not math.isfinite(number) or not 0.0 <= number <= 1.0:
+                raise ConfigError(key, "expected a number between 0 and 1")
+            fractions[class_name] = number
+        return fractions
 
     def integer(self, name: str, minimum: int, maximum: int) -> int:
         value = self._get(name)

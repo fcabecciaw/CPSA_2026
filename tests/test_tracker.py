@@ -166,6 +166,36 @@ def test_tracks_only_match_the_same_class() -> None:
     assert tracker.tracks == 2
 
 
+def test_a_bottle_held_inside_a_person_box_keeps_its_track() -> None:
+    """The bottle overlaps the person, so only the class may separate the tracks."""
+    tracker = Tracker(tracker_config())
+    person = detection(100, 100, 340, 440, score=0.9, class_id=0)
+    bottle = detection(170, 260, 230, 400, score=0.4, class_id=39)
+
+    tracker.update([person, bottle])
+    output = tracker.update([person, bottle])
+
+    assert tracker.tracks == 2
+    assert sorted(item.class_id for item in output) == [0, 39]
+    boxes = {item.class_id: item.box for item in output}
+    assert boxes[0] == pytest.approx(person.box)
+    assert boxes[39] == pytest.approx(bottle.box)
+
+
+def test_a_bottle_never_takes_over_the_person_track() -> None:
+    tracker = Tracker(tracker_config())
+    person = detection(100, 100, 340, 440, score=0.9, class_id=0)
+    tracker.update([person])
+    tracker.update([person])
+
+    # The person leaves, a bottle appears in the same box: the person's track
+    # must survive its misses, not be relabelled as the bottle.
+    output = tracker.update([detection(100, 100, 340, 440, score=0.8, class_id=39)])
+
+    assert tracker.tracks == 2
+    assert sorted(item.class_id for item in output) == [0, 39]
+
+
 def test_a_disabled_tracker_returns_the_raw_boxes() -> None:
     tracker = Tracker(tracker_config(enabled=False))
     detections = [detection(1, 2, 3, 4, score=0.7)]

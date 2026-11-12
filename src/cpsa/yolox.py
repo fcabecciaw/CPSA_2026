@@ -15,13 +15,20 @@ decoder runs with ``logits=True``.
 the DPU) and ``wait`` (block, decode, map to source pixels), which is what lets
 the pipeline overlap the DPU with the CPU: two buffer sets are in flight at
 most, so frame N is on the DPU while frame N-1 is decoded and drawn.
+
+The decode is multi-label: a grid cell is not one class, it yields one candidate
+per class whose ``objectness * class`` score passes that class's threshold
+(at most :data:`MAX_CLASSES_PER_CELL` per cell), then the class-aware NMS
+removes the duplicates. A bottle held in front of a person therefore stays
+detectable in the person's own cells instead of losing them to the ``person``
+class, and :func:`decode_yolox` accepts the per-class thresholds the showcase
+resolves from ``model.class_conf`` and ``model.object_conf``.
 """
 
 from __future__ import annotations
 
-import math
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -41,6 +48,7 @@ __all__ = [
     "COCO80_EN",
     "COCO80_IT",
     "Detection",
+    "MAX_CLASSES_PER_CELL",
     "MAX_DETECTIONS",
     "QuantizedYoloxDecoder",
     "YOLOX_INPUT_SCALE",
@@ -49,6 +57,7 @@ __all__ = [
     "YOLOX_STRIDES",
     "YoloxDetector",
     "boxes_to_source",
+    "class_thresholds",
     "decode_yolox",
     "detections_from_heads",
     "label_for",
@@ -72,6 +81,13 @@ YOLOX_INPUT_SCALE = 1.0
 #: Boxes kept after non-maximum suppression, as in the zoo post-processing.
 MAX_DETECTIONS = 100
 
+#: Candidates one grid cell may yield: a bottle in front of a person shares the
+#: person's cells, and one class per cell would let ``person`` swallow the bottle.
+MAX_CLASSES_PER_CELL = 3
+
+_NMS_MATRIX_CANDIDATES = 512
+"""Candidate count up to which the NMS computes its overlaps as one matrix."""
+
 _MIN_CHANNELS = 6
 
 #: Channel layout of a head cell: ``[tx, ty, tw, th, objectness, classes...]``.
@@ -86,7 +102,7 @@ class Detection:
 
     Attributes:
         box: ``(x1, y1, x2, y2)`` in source pixels, clipped to the image.
-        score: Objectness times the best class probability, in ``0..1``.
+        score: Objectness times the probability of the class it was decoded as.
         class_id: COCO-80 index, where ``0`` is ``person``.
     """
 
@@ -116,6 +132,54 @@ def label_for(class_id: int, labels: Sequence[str]) -> str:
     return f"class {class_id}"
 
 
+def class_thresholds(
+    conf_thr: float,
+    *,
+    class_conf: Mapping[str, float] | None = None,
+    object_conf: float | None = None,
+    labels: Sequence[str] | None = None,
+) -> dict[int, float]:
+    """Resolve the configuration's class thresholds into COCO-80 class ids.
+
+    ``class_conf`` names classes by their canonical COCO-80 English name
+    (``{"person": 0.40}``); every class it omits takes ``object_conf``, and
+    ``conf_thr`` is the fallback of both. The showcase keeps ``person`` strict
+    and the objects held in front of it loose, which is what lets a bottle
+    inside the person's cells survive the decode.
+
+    Args:
+        conf_thr: Class-independent default threshold.
+        class_conf: Thresholds by COCO-80 English name.
+        object_conf: Threshold of every class ``class_conf`` does not name;
+            ``None`` keeps ``conf_thr``.
+        labels: Label table that maps a name to its class id; defaults to the
+            English COCO names.
+
+    Returns:
+        ``{class_id: threshold}`` of every class of ``labels``.
+
+    Raises:
+        ValueError: If a name is not in ``labels`` or a threshold is outside
+            ``[0, 1]``.
+    """
+
+    if not 0.0 <= conf_thr <= 1.0:
+        raise ValueError(f"conf_thr must be in [0, 1], got {conf_thr}")
+    default = conf_thr if object_conf is None else float(object_conf)
+    if not 0.0 <= default <= 1.0:
+        raise ValueError(f"object_conf must be in [0, 1], got {default}")
+    table = COCO80_EN if labels is None else labels
+    thresholds = {class_id: default for class_id in range(len(table))}
+    for name, raw_threshold in (class_conf or {}).items():
+        if name not in table:
+            raise ValueError(f"unknown COCO class {name!r} in class_conf")
+        threshold = float(raw_threshold)
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError(f"class_conf[{name!r}] must be in [0, 1], got {threshold}")
+        thresholds[table.index(name)] = threshold
+    return thresholds
+
+
 # --------------------------------------------------------------------------- #
 # Head decode
 # --------------------------------------------------------------------------- #
@@ -143,25 +207,63 @@ def _iou(box: NDArray[np.float64], boxes: NDArray[np.float64]) -> NDArray[np.flo
         return np.where(union > 0.0, intersection / union, 0.0)
 
 
+def _pairwise_iou(boxes: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Intersection over union of every ``xyxy`` box against every box."""
+
+    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+    width = np.clip(
+        np.minimum(x2[:, None], x2[None, :]) - np.maximum(x1[:, None], x1[None, :]), 0.0, None
+    )
+    height = np.clip(
+        np.minimum(y2[:, None], y2[None, :]) - np.maximum(y1[:, None], y1[None, :]), 0.0, None
+    )
+    intersection = width * height
+    area = np.clip(x2 - x1, 0.0, None) * np.clip(y2 - y1, 0.0, None)
+    union = area[:, None] + area[None, :] - intersection
+    overlap = np.zeros(intersection.shape, dtype=np.float64)
+    np.divide(intersection, union, out=overlap, where=union > 0.0)
+    return overlap
+
+
 def _class_aware_nms(
     boxes: NDArray[np.float64],
     scores: NDArray[np.float64],
     class_ids: NDArray[np.intp],
     iou_thr: float,
 ) -> NDArray[np.intp]:
-    """Greedy per-class suppression: overlapping boxes of different classes both survive."""
+    """Greedy per-class suppression: overlapping boxes of different classes both survive.
+
+    A frame's candidate count is small (a few dozen, at most three per cell), so
+    the overlaps are computed once as a matrix and the greedy pass only flips
+    booleans; beyond :data:`_NMS_MATRIX_CANDIDATES` the matrix would cost more
+    memory than the frame allows and the per-row scan is used instead.
+    """
 
     order = np.argsort(-scores, kind="stable").astype(np.intp)
+    if order.size <= 1:
+        return order
     keep: list[int] = []
-    while order.size:
-        best = int(order[0])
+    if order.size <= _NMS_MATRIX_CANDIDATES:
+        overlap = _pairwise_iou(boxes)
+        remaining = np.ones(order.size, dtype=np.bool_)
+        for best in order:
+            if not remaining[best]:
+                continue
+            keep.append(int(best))
+            remaining[best] = False
+            remaining[(overlap[best] > iou_thr) & (class_ids == class_ids[best])] = False
+        return np.asarray(keep, dtype=np.intp)
+
+    rest = order
+    while rest.size:
+        best = int(rest[0])
         keep.append(best)
-        rest = order[1:]
+        rest = rest[1:]
         if rest.size == 0:
             break
-        overlap = _iou(boxes[best], boxes[rest])
         same_class = class_ids[rest] == class_ids[best]
-        order = rest[~(same_class & (overlap > iou_thr))]
+        overlap = _iou(boxes[best], boxes[rest])
+        rest = rest[~(same_class & (overlap > iou_thr))]
     return np.asarray(keep, dtype=np.intp)
 
 
@@ -194,25 +296,95 @@ def _finalize(
     return candidates[keep], candidate_scores[keep], candidate_classes[keep]
 
 
+def _class_thresholds(
+    conf_thr: float,
+    class_thr: Mapping[int, float] | None,
+    classes: int,
+) -> NDArray[np.float64]:
+    """Return the ``objectness * class`` threshold of every class of one head.
+
+    ``conf_thr`` is the class-independent default; ``class_thr`` overrides single
+    COCO classes, which is how the showcase gives ``person`` a stricter threshold
+    than the objects in front of it.
+    """
+
+    thresholds = np.full(classes, conf_thr, dtype=np.float64)
+    if not class_thr:
+        return thresholds
+    for raw_class_id, raw_threshold in class_thr.items():
+        class_id = int(raw_class_id)
+        if not 0 <= class_id < classes:
+            raise ValueError(
+                f"class threshold for class {class_id}, but the head has {classes} classes"
+            )
+        threshold = float(raw_threshold)
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError(
+                f"class threshold for class {class_id} must be in [0, 1], got {threshold}"
+            )
+        thresholds[class_id] = threshold
+    return thresholds
+
+
+def _cell_candidates(
+    scores: NDArray[np.float64],
+    thresholds: NDArray[np.float64],
+    usable: NDArray[np.bool_],
+) -> tuple[NDArray[np.intp], NDArray[np.intp], NDArray[np.float64]]:
+    """Select the ``(cell, class)`` candidates of one head's score matrix.
+
+    ``scores`` is ``(cells, classes)`` objectness times class probability,
+    ``thresholds`` the per-class minimum and ``usable`` the cells whose box is
+    valid. A cell yields one candidate per class above its own threshold, capped
+    to the :data:`MAX_CLASSES_PER_CELL` best classes, so a bottle that overlaps a
+    person is never lost to the winning ``person`` class. Candidates come back in
+    cell order, best class first within a cell, which the flat reference path and
+    the int8 path share so their output order is identical.
+    """
+
+    qualified = (scores > thresholds) & usable[:, None]
+    counts = qualified.sum(axis=1)
+    rows = np.flatnonzero(counts)
+    if rows.size == 0:
+        return (
+            np.zeros(0, dtype=np.intp),
+            np.zeros(0, dtype=np.intp),
+            np.zeros(0, dtype=np.float64),
+        )
+    cell_qualified = qualified[rows]
+    if np.max(counts[rows]) <= 1:
+        # Most cells of a real frame hold a single class above its threshold.
+        cell_index, class_ids = np.nonzero(cell_qualified)
+        cells = rows[cell_index]
+        return cells, class_ids, scores[cells, class_ids]
+    cell_scores = np.where(cell_qualified, scores[rows], -np.inf)
+    # Stable sort: equal scores keep the lower class id, on both paths.
+    class_ids = np.argsort(-cell_scores, axis=1, kind="stable")[:, :MAX_CLASSES_PER_CELL]
+    row_index = np.arange(rows.size, dtype=np.intp)[:, None]
+    kept = cell_qualified[row_index, class_ids].ravel()
+    return (
+        np.repeat(rows, kept.reshape(rows.size, -1).sum(axis=1)),
+        class_ids.ravel()[kept],
+        cell_scores[row_index, class_ids].ravel()[kept],
+    )
+
+
 def _decode_head(
     head: NDArray[np.float64],
     stride: int,
     *,
     logits: bool,
-    conf_thr: float,
+    thresholds: NDArray[np.float64],
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.intp]]:
     """Decode one stride's ``(H, W, 85)`` head into candidate ``xyxy`` boxes."""
 
-    regression = head[..., :4]
+    regression = head[..., :_BOX_CHANNELS]
     objectness = head[..., _OBJECTNESS]
     class_scores = head[..., _CLASS_START:]
     if logits:
         objectness = _sigmoid(objectness)
         class_scores = _sigmoid(class_scores)
-
-    class_ids = np.argmax(class_scores, axis=-1)
-    best = np.take_along_axis(class_scores, class_ids[..., None], axis=-1)[..., 0]
-    scores = objectness * best
+    scores = objectness[..., None] * class_scores
 
     height, width = head.shape[:2]
     grid_x, grid_y = np.meshgrid(
@@ -235,18 +407,14 @@ def _decode_head(
     )
 
     usable = (
-        np.isfinite(scores)
-        & np.isfinite(boxes).all(axis=-1)
-        & (scores > conf_thr)
+        np.isfinite(boxes).all(axis=-1)
         & (boxes[..., 2] > boxes[..., 0])
         & (boxes[..., 3] > boxes[..., 1])
     )
-    selected = np.flatnonzero(usable).astype(np.intp)
-    return (
-        boxes.reshape(-1, 4)[selected],
-        scores.reshape(-1)[selected],
-        class_ids.reshape(-1)[selected].astype(np.intp),
+    cells, class_ids, kept_scores = _cell_candidates(
+        scores.reshape(height * width, -1), thresholds, usable.reshape(-1)
     )
+    return boxes.reshape(-1, _BOX_CHANNELS)[cells], kept_scores, class_ids
 
 
 def decode_yolox(
@@ -256,17 +424,25 @@ def decode_yolox(
     conf_thr: float,
     iou_thr: float,
     logits: bool,
+    class_thr: Mapping[int, float] | None = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.intp]]:
     """Decode YOLOX heads into boxes in model-input pixels.
+
+    A grid cell is decoded in multi-label mode: every class whose
+    ``objectness * class`` score passes its own threshold yields a candidate (at
+    most :data:`MAX_CLASSES_PER_CELL` per cell), so a bottle seen inside a
+    person's cells survives alongside the person it overlaps.
 
     Args:
         heads: One ``(H_i, W_i, 5 + n_classes)`` tensor per stride, in
             ``strides`` order.
         strides: Network stride of each head (smallest first, e.g. 8, 16, 32).
-        conf_thr: Minimum ``objectness * class`` score in ``[0, 1]``.
+        conf_thr: Default minimum ``objectness * class`` score in ``[0, 1]``.
         iou_thr: NMS IoU threshold in ``[0, 1]``; suppression is class aware.
         logits: ``True`` when the head channels hold raw logits (the zoo
             graphs), ``False`` when they were already activated.
+        class_thr: Minimum ``objectness * class`` score of single COCO classes,
+            overriding ``conf_thr``; the classes it omits keep ``conf_thr``.
 
     Returns:
         ``(boxes, scores, class_ids)`` where ``boxes`` is ``(N, 4)`` ``xyxy`` in
@@ -276,7 +452,8 @@ def decode_yolox(
     Raises:
         ValueError: If the head/stride counts differ, a head is not
             ``(H, W, C >= 6)``, the channel counts differ, a stride is not
-            positive, or a threshold is outside ``[0, 1]``.
+            positive, a threshold is outside ``[0, 1]``, or ``class_thr`` names
+            a class the heads do not have.
     """
 
     if not 0.0 <= conf_thr <= 1.0:
@@ -306,7 +483,8 @@ def decode_yolox(
             raise ValueError(f"head {index} has {array.shape[2]} channels, expected {channels}")
         if stride <= 0:
             raise ValueError(f"stride {index} must be positive, got {stride}")
-        decoded = _decode_head(array, int(stride), logits=logits, conf_thr=conf_thr)
+        thresholds = _class_thresholds(conf_thr, class_thr, array.shape[2] - _CLASS_START)
+        decoded = _decode_head(array, int(stride), logits=logits, thresholds=thresholds)
         boxes.append(decoded[0])
         scores.append(decoded[1])
         classes.append(decoded[2])
@@ -314,26 +492,27 @@ def decode_yolox(
     return _finalize(boxes, scores, classes, iou_thr)
 
 
-def _class_threshold_int(conf_thr: float, fix_point: int) -> int:
-    """Return the smallest int8 logit that the threshold-first decoder must decode.
+def _threshold_ints(thresholds: NDArray[np.float64], fix_point: int) -> NDArray[np.int8]:
+    """Return the smallest int8 logit each threshold can accept, one per class.
 
     With ``q`` the raw logit, the reference path scores a candidate with
-    ``sigmoid(q * 2 ** -fix_point)`` and keeps ``score > conf_thr``. Since
-    sigmoid is monotonic that is ``q > logit(conf_thr) * 2 ** fix_point``, whose
-    integer equivalent is ``floor(threshold) + 1``. One less is returned, so
-    float rounding at a quantization step can never drop a candidate that the
-    reference path keeps; the exact float comparison removes the extra one.
+    ``sigmoid(q * 2 ** -fix_point)`` and keeps ``score > threshold``. Since
+    sigmoid is monotonic, that implies ``q > logit(threshold) * 2 ** fix_point``,
+    whose integer equivalent is ``floor(threshold) + 1``. One less is returned,
+    clipped to the int8 range, so float rounding at a quantization step can never
+    drop a candidate that the reference path keeps; the exact float comparison
+    removes the extra one and a threshold of ``1.0`` keeps nothing.
     """
 
-    if conf_thr <= 0.0:
-        return -128
-    if conf_thr >= 1.0:
-        return 128
-    logit = math.log(conf_thr) - math.log1p(-conf_thr)
-    scaled = logit * 2.0**fix_point
-    if not math.isfinite(scaled):
-        return 128 if scaled > 0.0 else -128
-    return max(-128, min(128, math.floor(scaled) - 1))
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        logits = np.log(thresholds) - np.log1p(-thresholds)
+        scaled = logits * 2.0**fix_point
+        gates = np.where(
+            np.isfinite(scaled),
+            np.floor(scaled) - 1.0,
+            np.where(scaled > 0.0, 128.0, -128.0),
+        )
+    return np.clip(gates, -128.0, 127.0).astype(np.int8)
 
 
 @dataclass(frozen=True)
@@ -349,7 +528,6 @@ class _HeadLayout:
     grid_x: NDArray[np.float64]
     grid_y: NDArray[np.float64]
     keep: NDArray[np.bool_]
-    class_max: NDArray[np.int8]
 
 
 class QuantizedYoloxDecoder:
@@ -357,12 +535,15 @@ class QuantizedYoloxDecoder:
 
     Behaviourally identical to dequantizing each head and calling
     :func:`decode_yolox` with ``logits=True``, but the objectness and class
-    logits are thresholded in the int8 domain first. ``score > conf_thr`` with
-    ``score = sigmoid(objectness) * sigmoid(best_class)`` implies that *both*
-    logits already exceed ``logit(conf_thr)``, so a cell whose int8 objectness
-    or best class logit is below that integer threshold can never qualify; those
-    cells are dropped with one vectorised scan of the raw buffers. Sigmoid, grid
-    decode, box decode and dequantization then run only on the survivors.
+    logits are thresholded in the int8 domain first. ``score > threshold`` with
+    ``score = sigmoid(objectness) * sigmoid(class)`` implies that both logits
+    already exceed their integer gate, so a cell whose int8 objectness is below
+    the loosest class gate, or whose class logits are all below their own gates,
+    can never qualify; those cells are dropped with two vectorised scans of the
+    raw buffers. Sigmoid, grid decode, box decode and dequantization then run
+    only on the survivors, which are decoded in multi-label mode like the float
+    reference (one candidate per class above its threshold, at most
+    :data:`MAX_CLASSES_PER_CELL` per cell).
 
     Grids and scratch buffers are precomputed in the constructor; the scratch
     buffers make one instance non-reentrant, so call :meth:`decode` from one
@@ -423,7 +604,6 @@ class QuantizedYoloxDecoder:
                     grid_x=np.tile(np.arange(width, dtype=np.float64), height),
                     grid_y=np.repeat(np.arange(height, dtype=np.float64), width),
                     keep=np.empty(cells, dtype=np.bool_),
-                    class_max=np.empty(cells, dtype=np.int8),
                 )
             )
 
@@ -431,30 +611,57 @@ class QuantizedYoloxDecoder:
         self._order = tuple(
             sorted(range(len(layouts)), key=lambda position: layouts[position].stride)
         )
+        # Per-class thresholds and their int8 gates are a property of the
+        # configuration, not of the frame: build them once, not 50 times a second.
+        self._threshold_cache: dict[
+            tuple[float, tuple[tuple[int, float], ...], int, int],
+            tuple[NDArray[np.float64], NDArray[np.int8]],
+        ] = {}
         self.last_candidate_count = 0
+
+    def _thresholds(
+        self,
+        layout: _HeadLayout,
+        conf_thr: float,
+        class_thr: Mapping[int, float] | None,
+    ) -> tuple[NDArray[np.float64], NDArray[np.int8]]:
+        """Return the float thresholds of a head and their int8 gates, cached."""
+        overrides = tuple(sorted(class_thr.items())) if class_thr else ()
+        key = (conf_thr, overrides, layout.channels, layout.fix_point)
+        cached = self._threshold_cache.get(key)
+        if cached is None:
+            thresholds = _class_thresholds(conf_thr, class_thr, layout.channels - _CLASS_START)
+            cached = (thresholds, _threshold_ints(thresholds, layout.fix_point))
+            self._threshold_cache[key] = cached
+        return cached
 
     def decode(
         self,
         outputs: Sequence[NDArray[np.int8]],
         conf_thr: float,
         iou_thr: float,
+        class_thr: Mapping[int, float] | None = None,
     ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.intp]]:
         """Decode raw int8 heads, thresholding the logits before activation.
 
         Args:
             outputs: Per-output int8 ``(H, W, C)`` (or ``(1, H, W, C)``) tensors
                 in constructor order.
-            conf_thr: Minimum ``objectness * class`` score; keep scores strictly
-                above it.
+            conf_thr: Default minimum ``objectness * class`` score; keep scores
+                strictly above it.
             iou_thr: IoU threshold of the class-aware NMS.
+            class_thr: Minimum ``objectness * class`` score of single COCO
+                classes, overriding ``conf_thr``; the classes it omits keep
+                ``conf_thr``.
 
         Returns:
             ``(boxes, scores, class_ids)`` exactly as :func:`decode_yolox` would
             return them for the dequantized heads.
 
         Raises:
-            ValueError: If a threshold is outside ``[0, 1]``, an output is not
-                int8, or its shape does not match the constructor's.
+            ValueError: If a threshold is outside ``[0, 1]``, ``class_thr``
+                names a class the heads do not have, an output is not int8, or
+                its shape does not match the constructor's.
         """
 
         if not 0.0 <= conf_thr <= 1.0:
@@ -487,30 +694,23 @@ class QuantizedYoloxDecoder:
 
             # Objectness first (one column), then the class logits of its
             # survivors only: a background cell costs a single byte compare,
-            # not an 80-channel scan.
-            threshold = _class_threshold_int(conf_thr, layout.fix_point)
-            if threshold > 127:
-                continue
+            # not an 80-channel scan. A candidate needs the loosest class gate
+            # to pass, so the objectness gate is the minimum of the class gates.
+            thresholds, gates = self._thresholds(layout, conf_thr, class_thr)
             flat = raw.reshape(layout.height * layout.width, layout.channels)
-            np.greater_equal(flat[:, _OBJECTNESS], threshold, out=layout.keep)
+            np.greater_equal(flat[:, _OBJECTNESS], np.min(gates), out=layout.keep)
             index = np.flatnonzero(layout.keep)
             if index.size == 0:
                 continue
-            class_max = layout.class_max[: index.size]
-            np.maximum.reduce(flat[index, _CLASS_START:], axis=1, out=class_max)
-            index = index[np.greater_equal(class_max, threshold)]
-            count = index.size
-            if count == 0:
+            index = index[np.any(flat[index, _CLASS_START:] >= gates, axis=1)]
+            if index.size == 0:
                 continue
-            candidates += int(count)
 
             factor = layout.dequant_factor
             regression = flat[index, :_BOX_CHANNELS].astype(np.float64) * factor
             objectness = _sigmoid(flat[index, _OBJECTNESS].astype(np.float64) * factor)
             class_scores = _sigmoid(flat[index, _CLASS_START:].astype(np.float64) * factor)
-            class_ids = np.argmax(class_scores, axis=1)
-            best = np.take_along_axis(class_scores, class_ids[:, None], axis=1)[:, 0]
-            score = objectness * best
+            cell_scores = objectness[:, None] * class_scores
 
             center_x = (regression[:, 0] + layout.grid_x[index]) * layout.stride
             center_y = (regression[:, 1] + layout.grid_y[index]) * layout.stride
@@ -528,16 +728,15 @@ class QuantizedYoloxDecoder:
             )
 
             usable = (
-                np.isfinite(score)
-                & np.isfinite(box).all(axis=-1)
-                & (score > conf_thr)
-                & (box[:, 2] > box[:, 0])
-                & (box[:, 3] > box[:, 1])
+                np.isfinite(box).all(axis=-1) & (box[:, 2] > box[:, 0]) & (box[:, 3] > box[:, 1])
             )
-            selected = np.flatnonzero(usable)
-            boxes.append(box[selected])
-            scores.append(score[selected])
-            classes.append(class_ids[selected].astype(np.intp))
+            cells, class_ids, kept_scores = _cell_candidates(cell_scores, thresholds, usable)
+            if cells.size == 0:
+                continue
+            candidates += int(cells.size)
+            boxes.append(box[cells])
+            scores.append(kept_scores)
+            classes.append(class_ids)
 
         self.last_candidate_count = candidates
         return _finalize(boxes, scores, classes, iou_thr)
@@ -751,6 +950,7 @@ def detections_from_heads(
     source_hw: tuple[int, int],
     logits: bool = True,
     fix_points: Sequence[int] | None = None,
+    class_thr: Mapping[int, float] | None = None,
 ) -> list[Detection]:
     """Decode YOLOX heads into source-pixel detections.
 
@@ -770,6 +970,7 @@ def detections_from_heads(
         logits: ``True`` for raw logits (the zoo graphs).
         fix_points: When given, each head is round-tripped through int8 with
             that ``fix_point`` first, reproducing the DPU's output precision.
+        class_thr: Per-class scores overriding ``conf_thr`` (see :func:`decode_yolox`).
 
     Returns:
         Detections in source pixels, score-descending, degenerate boxes dropped.
@@ -786,7 +987,12 @@ def detections_from_heads(
         heads = staged
 
     boxes, scores, class_ids = decode_yolox(
-        heads, strides, conf_thr=conf_thr, iou_thr=iou_thr, logits=logits
+        heads,
+        strides,
+        conf_thr=conf_thr,
+        iou_thr=iou_thr,
+        logits=logits,
+        class_thr=class_thr,
     )
     return _detections_from_decoded(
         boxes, scores, class_ids, scale=scale, pad=pad, source_hw=source_hw
@@ -830,14 +1036,18 @@ class YoloxDetector:
 
     Args:
         xmodel_path: Path to the compiled ``.xmodel``.
-        conf_thr: Minimum ``objectness * class`` score for a detection.
+        conf_thr: Default minimum ``objectness * class`` score for a detection.
         iou_thr: Class-aware NMS IoU threshold.
+        class_thr: Minimum ``objectness * class`` score of single COCO classes,
+            overriding ``conf_thr``: the showcase keeps a stricter ``person`` and
+            a looser threshold for the objects held in front of it.
 
     Raises:
         RuntimeError: If the ``xir``/``vart`` Python bindings are unavailable.
         FileNotFoundError: If ``xmodel_path`` does not exist.
-        ValueError: If a threshold is out of range, the graph has no DPU
-            subgraph, or the tensor layout is unexpected.
+        ValueError: If a threshold is out of range or names a class the graph
+            does not have, the graph has no DPU subgraph, or the tensor layout is
+            unexpected.
     """
 
     def __init__(
@@ -846,6 +1056,7 @@ class YoloxDetector:
         *,
         conf_thr: float = 0.35,
         iou_thr: float = 0.45,
+        class_thr: Mapping[int, float] | None = None,
     ) -> None:
         if not 0.0 <= conf_thr <= 1.0:
             raise ValueError(f"conf_thr must be in [0, 1], got {conf_thr}")
@@ -853,12 +1064,16 @@ class YoloxDetector:
             raise ValueError(f"iou_thr must be in [0, 1], got {iou_thr}")
         self._conf_thr = float(conf_thr)
         self._iou_thr = float(iou_thr)
+        self._class_thr = dict(class_thr or {})
 
         self._runner = DpuRunner(xmodel_path)
         self._outputs: tuple[OutputTensor, ...] = self._runner.outputs
         strides = sorted(tensor.stride for tensor in self._outputs)
         if strides != list(YOLOX_STRIDES):
             raise ValueError(f"expected the YOLOX strides {list(YOLOX_STRIDES)}, got {strides}")
+        # Fail at boot, not on the first frame, when a per-class threshold names
+        # a class the graph does not have.
+        _class_thresholds(self._conf_thr, self._class_thr, self._outputs[0].shape[2] - _CLASS_START)
 
         self._lut = input_quantization_lut_scaled(self._runner.input_fix_point, YOLOX_INPUT_SCALE)
         self._input_hw = self._runner.input_hw
@@ -913,7 +1128,7 @@ class YoloxDetector:
 
     @property
     def last_candidate_count(self) -> int:
-        """Cells that survived the int8 threshold in the last :meth:`wait`."""
+        """Candidates that survived the int8 prefilter in the last :meth:`wait`."""
         return self._decoder.last_candidate_count
 
     def submit(self, rgb: NDArray[np.uint8]) -> int:
@@ -978,7 +1193,7 @@ class YoloxDetector:
 
         started = time.perf_counter()
         boxes, scores, class_ids = self._decoder.decode(
-            job.slot.output_buffers, self._conf_thr, self._iou_thr
+            job.slot.output_buffers, self._conf_thr, self._iou_thr, self._class_thr
         )
         detections = _detections_from_decoded(
             boxes,

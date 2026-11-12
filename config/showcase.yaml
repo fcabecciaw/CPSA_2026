@@ -29,7 +29,10 @@ tracker:                      # detector boxes, stabilized so they stand still o
 
 model:                        # YOLOX-nano from the Vitis AI model zoo, COCO-80
   path: models/yolox_nano.xmodel  # compiled KV260 xmodel (deploy.sh --model)
-  conf_thr: 0.35              # minimum objectness * class score of a kept box
+  conf_thr: 0.35              # class-independent default of objectness * class score
+  class_conf:                 # per-class overrides, by COCO name (0..1)
+    person: 0.40              # a person is only reported above this score
+  object_conf: 0.25           # every class not named above: keeps a dim held bottle
   iou_thr: 0.45               # class-aware NMS IoU threshold
 
 movenet:                      # single-pose skeleton model, loaded by model.set (R2-G)

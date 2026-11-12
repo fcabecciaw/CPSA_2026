@@ -175,6 +175,7 @@ class FakeQueue:
 
 
 PERSON = Detection(box=(1.0, 1.0, 5.0, 3.0), score=0.75, class_id=0)
+BOTTLE = Detection(box=(2.0, 1.2, 3.0, 2.8), score=0.42, class_id=39)
 KEYPOINTS = np.array(
     [[1.0 + index % 6, 1.0 + index // 6, 0.9] for index in range(17)], dtype=np.float32
 )
@@ -470,6 +471,30 @@ def test_a_frame_reaches_the_video_and_the_state_with_labels(tmp_path: Path) -> 
     assert seq >= 1
     assert not np.all(image == 90)  # the box and the tag were drawn
     assert image[2, 3].tolist() != [90, 90, 90]  # inside the PERSON box
+
+
+def test_the_state_counts_a_bottle_inside_the_person_box(tmp_path: Path) -> None:
+    detector = FakeDetector([PERSON, BOTTLE])
+    pipeline, camera, sink, channel = build(tmp_path, detector=detector)
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            # The bottle needs its second frame to be shown (score < 0.6) and
+            # the state is published at 10 Hz, so wait for a state with both.
+            feed(camera, count=10, value=90, delay=0.04)
+            wait_until(
+                lambda: any(len(state["counts"]) == 2 for state in sink.topics("showcase.state"))
+            )
+            state = next(item for item in sink.topics("showcase.state") if len(item["counts"]) == 2)
+    finally:
+        channel.close()
+        channel.unlink()
+
+    assert state["counts"] == [
+        {"label": "bottiglia", "count": 1},
+        {"label": "persona", "count": 1},
+    ]
+    assert [item["class_id"] for item in state["objects"]] == [PERSON.class_id, BOTTLE.class_id]
 
 
 def test_the_tracker_keeps_the_published_box_still(tmp_path: Path) -> None:

@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import math
+import time
 
 import numpy as np
 import pytest
 from numpy.typing import NDArray
 
+from cpsa import yolox
 from cpsa.dpu import input_quantization_lut_scaled, quantize_fix_point
 from cpsa.yolox import (
     COCO80_EN,
     COCO80_IT,
+    MAX_CLASSES_PER_CELL,
     MAX_DETECTIONS,
     QuantizedYoloxDecoder,
     boxes_to_source,
+    class_thresholds,
     decode_yolox,
     label_for,
     labels_for,
@@ -24,6 +28,9 @@ from cpsa.yolox import (
 
 STRIDES = (8, 16, 32)
 BACKGROUND = -1000.0
+#: The booth scene: a person and the bottle held in front of it.
+PERSON = 0
+BOTTLE = 39
 
 #: Shapes and fix point of the compiled YOLOX-nano graph (``inspect_xmodel.py``).
 QUANTIZED_SHAPES = ((52, 52, 85), (26, 26, 85), (13, 13, 85))
@@ -148,6 +155,105 @@ def test_class_aware_nms_suppresses_duplicates_of_one_class_only() -> None:
     assert sorted(classes.tolist()) == [0, 7]
 
 
+# -- multi-label decode: the bottle in front of the person --------------------
+
+
+def test_a_bottle_sharing_a_persons_cell_is_decoded_with_the_person() -> None:
+    heads = _heads()
+    _set(heads[0], 0, 0, objectness=_logit(0.9), class_id=PERSON, class_logit=_logit(0.9))
+    heads[0][0, 0, 5 + BOTTLE] = _logit(0.8)
+
+    boxes, scores, classes = decode_yolox(heads, STRIDES, conf_thr=0.5, iou_thr=0.45, logits=True)
+
+    # One cell, two objects: the person no longer swallows the bottle it holds.
+    assert classes.tolist() == [PERSON, BOTTLE]
+    assert scores == pytest.approx([0.9 * 0.9, 0.9 * 0.8])
+    assert boxes[0].tolist() == pytest.approx(boxes[1].tolist())
+
+
+def test_per_class_thresholds_keep_a_weak_bottle_in_the_persons_cell() -> None:
+    heads = _heads()
+    _set(heads[0], 0, 0, objectness=_logit(0.9), class_id=PERSON, class_logit=_logit(0.9))
+    heads[0][0, 0, 5 + BOTTLE] = _logit(0.4)
+
+    global_only = decode_yolox(heads, STRIDES, conf_thr=0.5, iou_thr=0.45, logits=True)
+    per_class = decode_yolox(
+        heads,
+        STRIDES,
+        conf_thr=0.5,
+        iou_thr=0.45,
+        logits=True,
+        class_thr={PERSON: 0.6, BOTTLE: 0.25},
+    )
+    person_dropped = decode_yolox(
+        heads,
+        STRIDES,
+        conf_thr=0.5,
+        iou_thr=0.45,
+        logits=True,
+        class_thr={PERSON: 0.9, BOTTLE: 0.25},
+    )
+
+    assert global_only[2].tolist() == [PERSON]
+    assert per_class[2].tolist() == [PERSON, BOTTLE]
+    # The bottle's own threshold is what keeps it: 0.9 * 0.4 = 0.36.
+    assert per_class[1] == pytest.approx([0.81, 0.36])
+    # ... and a person threshold above 0.81 keeps the bottle alone.
+    assert person_dropped[2].tolist() == [BOTTLE]
+
+
+def test_a_cell_yields_at_most_the_three_best_classes() -> None:
+    heads = _heads(background=0.0)
+    _set(heads[0], 0, 0, objectness=1.0, class_id=PERSON, class_logit=0.9, background=0.0)
+    for class_id, probability in ((3, 0.8), (7, 0.7), (11, 0.6), (13, 0.5)):
+        heads[0][0, 0, 5 + class_id] = probability
+
+    _boxes, scores, classes = decode_yolox(heads, STRIDES, conf_thr=0.1, iou_thr=0.45, logits=False)
+
+    assert classes.tolist() == [PERSON, 3, 7]
+    assert scores == pytest.approx([0.9, 0.8, 0.7])
+    assert scores.size == MAX_CLASSES_PER_CELL == 3
+
+
+def test_class_thresholds_resolve_names_over_object_and_global_defaults() -> None:
+    thresholds = class_thresholds(0.35, class_conf={"person": 0.4})
+
+    assert len(thresholds) == len(COCO80_EN)
+    assert thresholds[PERSON] == 0.4
+    assert thresholds[BOTTLE] == 0.35
+
+    loose = class_thresholds(0.35, class_conf={"person": 0.4}, object_conf=0.25)
+
+    assert loose[PERSON] == 0.4
+    assert loose[BOTTLE] == loose[COCO80_EN.index("cup")] == 0.25
+
+
+def test_bad_class_thresholds_are_rejected() -> None:
+    heads = _heads()
+
+    with pytest.raises(ValueError, match="class threshold"):
+        decode_yolox(heads, STRIDES, conf_thr=0.5, iou_thr=0.45, logits=True, class_thr={80: 0.3})
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        decode_yolox(heads, STRIDES, conf_thr=0.5, iou_thr=0.45, logits=True, class_thr={0: 1.5})
+    with pytest.raises(ValueError, match="unknown COCO class"):
+        class_thresholds(0.35, class_conf={"unicorn": 0.4})
+    with pytest.raises(ValueError, match="object_conf"):
+        class_thresholds(0.35, object_conf=2.0)
+
+
+def test_the_two_nms_paths_agree(monkeypatch: pytest.MonkeyPatch) -> None:
+    shapes = ((13, 13, 10),)
+    heads = _realistic_heads(shapes=shapes, planted=20, seed=21)
+    decoder = QuantizedYoloxDecoder(shapes, (8,), (3,))
+
+    matrix = decoder.decode(heads, 0.2, 0.45)
+    monkeypatch.setattr(yolox, "_NMS_MATRIX_CANDIDATES", 0)
+    scanned = decoder.decode(heads, 0.2, 0.45)
+
+    for got, want in zip(matrix, scanned, strict=True):
+        assert np.array_equal(got, want)
+
+
 def test_detections_are_score_descending_and_capped() -> None:
     heads = _heads(sizes=((11, 11), (1, 1), (1, 1)), background=0.0)
     for row in range(11):
@@ -270,6 +376,35 @@ def _realistic_heads(
     return heads
 
 
+def _overlapping_heads(
+    shapes: tuple[tuple[int, int, int], ...] = ((13, 13, 85),),
+    planted: int = 6,
+    seed: int = 13,
+) -> list[NDArray[np.int8]]:
+    """The booth frame: person cells that also hold a bottle and a cup.
+
+    Every planted cell has three classes above the showcase thresholds, the
+    overlap the multi-label decode exists for; the background is at -128, as a
+    real frame's, so the int8 prefilter still drops the whole grid.
+    """
+
+    generator = np.random.default_rng(seed)
+    heads = []
+    for height, width, channels in shapes:
+        head = np.full((height, width, channels), -128, dtype=np.int8)
+        head[..., :4] = generator.integers(-40, 40, size=(height, width, 4), dtype=np.int8)
+        for _ in range(planted):
+            row = int(generator.integers(0, height))
+            column = int(generator.integers(0, width))
+            head[row, column, 4] = generator.integers(70, 121)
+            head[row, column, 5:] = generator.integers(-100, -19, size=channels - 5)
+            head[row, column, 5 + PERSON] = generator.integers(80, 128)
+            head[row, column, 5 + BOTTLE] = generator.integers(40, 100)
+            head[row, column, 5 + 41] = generator.integers(30, 90)  # cup
+        heads.append(head)
+    return heads
+
+
 @pytest.mark.parametrize("conf_thr", [0.0, 0.05, 0.35, 0.9, 1.0])
 def test_the_quantized_decoder_matches_decode_yolox_on_random_heads(conf_thr: float) -> None:
     heads = _quantized_heads()
@@ -321,6 +456,65 @@ def test_the_quantized_decoder_matches_decode_yolox_on_a_threshold_sweep() -> No
         )
         for got, want in zip(actual, expected, strict=True):
             assert np.array_equal(got, want), conf_thr
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        class_thresholds(0.35, class_conf={"person": 0.40}, object_conf=0.25),
+        {PERSON: 1.0, BOTTLE: 0.0},
+        {PERSON: 0.9},
+    ],
+)
+def test_the_quantized_decoder_matches_the_reference_with_per_class_thresholds(
+    overrides: dict[int, float],
+) -> None:
+    shapes = ((13, 13, 85),)
+    heads = _overlapping_heads(shapes=shapes, planted=6)
+    decoder = QuantizedYoloxDecoder(shapes, (8,), (3,))
+    conf_thr = 0.35
+
+    actual = decoder.decode(heads, conf_thr, 0.45, overrides)
+    expected = decode_yolox(
+        _dequantized(heads, 3),
+        (8,),
+        conf_thr=conf_thr,
+        iou_thr=0.45,
+        logits=True,
+        class_thr=overrides,
+    )
+
+    for got, want in zip(actual, expected, strict=True):
+        assert np.array_equal(got, want)
+    # The cell overlap is real: some boxes are decoded as more than one class.
+    assert len(actual[1]) > len({tuple(box) for box in actual[0].tolist()})
+
+
+@pytest.mark.benchmark
+def test_a_multi_label_frame_decodes_well_inside_the_decode_budget() -> None:
+    """Host micro-benchmark of the full 416x416 int8 decode.
+
+    The heads carry 24 object cells, each with the person, a bottle and a cup in
+    it: three times the candidates of the old single-label decode and the
+    worst case the multi-label change can add to a frame.
+    """
+
+    heads = _overlapping_heads(shapes=QUANTIZED_SHAPES, planted=8)
+    decoder = QuantizedYoloxDecoder(QUANTIZED_SHAPES, STRIDES, (QUANTIZED_FIX_POINT,) * 3)
+    overrides = class_thresholds(0.35, class_conf={"person": 0.40}, object_conf=0.25)
+    for _ in range(50):
+        decoder.decode(heads, 0.35, 0.45, overrides)
+
+    # The host is shared with the other booth processes: the fastest frame is
+    # the honest estimate of the work one decode costs.
+    samples = []
+    for _ in range(300):
+        started = time.perf_counter()
+        decoder.decode(heads, 0.35, 0.45, overrides)
+        samples.append((time.perf_counter() - started) * 1000.0)
+    per_frame_ms = min(samples)
+
+    assert per_frame_ms < 1.0, f"{per_frame_ms:.3f} ms per frame for the whole decode"
 
 
 def test_the_quantized_decoder_accepts_nhwc_outputs_with_the_batch_axis() -> None:

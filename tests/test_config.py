@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from cpsa.config import ConfigError, load, parse
+from cpsa.yolox import COCO80_EN, class_thresholds
 
 ROOT = Path(__file__).resolve().parents[1]
 SHIPPED = ROOT / "config" / "showcase.yaml"
@@ -84,6 +85,9 @@ def test_the_shipped_configuration_parses_and_names_the_machine() -> None:
 
     assert config.model.name == "yolox_nano"
     assert config.model.path == Path("models/yolox_nano.xmodel")
+    assert config.model.conf_thr == 0.35
+    assert config.model.class_conf == {"person": 0.40}
+    assert config.model.object_conf == 0.25
     assert config.movenet.name == "movenet"
     assert config.movenet.path == Path("models/movenet.xmodel")
     assert config.movenet.enabled is True
@@ -126,6 +130,29 @@ def test_a_document_parses_with_the_default_camera_match() -> None:
     del data["camera"]["match"]  # type: ignore[index]
 
     assert parse(data).camera.match == "RealSense"
+
+
+def test_a_document_without_class_thresholds_keeps_the_global_default() -> None:
+    model = parse(document()).model
+
+    assert model.class_conf == {}
+    assert model.object_conf is None
+    assert class_thresholds(model.conf_thr, class_conf=model.class_conf) == {
+        class_id: model.conf_thr for class_id in range(len(COCO80_EN))
+    }
+
+
+def test_the_class_thresholds_resolve_to_the_showcase_classes() -> None:
+    model = load(SHIPPED).model
+
+    thresholds = class_thresholds(
+        model.conf_thr, class_conf=model.class_conf, object_conf=model.object_conf
+    )
+
+    assert len(thresholds) == len(COCO80_EN)
+    assert thresholds[COCO80_EN.index("person")] == 0.40
+    assert thresholds[COCO80_EN.index("bottle")] == 0.25
+    assert set(thresholds.values()) == {0.40, 0.25}
 
 
 @pytest.mark.parametrize(
@@ -186,6 +213,7 @@ def test_a_missing_key_is_named(section: str, key: str) -> None:
         ("tracker", "max_misses", -1),
         ("model", "conf_thr", 1.5),
         ("model", "iou_thr", -0.1),
+        ("model", "object_conf", 1.5),
         ("movenet", "enabled", "yes"),
         ("movenet", "publish_hz", 0),
         ("web", "port", 0),
@@ -202,6 +230,24 @@ def test_an_invalid_value_is_named(section: str, key: str, value: object) -> Non
     with pytest.raises(ConfigError) as excinfo:
         parse(data)
     assert excinfo.value.key == f"{section}.{key}"
+
+
+@pytest.mark.parametrize(
+    ("class_conf", "key"),
+    [
+        (["person"], "model.class_conf"),
+        ({"person": 1.5}, "model.class_conf.person"),
+        ({"person": "high"}, "model.class_conf.person"),
+        ({"": 0.4}, "model.class_conf."),
+    ],
+)
+def test_an_invalid_class_threshold_is_named(class_conf: object, key: str) -> None:
+    data = document()
+    data["model"]["class_conf"] = class_conf  # type: ignore[index]
+
+    with pytest.raises(ConfigError) as excinfo:
+        parse(data)
+    assert excinfo.value.key == key
 
 
 def test_white_balance_accepts_auto_and_the_control_range() -> None:

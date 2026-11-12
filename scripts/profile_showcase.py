@@ -31,6 +31,11 @@ slot (the A53 path, :func:`cpsa.movenet.decode_quantized`); the line also
 reports what the old float64 reference decoder (`dequantize_heads` + `decode`)
 costs on the same heads, so the speed-up is visible.
 
+``decode`` is measured with the showcase thresholds (``person`` at 0.40, every
+other class at 0.25) on int8 heads whose object cells half hold a second class
+above threshold, so the line reports the multi-label decode and its class-aware
+NMS -- the stage that keeps a bottle held in front of a person detectable.
+
 Exit status is 0 when the measurement ran; ``--target-ms`` only labels the
 PASS/FAIL column.
 """
@@ -68,6 +73,14 @@ MOVENET_LOCK_TARGET_MS = 1.0
 
 MOVENET_STABILIZE_TARGET_MS = 0.5
 """Board target of the keypoint stabilizer (One Euro, deadband, hysteresis)."""
+
+YOLOX_CONF_THR = 0.35
+YOLOX_IOU_THR = 0.45
+YOLOX_CLASS_CONF = {"person": 0.40}
+YOLOX_OBJECT_CONF = 0.25
+"""The thresholds of ``config/showcase.yaml``, mirrored so the profile decodes
+like the showcase: ``person`` strict, every other class loose enough to keep a
+bottle held in front of it."""
 
 SKELETON_DRAW_TARGET_MS = 1.5
 """Board target of the MoveNet overlay: the dimmed frame plus the neon skeleton."""
@@ -130,7 +143,9 @@ def synthetic_heads() -> list[NDArray[np.int8]]:
     Shape and fix point are the compiled graph's (52x52/26x26/13x13, 85 channels,
     ``fix_point 3``); the background objectness and classes sit at -16 (sigmoid
     ~= 1e-7), so the int8 prefilter drops the whole grid and only the planted
-    cells reach the float decode, as on a real scene.
+    cells reach the float decode, as on a real scene. Half of the planted cells
+    carry a second class above its threshold, the person-and-bottle overlap the
+    multi-label decode is for.
     """
 
     shapes = ((52, 52, 85), (26, 26, 85), (13, 13, 85))
@@ -139,12 +154,14 @@ def synthetic_heads() -> list[NDArray[np.int8]]:
     for height, width, channels in shapes:
         head = np.full((height, width, channels), -128, dtype=np.int8)
         head[..., :4] = generator.integers(-40, 40, size=(height, width, 4), dtype=np.int8)
-        for _ in range(8):
+        for index in range(8):
             row = int(generator.integers(0, height))
             column = int(generator.integers(0, width))
             head[row, column, 4] = generator.integers(70, 120)
             head[row, column, 5:] = generator.integers(-100, -20, size=80)
-            head[row, column, 5 + int(generator.integers(0, 80))] = generator.integers(80, 127)
+            head[row, column, 5] = generator.integers(80, 127)  # person
+            if index % 2 == 0:
+                head[row, column, 5 + 39] = generator.integers(40, 100)  # bottle
         heads.append(head)
     return heads
 
@@ -308,7 +325,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         YOLOX_STRIDES,
         QuantizedYoloxDecoder,
         YoloxDetector,
+        class_thresholds,
         prepare_input_into,
+    )
+
+    yolox_thresholds = class_thresholds(
+        YOLOX_CONF_THR, class_conf=YOLOX_CLASS_CONF, object_conf=YOLOX_OBJECT_CONF
     )
 
     frame = synthetic_frame(args.width, args.height)
@@ -370,7 +392,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     decode_ms = 0.0
     dpu_ms = args.dpu_ms
     if args.model:
-        detector = YoloxDetector(args.model)
+        detector = YoloxDetector(
+            args.model,
+            conf_thr=YOLOX_CONF_THR,
+            iou_thr=YOLOX_IOU_THR,
+            class_thr=yolox_thresholds,
+        )
         tokens: list[int] = []
 
         def dpu_cycle() -> None:
@@ -393,7 +420,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             decode_times.append(stage["decode"])
         preprocess_ms = report("preprocess", preprocess_times, args.target_ms)
         dpu_ms = report("dpu", dpu_times, args.target_ms, note="graph")
-        decode_ms = report("decode", decode_times, args.target_ms, note="int8 prefilter")
+        decode_ms = report(
+            "decode",
+            decode_times,
+            args.target_ms,
+            note="int8 prefilter, multi-label",
+        )
         report("submit+wait", round_trip, args.target_ms, note="preprocess+dpu+decode")
         print(f"decode: last frame kept {detector.last_candidate_count} int8 candidates")
     else:
@@ -405,7 +437,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         decode_ms = report(
             "decode",
-            timed(args.runs, lambda: decoder.decode(heads, 0.35, 0.45)),
+            timed(
+                args.runs,
+                lambda: decoder.decode(heads, YOLOX_CONF_THR, YOLOX_IOU_THR, yolox_thresholds),
+            ),
             args.target_ms,
             note=f"int8 prefilter, {decoder.last_candidate_count} candidates",
         )

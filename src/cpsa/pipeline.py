@@ -55,7 +55,7 @@ from cpsa.keypoints import KeypointStabilizer
 from cpsa.movenet import DpuMovenet, MovenetPose
 from cpsa.overlay import draw_overlay, draw_skeleton
 from cpsa.tracker import Tracker
-from cpsa.yolox import Detection, YoloxDetector, label_for, labels_for
+from cpsa.yolox import Detection, YoloxDetector, class_thresholds, label_for, labels_for
 
 logger = logging.getLogger("cpsa.pipeline")
 
@@ -964,7 +964,16 @@ def _pose_period(publish_hz: float) -> float:
 
 def _default_detector(model: ModelConfig) -> Detector:
     """Build the DPU detector of F-S1 (imported here: it binds the VART runtime)."""
-    return YoloxDetector(model.path, conf_thr=model.conf_thr, iou_thr=model.iou_thr)
+    return YoloxDetector(
+        model.path,
+        conf_thr=model.conf_thr,
+        iou_thr=model.iou_thr,
+        class_thr=class_thresholds(
+            model.conf_thr,
+            class_conf=model.class_conf,
+            object_conf=model.object_conf,
+        ),
+    )
 
 
 def _default_movenet(config: MovenetConfig) -> PoseDetector:
