@@ -83,6 +83,8 @@ from cpsa.yolox import (
     _cell_candidates,
     _class_thresholds,
     _finalize,
+    _finalize_arrays,
+    _no_detections,
     _sigmoid,
     _threshold_ints,
     _validate_frame,
@@ -317,7 +319,13 @@ def decode_yolov5(
 
 @dataclass(frozen=True)
 class _HeadLayout:
-    """Precomputed state of one int8 head for :class:`QuantizedYolov5Decoder`."""
+    """Precomputed state of one int8 head for :class:`QuantizedYolov5Decoder`.
+
+    ``base`` is the index of the head's first slot in the decoder's global
+    tables, which follow the ascending-stride order of :meth:`decode`: a slot of
+    the frame is then ``base + row`` of that head's flattened ``(H * W * 3, 85)``
+    view, exactly the order the reference walks.
+    """
 
     height: int
     width: int
@@ -325,10 +333,9 @@ class _HeadLayout:
     classes: int
     stride: int
     fix_point: int
-    dequant_factor: float
-    anchors: NDArray[np.float64]
-    grid_x: NDArray[np.float64]
-    grid_y: NDArray[np.float64]
+    slots: int
+    slot_channels: int
+    base: int
     keep: NDArray[np.bool_]
 
 
@@ -340,16 +347,21 @@ class QuantizedYolov5Decoder:
     logits are thresholded in the int8 domain first. ``score > threshold`` with
     ``score = sigmoid(objectness) * sigmoid(class)`` implies that both logits
     already exceed their integer gate, so a slot whose int8 objectness is below
-    the loosest class gate, or whose class logits are all below their own gates,
-    can never qualify; those slots are dropped with two vectorised scans of the
-    raw buffers. Sigmoid, anchor/grid decode and dequantization then run only on
-    the survivors, which are decoded in multi-label mode like the float
-    reference (one candidate per class above its threshold, at most
-    :data:`MAX_CLASSES_PER_CELL` per anchor slot).
+    the loosest class gate can never qualify; those slots are dropped with one
+    vectorised scan of the raw buffers.
 
-    Grids and scratch buffers are precomputed in the constructor; the scratch
-    buffers make one instance non-reentrant, so call :meth:`decode` from one
-    thread at a time.
+    The rest of the frame is one vectorised pass over the survivors of all three
+    heads: the slots are gathered out of the int8 views, ``sigmoid`` comes from a
+    256-entry table per head (a byte indexes it, no ``exp`` on a float array), the
+    per-slot grid, stride and anchor come from one precomputed geometry table,
+    and the multi-label thresholds are a single broadcasted comparison against
+    the ``(slots, classes)`` score matrix. The boxes are then decoded in the
+    reference's own operation order, so the int8 path stays bit-identical to the
+    float one.
+
+    Grids, tables and scratch buffers are precomputed in the constructor; the
+    scratch buffers make one instance non-reentrant, so call :meth:`decode` from
+    one thread at a time.
 
     Args:
         shapes: Per-output ``(H, W, C)`` NHWC shapes, in the order the DPU
@@ -360,7 +372,8 @@ class QuantizedYolov5Decoder:
 
     Raises:
         ValueError: If shapes, strides or fix points do not line up, a head has
-            no usable anchor layout, or a stride has no anchors.
+            no usable anchor layout, a stride has no anchors, or the heads do not
+            all hold the same number of channels.
     """
 
     def __init__(
@@ -376,47 +389,91 @@ class QuantizedYolov5Decoder:
                 f"got {len(shapes)} shapes, {len(strides)} strides and {len(fix_points)} fix points"
             )
 
-        layouts: list[_HeadLayout] = []
+        # ``(height, width, channels, classes, stride, fix_point)`` per output.
+        heads: list[tuple[int, int, int, int, int, int]] = []
+        channels: int | None = None
         for index, (shape, raw_stride, fix_point) in enumerate(
             zip(shapes, strides, fix_points, strict=True)
         ):
             if len(shape) != 3:
                 raise ValueError(f"shapes[{index}] must be (H, W, C), got {shape}")
-            height, width, channels = (int(value) for value in shape)
+            height, width, head_channels = (int(value) for value in shape)
             if height <= 0 or width <= 0:
                 raise ValueError(f"shapes[{index}] must be positive, got {shape}")
-            classes = _head_channels(channels, index)
+            classes = _head_channels(head_channels, index)
             stride = int(raw_stride)
             if stride <= 0:
                 raise ValueError(f"strides[{index}] must be positive, got {stride}")
+            if channels is None:
+                channels = head_channels
+            elif head_channels != channels:
+                # One threshold table serves every head, exactly as the float
+                # reference requires of the tensors it decodes.
+                raise ValueError(f"head {index} has {head_channels} channels, expected {channels}")
+            heads.append((height, width, head_channels, classes, stride, int(fix_point)))
+
+        # Ascending stride reproduces the anchor order of decode_yolov5. The
+        # global tables are built in that order, so a frame's slots are numbered
+        # head by head with no per-frame bookkeeping.
+        order = sorted(range(len(heads)), key=lambda position: heads[position][4])
+        geometry: list[NDArray[np.float64]] = []
+        head_of_slot: list[NDArray[np.intp]] = []
+        sigmoid_luts: list[NDArray[np.float64]] = []
+        bases = [0] * len(heads)
+        base = 0
+        for position in order:
+            height, width, _channels, _classes, stride, fix_point = heads[position]
             cells = height * width
-            layouts.append(
-                _HeadLayout(
-                    height=height,
-                    width=width,
-                    channels=channels,
-                    classes=classes,
-                    stride=stride,
-                    fix_point=int(fix_point),
-                    dequant_factor=2.0 ** -int(fix_point),
-                    anchors=_anchors_for(stride),
-                    # Same order as ``np.meshgrid(arange(width), arange(height))``
-                    # flattened in C order, without building the 2-D grids.
-                    grid_x=np.tile(np.arange(width, dtype=np.float64), height),
-                    grid_y=np.repeat(np.arange(height, dtype=np.float64), width),
-                    keep=np.empty(cells, dtype=np.bool_),
+            slots = cells * _ANCHORS_PER_CELL
+            anchors = _anchors_for(stride)
+            # Slot order is ``(cell, anchor)``: the flattened NHWC head view.
+            geometry.append(
+                np.column_stack(
+                    (
+                        np.repeat(np.tile(np.arange(width, dtype=np.float64), height), 3),
+                        np.repeat(np.repeat(np.arange(height, dtype=np.float64), width), 3),
+                        np.full(slots, float(stride)),
+                        np.tile(anchors[:, 0], cells),
+                        np.tile(anchors[:, 1], cells),
+                    )
                 )
             )
+            head_of_slot.append(np.full(slots, len(head_of_slot), dtype=np.intp))
+            # ``sigmoid(int8 * 2 ** -fix)`` for every byte the tensor can hold,
+            # indexed by the byte's unsigned view: the LUT is built once per head
+            # with the same expression the reference evaluates per value.
+            unsigned = np.arange(256)
+            signed = np.where(unsigned < 128, unsigned, unsigned - 256).astype(np.float64)
+            sigmoid_luts.append(_sigmoid(signed * 2.0**-fix_point))
+            bases[position] = base
+            base += slots
 
-        self._layouts = tuple(layouts)
-        self._order = tuple(
-            sorted(range(len(layouts)), key=lambda position: layouts[position].stride)
+        self._geometry = np.concatenate(geometry)
+        self._head_of_slot = np.concatenate(head_of_slot)
+        self._sigmoid_lut = np.stack(sigmoid_luts)
+        self._layouts = tuple(
+            _HeadLayout(
+                height=height,
+                width=width,
+                channels=head_channels,
+                classes=classes,
+                stride=stride,
+                fix_point=fix_point,
+                slots=(height * width) * _ANCHORS_PER_CELL,
+                slot_channels=head_channels // _ANCHORS_PER_CELL,
+                base=bases[position],
+                keep=np.empty((height * width) * _ANCHORS_PER_CELL, dtype=np.bool_),
+            )
+            for position, (height, width, head_channels, classes, stride, fix_point) in enumerate(
+                heads
+            )
         )
-        # Per-class thresholds and their int8 gates are a property of the
-        # configuration, not of the frame: build them once, not many times a second.
+        self._order = tuple(order)
+        # Per-class thresholds are a property of the configuration, not of the
+        # frame: build them once, not many times a second.
         self._threshold_cache: dict[
             tuple[float, tuple[tuple[int, float], ...], int, int],
-            tuple[NDArray[np.float64], NDArray[np.int8]],
+            tuple[NDArray[np.float64], int],
         ] = {}
         self.last_candidate_count = 0
 
@@ -425,14 +482,15 @@ class QuantizedYolov5Decoder:
         layout: _HeadLayout,
         conf_thr: float,
         class_thr: Mapping[int, float] | None,
-    ) -> tuple[NDArray[np.float64], NDArray[np.int8]]:
-        """Return the float thresholds of a head and their int8 gates, cached."""
+    ) -> tuple[NDArray[np.float64], int]:
+        """Return a head's float thresholds and the loosest int8 objectness gate."""
         overrides = tuple(sorted(class_thr.items())) if class_thr else ()
         key = (conf_thr, overrides, layout.channels, layout.fix_point)
         cached = self._threshold_cache.get(key)
         if cached is None:
             thresholds = _class_thresholds(conf_thr, class_thr, layout.classes)
-            cached = (thresholds, _threshold_ints(thresholds, layout.fix_point))
+            gate = int(np.min(_threshold_ints(thresholds, layout.fix_point)))
+            cached = (thresholds, gate)
             self._threshold_cache[key] = cached
         return cached
 
@@ -473,24 +531,12 @@ class QuantizedYolov5Decoder:
                 f"got {len(outputs)} outputs but this decoder expects {len(self._layouts)}"
             )
 
-        boxes: list[NDArray[np.float64]] = []
-        scores: list[NDArray[np.float64]] = []
-        classes: list[NDArray[np.intp]] = []
-        candidates = 0
-
-        # First pass: the objectness byte of every anchor slot of every head.
-        # Ascending stride reproduces the anchor order of decode_yolov5.
-        scanned: list[
-            tuple[
-                _HeadLayout,
-                NDArray[np.int8],
-                NDArray[np.float64],
-                NDArray[np.int8],
-                NDArray[np.intp],
-                NDArray[np.intp],
-            ]
-        ] = []
-        slots_total = 0
+        # Every head holds the same classes, so one threshold vector serves the
+        # frame; the int8 gate of the objectness scan is per head, because each
+        # output has its own fix point.
+        thresholds, _gate = self._thresholds(self._layouts[self._order[0]], conf_thr, class_thr)
+        survivors: list[NDArray[np.int8]] = []
+        slot_index: list[NDArray[np.intp]] = []
         for position in self._order:
             layout = self._layouts[position]
             raw = np.asarray(outputs[position])
@@ -504,102 +550,69 @@ class QuantizedYolov5Decoder:
                     f"{(layout.height, layout.width, layout.channels)}, got {raw.shape}"
                 )
 
-            thresholds, gates = self._thresholds(layout, conf_thr, class_thr)
-            cells = layout.height * layout.width
-            slots = raw.reshape(cells, _ANCHORS_PER_CELL, layout.channels // _ANCHORS_PER_CELL)
-            # A candidate needs the loosest class gate to pass, so the
-            # objectness gate is the minimum gate: a background cell costs a
-            # byte compare per anchor, not an 80-channel scan.
-            cell_index, anchor_index = np.nonzero(slots[:, :, _OBJECTNESS] >= np.min(gates))
-            scanned.append((layout, slots, thresholds, gates, cell_index, anchor_index))
-            slots_total += cell_index.size
+            # A candidate needs the loosest class gate to pass, so the objectness
+            # gate is the minimum gate: a background cell costs one byte compare
+            # per anchor slot, not an 80-channel scan.
+            _thresholds, gate = self._thresholds(layout, conf_thr, class_thr)
+            flat = raw.reshape(layout.slots, layout.slot_channels)
+            np.greater_equal(flat[:, _OBJECTNESS], gate, out=layout.keep)
+            picked = np.flatnonzero(layout.keep)
+            if picked.size == 0:
+                continue
+            # One gather of the whole rows (box, objectness and class logits) of
+            # the slots that survived, and of where they sit in the frame.
+            survivors.append(np.take(flat, picked, axis=0))
+            slot_index.append(picked + layout.base)
 
-        if slots_total == 0:
+        if not survivors:
             self.last_candidate_count = 0
-            return _finalize(boxes, scores, classes, iou_thr)
+            return _no_detections()
+        rows = survivors[0] if len(survivors) == 1 else np.concatenate(survivors)
+        slots = slot_index[0] if len(slot_index) == 1 else np.concatenate(slot_index)
 
         # A pathological frame (a busy texture read as thousands of objects)
         # would otherwise evaluate 80 logits for every survivor: keep the
         # objectness-best slots instead, ties to the lower slot. The slots are
         # already in the reference order (head by head, cell then anchor), so the
         # shared :func:`_cap_slots` rule is the whole selection.
-        if slots_total > _SLOT_CANDIDATE_CAP:
-            objectness_survivors = np.concatenate(
-                [slots[cell, anchor, _OBJECTNESS] for _, slots, _, _, cell, anchor in scanned]
-            )
-            chosen = np.zeros(slots_total, dtype=np.bool_)
-            chosen[_cap_slots(objectness_survivors, np.arange(slots_total))] = True
-            bounds = np.cumsum([cell.size for _, _, _, _, cell, _ in scanned])[:-1]
-            selected = np.split(chosen, bounds)
-        else:
-            selected = [np.ones(cell.size, dtype=np.bool_) for _, _, _, _, cell, _ in scanned]
+        if rows.shape[0] > _SLOT_CANDIDATE_CAP:
+            chosen = _cap_slots(rows[:, _OBJECTNESS], np.arange(rows.shape[0]))
+            rows = rows[chosen]
+            slots = slots[chosen]
 
-        for (
-            layout,
-            slots,
-            thresholds,
-            gates,
-            cell_index,
-            anchor_index,
-        ), keep_slot in zip(scanned, selected, strict=True):
-            if not keep_slot.any():
-                continue
-            cell_index = cell_index[keep_slot]
-            anchor_index = anchor_index[keep_slot]
-            # The rows of the chosen slots: their box, objectness and class
-            # logits, in one gather instead of a dense pass over the grid.
-            rows = slots[cell_index, anchor_index]
-            # The float sigmoid runs on the (slot, class) pairs that pass their
-            # int8 gate, not on every class of every slot: the other logits can
-            # never reach their threshold, and ``np.nonzero`` of the byte compare
-            # is the scan that finds them.
-            pair_slot, pair_class = np.nonzero(rows[:, _CLASS_START:] >= gates)
-            if pair_slot.size == 0:
-                continue
-            factor = layout.dequant_factor
-            objectness = _sigmoid(rows[:, _OBJECTNESS].astype(np.float64) * factor)
-            pair_scores = objectness[pair_slot] * _sigmoid(
-                rows[pair_slot, _CLASS_START + pair_class].astype(np.float64) * factor
-            )
-            qualified = pair_scores > thresholds[pair_class]
-            if not qualified.any():
-                continue
-            pair_slot = pair_slot[qualified]
-            pair_class = pair_class[qualified]
-            pair_scores = pair_scores[qualified]
-
-            regression = _sigmoid(rows[:, :_BOX_CHANNELS].astype(np.float64) * factor)
-            center_x = (regression[:, 0] * 2.0 - 0.5 + layout.grid_x[cell_index]) * layout.stride
-            center_y = (regression[:, 1] * 2.0 - 0.5 + layout.grid_y[cell_index]) * layout.stride
-            box_width = (regression[:, 2] * 2.0) ** 2 * layout.anchors[anchor_index, 0]
-            box_height = (regression[:, 3] * 2.0) ** 2 * layout.anchors[anchor_index, 1]
-            box = np.stack(
-                (
-                    center_x - box_width / 2.0,
-                    center_y - box_height / 2.0,
-                    center_x + box_width / 2.0,
-                    center_y + box_height / 2.0,
-                ),
-                axis=-1,
-            )
-            usable = (
-                np.isfinite(box).all(axis=-1) & (box[:, 2] > box[:, 0]) & (box[:, 3] > box[:, 1])
-            )
-            valid = usable[pair_slot]
-            if not valid.any():
-                continue
-            pair_slot = pair_slot[valid]
-            pair_class = pair_class[valid]
-            pair_scores = pair_scores[valid]
-
+        # The byte of every survivor indexes the sigmoid table of its own head:
+        # the activation, the dequantization and the 256-entry table are one
+        # gather, and the geometry of the slot is another.
+        values = self._sigmoid_lut[self._head_of_slot[slots][:, None], rows.view(np.uint8)]
+        geometry = self._geometry[slots]
+        objectness = values[:, _OBJECTNESS]
+        scores = objectness[:, None] * values[:, _CLASS_START:]
+        pair_slot, pair_class = np.nonzero(scores > thresholds)
+        if pair_slot.size == 0:
+            self.last_candidate_count = 0
+            return _no_detections()
+        pair_scores = scores[pair_slot, pair_class]
+        if pair_slot.size > 1 and np.any(pair_slot[1:] == pair_slot[:-1]):
+            # A slot with several classes above their thresholds keeps the best
+            # ones, best score first then the lower class id.
             pair_slot, pair_class, pair_scores = _best_per_row(pair_slot, pair_class, pair_scores)
-            candidates += int(pair_slot.size)
-            boxes.append(box[pair_slot])
-            scores.append(pair_scores)
-            classes.append(pair_class)
 
-        self.last_candidate_count = candidates
-        return _finalize(boxes, scores, classes, iou_thr)
+        # The zoo decode in the reference's operation order: ``(sigmoid(t) * 2 -
+        # 0.5 + cell) * stride`` for the centre, ``(sigmoid(t) * 2) ** 2 * anchor``
+        # for the size, so the int8 boxes are bit-identical to the float ones.
+        regression = values[:, :_BOX_CHANNELS]
+        centre = regression[:, :2] * 2.0
+        centre -= 0.5
+        centre += geometry[:, :2]
+        centre *= geometry[:, 2:3]
+        size = regression[:, 2:] * 2.0
+        size **= 2
+        size *= geometry[:, 3:5]
+        half = size / 2.0
+        box = np.concatenate((centre - half, centre + half), axis=1)
+
+        self.last_candidate_count = int(pair_slot.size)
+        return _finalize_arrays(box[pair_slot], pair_scores, pair_class, iou_thr)
 
 
 # --------------------------------------------------------------------------- #

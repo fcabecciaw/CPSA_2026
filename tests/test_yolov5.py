@@ -991,7 +991,9 @@ def test_a_multi_label_frame_decodes_well_inside_the_decode_budget() -> None:
         decoder.decode(heads, 0.35, 0.45, overrides)
 
     # The host is shared with the other booth processes: the fastest frame is
-    # the honest estimate of the work one decode costs.
+    # the honest estimate of the work one decode costs. The one-pass decode
+    # measured 0.17 ms here and 0.35 ms before it, so the bound is loose enough
+    # for a loaded host and still catches a return of the per-slot Python pass.
     samples = []
     for _ in range(200):
         started = time.perf_counter()
@@ -999,7 +1001,7 @@ def test_a_multi_label_frame_decodes_well_inside_the_decode_budget() -> None:
         samples.append((time.perf_counter() - started) * 1000.0)
     per_frame_ms = min(samples)
 
-    assert per_frame_ms < 2.5, f"{per_frame_ms:.3f} ms per frame for the whole decode"
+    assert per_frame_ms < 0.9, f"{per_frame_ms:.3f} ms per frame for the whole decode"
 
 
 def test_live_class_thresholds_apply_to_the_next_decode_without_a_reload(
@@ -1114,8 +1116,9 @@ def test_a_crowded_frame_decodes_well_inside_the_decode_budget() -> None:
     for _ in range(30):
         decoder.decode(heads, 0.35, 0.45, overrides)
 
-    # The host is shared with the other booth processes: the fastest frame is
-    # the honest estimate of the work one decode costs.
+    # 0.25 ms on this host now, 0.49 ms before the one-pass decode; the bound
+    # keeps a loaded host from flaking without hiding the interpreter cost the
+    # rewrite removed (see the numpy call count below).
     samples = []
     for _ in range(100):
         started = time.perf_counter()
@@ -1123,7 +1126,51 @@ def test_a_crowded_frame_decodes_well_inside_the_decode_budget() -> None:
         samples.append((time.perf_counter() - started) * 1000.0)
     per_frame_ms = min(samples)
 
-    assert per_frame_ms < 2.0, f"{per_frame_ms:.3f} ms per frame for the crowded decode"
+    assert per_frame_ms < 1.2, f"{per_frame_ms:.3f} ms per frame for the crowded decode"
+
+
+def _numpy_calls(fn, repeats: int = 20) -> int:
+    """Count the numpy calls ``fn`` makes per call, dispatchers and wrappers included."""
+
+    count = 0
+
+    def profiler(frame, event, _arg):
+        nonlocal count
+        if event != "call":
+            return
+        if "/numpy/" not in frame.f_code.co_filename:
+            return
+        caller = frame.f_back
+        if caller is not None and "/cpsa/" in caller.f_code.co_filename:
+            count += 1
+
+    sys.setprofile(profiler)
+    try:
+        for _ in range(repeats):
+            fn()
+    finally:
+        sys.setprofile(None)
+    return count // repeats
+
+
+def test_a_crowded_frame_decodes_in_a_handful_of_numpy_calls() -> None:
+    """The decoder is one vectorized pass: a per-slot loop would multiply this.
+
+    Interpreter overhead of small numpy calls, not arithmetic, was the board's
+    decode cost: the old decoder made 157 calls per crowded frame, this one makes
+    34 (one comparison and one gather per head, one sigmoid-table gather, one
+    multi-label comparison, the box math and the native NMS). The bound is twice
+    the current count, so a loop over slots, cells or anchors cannot come back.
+    """
+
+    heads = _crowded_heads()
+    decoder = QuantizedYolov5Decoder(QUANTIZED_SHAPES, STRIDES, QUANTIZED_FIX_POINTS)
+    overrides = class_thresholds(0.35, class_conf={"person": 0.40}, object_conf=0.25)
+
+    calls = _numpy_calls(lambda: decoder.decode(heads, 0.35, 0.45, overrides))
+
+    assert calls <= 70, f"{calls} numpy calls per crowded decode"
+    assert decoder.last_candidate_count > 100  # the crowded path really ran
 
 
 def test_a_crowded_frame_hands_the_tracker_only_post_nms_detections() -> None:

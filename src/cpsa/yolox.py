@@ -37,7 +37,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import cv2
 import numpy as np
@@ -116,9 +116,6 @@ survivors, and evaluating 80 class logits of each is what the decode pays for;
 the loop keeps the 100 most objectness-confident instead. A frame with 30
 objects has a few dozen survivors, so the cap never trips on the booth.
 """
-
-_NMS_MATRIX_CANDIDATES = 512
-"""Candidate count up to which the NMS computes a class' overlaps as one matrix."""
 
 _MIN_CHANNELS = 6
 
@@ -256,76 +253,91 @@ def _iou(box: NDArray[np.float64], boxes: NDArray[np.float64]) -> NDArray[np.flo
         return np.where(union > 0.0, intersection / union, 0.0)
 
 
-def _pairwise_iou(boxes: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Intersection over union of every ``xyxy`` box against every box."""
-
-    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-    width = np.clip(
-        np.minimum(x2[:, None], x2[None, :]) - np.maximum(x1[:, None], x1[None, :]), 0.0, None
-    )
-    height = np.clip(
-        np.minimum(y2[:, None], y2[None, :]) - np.maximum(y1[:, None], y1[None, :]), 0.0, None
-    )
-    intersection = width * height
-    area = np.clip(x2 - x1, 0.0, None) * np.clip(y2 - y1, 0.0, None)
-    union = area[:, None] + area[None, :] - intersection
-    overlap = np.zeros(intersection.shape, dtype=np.float64)
-    np.divide(intersection, union, out=overlap, where=union > 0.0)
-    return overlap
-
-
 def _class_aware_nms(
     boxes: NDArray[np.float64],
     scores: NDArray[np.float64],
     class_ids: NDArray[np.intp],
     iou_thr: float,
 ) -> NDArray[np.intp]:
-    """Greedy per-class suppression: overlapping boxes of different classes both survive.
+    """Greedy per-class suppression in one native call.
 
-    Suppression never crosses classes, so each class is passed on its own: the
-    survivor set is exactly the one of the class-aware pass over the frame (the
-    score order inside a class is unchanged) and the pairwise overlap stays
-    ``sum(n_c ** 2)`` instead of ``n ** 2``. A class cannot contribute more than
-    :data:`MAX_DETECTIONS` survivors to the capped output, so its pass stops
-    there. Within one matrix-sized class the overlaps are computed once, as a
-    boolean matrix of "would suppress"; the pass over the frame then only ANDs
-    rows of it into the alive mask, which is far cheaper than a comparison and a
-    fancy-index assignment per survivor. Beyond :data:`_NMS_MATRIX_CANDIDATES` a
-    per-row scan keeps the memory bounded on a pathological head.
+    ``cv2.dnn.NMSBoxesBatched`` suppresses inside a class only -- boxes of
+    different classes never cancel each other -- and visits every class best
+    score first, so the survivor set is the one of the frame-wide greedy pass the
+    decoders used to run in Python, class by class. One call replaces that loop
+    and its per-class overlap matrix, which the board measured at 2 ms per
+    frame: the interpreter overhead, not the arithmetic, was the cost.
+
+    Details worth pinning: the boxes go in as OpenCV's ``(x, y, w, h)`` rect,
+    ``score_threshold`` is ``0.0`` because the decode has already applied the
+    per-class thresholds and every candidate scores above zero, and ``top_k``
+    stays ``0`` (no truncation) because the per-class survivors are not capped
+    here -- :func:`_finalize` keeps the frame's :data:`MAX_DETECTIONS` best
+    afterwards, which is the same list a per-class cap of
+    :data:`MAX_DETECTIONS` would leave. The pass runs in ``float32``, so a pair
+    whose IoU sits within about ``1e-7`` of ``iou_thr`` may flip against a
+    ``float64`` reference, and exact score ties come back in OpenCV's order.
     """
 
     if scores.size <= 1:
         return np.argsort(-scores, kind="stable").astype(np.intp)
-    keep: list[int] = []
-    for class_id in np.unique(class_ids):
-        members = np.flatnonzero(class_ids == class_id)
-        order = members[np.argsort(-scores[members], kind="stable")]
-        remaining = np.ones(order.size, dtype=np.bool_)
-        kept = 0
-        if order.size <= _NMS_MATRIX_CANDIDATES:
-            suppresses = _pairwise_iou(boxes[order]) > iou_thr
-            for position in range(order.size):
-                if not remaining[position]:
-                    continue
-                keep.append(int(order[position]))
-                kept += 1
-                remaining[position] = False
-                remaining &= ~suppresses[position]
-                if kept >= MAX_DETECTIONS:
-                    break
-            continue
-        for position in range(order.size):
-            if not remaining[position]:
-                continue
-            keep.append(int(order[position]))
-            kept += 1
-            remaining[position] = False
-            rest = np.flatnonzero(remaining)
-            overlap = _iou(boxes[order[position]], boxes[order[rest]])
-            remaining[rest[overlap > iou_thr]] = False
-            if kept >= MAX_DETECTIONS or rest.size == 0:
-                break
-    return np.asarray(keep, dtype=np.intp)
+    rect = boxes.astype(np.float32)
+    rect[:, 2] -= rect[:, 0]
+    rect[:, 3] -= rect[:, 1]
+    # A decoded box can reach outside the frame, and OpenCV drops a rect with a
+    # negative origin (a class-blind drop: it is not suppression). A translation
+    # leaves every IoU unchanged, so the whole set is moved into positive space
+    # first; the offset is zero for the usual frame.
+    shift = rect[:, :2].min(axis=0)
+    np.minimum(shift, 0.0, out=shift)
+    rect[:, :2] -= shift
+    # OpenCV's stubs ask for Python sequences; it takes the float32 arrays as they
+    # are, and converting a crowded frame's 100+ boxes to lists would cost more
+    # than the call itself.
+    kept = cv2.dnn.NMSBoxesBatched(
+        cast(Any, rect),
+        cast(Any, scores.astype(np.float32)),
+        cast(Any, class_ids.astype(np.int32)),
+        0.0,
+        float(iou_thr),
+    )
+    return np.asarray(kept, dtype=np.intp).reshape(-1)
+
+
+def _no_detections() -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.intp]]:
+    """The empty result of a frame without candidates."""
+
+    return (
+        np.zeros((0, 4), dtype=np.float64),
+        np.zeros(0, dtype=np.float64),
+        np.zeros(0, dtype=np.intp),
+    )
+
+
+def _finalize_arrays(
+    boxes: NDArray[np.float64],
+    scores: NDArray[np.float64],
+    classes: NDArray[np.intp],
+    iou_thr: float,
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.intp]]:
+    """Suppress the duplicates of a frame's candidates and keep its best ones.
+
+    The candidates arrive already concatenated, which is what the vectorized
+    YOLOv5 decode produces: capping and suppressing them is then one sort and one
+    native NMS call, with no per-head array to merge.
+    """
+
+    if scores.size == 0:
+        return _no_detections()
+    if scores.size > _NMS_CANDIDATE_CAP:
+        best = np.argsort(-scores, kind="stable")[:_NMS_CANDIDATE_CAP]
+        boxes = boxes[best]
+        scores = scores[best]
+        classes = classes[best]
+
+    keep = _class_aware_nms(boxes, scores, classes, iou_thr)
+    keep = keep[np.argsort(-scores[keep], kind="stable")][:MAX_DETECTIONS]
+    return boxes[keep], scores[keep], classes[keep]
 
 
 def _finalize(
@@ -337,29 +349,13 @@ def _finalize(
     """Concatenate the per-head candidates, suppress duplicates and cap the count."""
 
     if not boxes:
-        return (
-            np.zeros((0, 4), dtype=np.float64),
-            np.zeros(0, dtype=np.float64),
-            np.zeros(0, dtype=np.intp),
-        )
-    candidates = np.concatenate(boxes, axis=0)
-    candidate_scores = np.concatenate(scores, axis=0)
-    candidate_classes = np.concatenate(classes, axis=0)
-    if candidate_scores.size == 0:
-        return (
-            np.zeros((0, 4), dtype=np.float64),
-            np.zeros(0, dtype=np.float64),
-            np.zeros(0, dtype=np.intp),
-        )
-    if candidate_scores.size > _NMS_CANDIDATE_CAP:
-        best = np.argsort(-candidate_scores, kind="stable")[:_NMS_CANDIDATE_CAP]
-        candidates = candidates[best]
-        candidate_scores = candidate_scores[best]
-        candidate_classes = candidate_classes[best]
-
-    keep = _class_aware_nms(candidates, candidate_scores, candidate_classes, iou_thr)
-    keep = keep[np.argsort(-candidate_scores[keep], kind="stable")][:MAX_DETECTIONS]
-    return candidates[keep], candidate_scores[keep], candidate_classes[keep]
+        return _no_detections()
+    return _finalize_arrays(
+        np.concatenate(boxes, axis=0),
+        np.concatenate(scores, axis=0),
+        np.concatenate(classes, axis=0),
+        iou_thr,
+    )
 
 
 def _class_thresholds(

@@ -241,19 +241,6 @@ def test_bad_class_thresholds_are_rejected() -> None:
         class_thresholds(0.35, object_conf=2.0)
 
 
-def test_the_two_nms_paths_agree(monkeypatch: pytest.MonkeyPatch) -> None:
-    shapes = ((13, 13, 10),)
-    heads = _realistic_heads(shapes=shapes, planted=20, seed=21)
-    decoder = QuantizedYoloxDecoder(shapes, (8,), (3,))
-
-    matrix = decoder.decode(heads, 0.2, 0.45)
-    monkeypatch.setattr(yolox, "_NMS_MATRIX_CANDIDATES", 0)
-    scanned = decoder.decode(heads, 0.2, 0.45)
-
-    for got, want in zip(matrix, scanned, strict=True):
-        assert np.array_equal(got, want)
-
-
 def _reference_nms(
     boxes: NDArray[np.float64],
     scores: NDArray[np.float64],
@@ -261,7 +248,7 @@ def _reference_nms(
     iou_thr: float,
     cap: int | None = None,
 ) -> list[int]:
-    """The single-pass class-aware greedy NMS the per-class pass must reproduce."""
+    """The single-pass class-aware greedy NMS the native call must reproduce."""
 
     if cap is not None and scores.size > cap:
         best = np.argsort(-scores, kind="stable")[:cap]
@@ -282,13 +269,17 @@ def _reference_nms(
     return sorted(keep)
 
 
-def test_the_per_class_nms_keeps_what_one_pass_over_the_frame_keeps() -> None:
-    """Suppressing class by class is the class-aware pass, only over smaller matrices."""
+def test_the_native_nms_keeps_what_the_greedy_pass_keeps() -> None:
+    """``cv2.dnn.NMSBoxesBatched`` reproduces the frame-wide class-aware greedy pass.
+
+    Half of the sampled boxes reach outside the frame (their origin is negative),
+    which the native call only handles after the decoder translates them.
+    """
     generator = np.random.default_rng(20261112)
-    for _ in range(30):
-        count = int(generator.integers(2, 70))
-        centres = generator.uniform(0.0, 320.0, size=(count, 2))
-        sides = generator.uniform(8.0, 140.0, size=(count, 2))
+    for _ in range(40):
+        count = int(generator.integers(2, 90))
+        centres = generator.uniform(-60.0, 380.0, size=(count, 2))
+        sides = generator.uniform(4.0, 140.0, size=(count, 2))
         boxes = np.column_stack([centres - sides / 2.0, centres + sides / 2.0])
         scores = generator.uniform(0.01, 1.0, size=count)
         classes = generator.integers(0, 5, size=count).astype(np.intp)
@@ -298,8 +289,69 @@ def test_the_per_class_nms_keeps_what_one_pass_over_the_frame_keeps() -> None:
         assert sorted(actual.tolist()) == _reference_nms(boxes, scores, classes, 0.45)
 
 
+def test_the_native_nms_keeps_a_crowd_of_clusters() -> None:
+    """A busy frame: clusters of same-class duplicates, a few other classes around."""
+    generator = np.random.default_rng(7)
+    centres = generator.uniform(0.0, 400.0, size=(200, 2))
+    centres = np.repeat(centres[:40], 5, axis=0) + generator.normal(0.0, 3.0, (200, 2))
+    sides = generator.uniform(20.0, 120.0, size=(200, 2))
+    boxes = np.column_stack([centres - sides / 2.0, centres + sides / 2.0])
+    scores = generator.uniform(0.05, 1.0, size=200)
+    classes = generator.integers(0, 4, size=200).astype(np.intp)
+
+    actual = yolox._class_aware_nms(boxes, scores, classes, 0.45)
+
+    assert sorted(actual.tolist()) == _reference_nms(boxes, scores, classes, 0.45)
+    assert actual.size < 200  # the clusters really did collapse
+
+
+def test_the_native_nms_suppresses_a_box_outside_the_frame() -> None:
+    """A negative origin is geometry, not an exemption: the duplicate still dies.
+
+    ``cv2.dnn.NMSBoxesBatched`` silently drops rects with a negative origin when
+    they are handed over untranslated, which would keep a duplicate and lose a
+    real detection, so the translation is part of the contract.
+    """
+    boxes = np.array(
+        [[-120.0, -80.0, -20.0, 10.0], [-118.0, -78.0, -22.0, 8.0], [-200.0, 300.0, -100.0, 400.0]]
+    )
+    scores = np.array([0.9, 0.8, 0.7])
+    classes = np.array([0, 0, 0], dtype=np.intp)
+
+    actual = yolox._class_aware_nms(boxes, scores, classes, 0.45)
+
+    assert actual.tolist() == [0, 2]
+
+
+def test_the_native_nms_breaks_exact_score_ties_by_index_within_a_class() -> None:
+    """Equal scores: the lower index is visited first, as the greedy pass did."""
+    boxes = np.array([[0.0, 0.0, 10.0, 10.0], [1.0, 1.0, 10.0, 10.0]])
+    scores = np.array([0.75, 0.75])
+    classes = np.array([3, 3], dtype=np.intp)
+
+    actual = yolox._class_aware_nms(boxes, scores, classes, 0.45)
+
+    assert actual.tolist() == [0]
+
+
+def test_a_score_tie_across_classes_keeps_both_in_native_order() -> None:
+    """Cross-class ties keep both boxes; the native call orders them by input index.
+
+    The previous per-class pass walked the classes in ``np.unique`` order, so the
+    *order* of two exactly equal scores could differ; the kept set never did, and
+    ``_finalize`` sorts the survivors by score afterwards.
+    """
+    boxes = np.array([[0.0, 0.0, 10.0, 10.0], [100.0, 100.0, 110.0, 110.0]])
+    scores = np.array([0.5, 0.5])
+    classes = np.array([2, 0], dtype=np.intp)
+
+    actual = yolox._class_aware_nms(boxes, scores, classes, 0.45)
+
+    assert sorted(actual.tolist()) == [0, 1]
+
+
 def test_the_candidate_cap_keeps_the_best_scores_before_nms() -> None:
-    """A pathological frame cannot make the pairwise pass quadratic in the grid."""
+    """A pathological frame is capped before the native pass sees it."""
     count = 400
     columns = np.arange(count, dtype=np.float64)
     boxes = np.column_stack(
