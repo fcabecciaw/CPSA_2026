@@ -1,13 +1,18 @@
 /**
- * Italian voice of the hologram (F-E3 `voice.ts`), Web Speech API.
+ * Italian voice of the hologram (F-E3 `voice.ts`).
  *
- * Chrome on Ubuntu 24.04 exposes its Italian voices asynchronously: prefer
- * "Google italiano", fall back to any `it-*` voice, and if there is none show a
- * muted badge instead of crashing (F-E4 #16). Speech only starts after the
- * "Attiva la voce" click (autoplay, #15); only the tab that enabled the voice
- * speaks (#18); a mute toggle keeps the face and the bubble alive (#19); a
- * watchdog cancels stuck utterances after 8 s (#17). All the browser pieces are
- * injected, so the engine is testable without Chrome.
+ * Two back ends, chosen at run time:
+ * - the local TTS service (`tools/tts`, http://127.0.0.1:8765): the sentence is
+ *   fetched as a WAV and played through a WebAudio graph whose `AnalyserNode` is
+ *   exposed by `voiceAudioNode()` so the mouth can follow the real amplitude;
+ * - the Web Speech API when the service does not answer, keeping Chrome's
+ *   asynchronous Italian voices (prefer "Google italiano", fall back to any
+ *   `it-*` voice, muted badge when there is none, F-E4 #16).
+ *
+ * The rules do not change with the back end: speech starts only after the
+ * "Attiva la voce" click (#15), only the enabled tab speaks (#18), the mute
+ * toggle keeps face and bubble alive (#19), a watchdog cancels after 8 s (#17)
+ * and everything is injected so the engine is testable without Chrome.
  */
 
 export interface StorageLike {
@@ -71,6 +76,40 @@ export interface VoiceSnapshot {
   muted: boolean;
   voiceName: string | null;
   available: boolean;
+  /** "Kokoro 82M · Sara" when the local service answered, else null. */
+  service: string | null;
+}
+
+/** What one local TTS sentence is: resolved engine, voice and a readable label. */
+export interface TtsServiceInfo {
+  url: string;
+  engine: string;
+  voice: string;
+  label: string;
+}
+
+/** The local HTTP service (no DOM: the default client is injected in tests). */
+export interface TtsServiceLike {
+  probe(): Promise<TtsServiceInfo | null>;
+  synthesize(
+    text: string,
+    engine: string,
+    voice: string,
+    signal?: AbortSignal,
+  ): Promise<ArrayBuffer>;
+}
+
+/** The playback graph; `play` resolves true when the audio actually started. */
+export interface AudioSinkLike {
+  play(
+    data: ArrayBuffer,
+    handlers: { onStart: () => void; onEnd: () => void },
+  ): Promise<boolean>;
+  stop(): void;
+  /** Create or resume the audio context from a user gesture, when supported. */
+  unlock?(): void;
+  /** The analyser feeding the mouth, or null before the first gesture. */
+  analyserNode(): AnalyserNode | null;
 }
 
 export interface VoiceOptions {
@@ -82,11 +121,20 @@ export interface VoiceOptions {
   enabled?: boolean;
   watchdogMs?: number;
   preferredVoice?: string;
+  /** Local TTS service; `null` forces the Web Speech path. */
+  tts?: TtsServiceLike | null;
+  /** WebAudio playback; `null` forces the Web Speech path. */
+  audio?: AudioSinkLike | null;
+  serviceUrl?: string;
+  /** Called when the local-service probe changes state (badge refresh). */
+  onStatusChange?: (snapshot: VoiceSnapshot) => void;
 }
 
 export const ENABLED_KEY = "cpsa.voice.enabled.v1";
 export const MUTED_KEY = "cpsa.voice.muted.v1";
+export const TTS_URL = "http://127.0.0.1:8765";
 const WATCHDOG_MS = 8_000;
+const PROBE_TIMEOUT_MS = 750;
 
 function defaultStorage(): StorageLike | null {
   try {
@@ -118,6 +166,203 @@ function browserTimer(): TimerLike {
   };
 }
 
+/** The shared WebAudio graph: `voiceAudioNode()` reads its analyser. */
+let sharedSink: WebAudioSink | null = null;
+
+function defaultAudioSink(): AudioSinkLike | null {
+  if (typeof window === "undefined" || typeof AudioContext === "undefined") {
+    return null;
+  }
+  sharedSink ??= new WebAudioSink();
+  return sharedSink;
+}
+
+/**
+ * The analyser of the sentence being played locally, or null when the voice is
+ * silent, muted, or using the Web Speech API. The face reads its amplitude.
+ */
+export function voiceAudioNode(): AnalyserNode | null {
+  return sharedSink?.analyserNode() ?? null;
+}
+
+/** `http://127.0.0.1:8765` client: `/health`, `/voices` and `POST /tts`. */
+export class HttpTtsClient implements TtsServiceLike {
+  private readonly base: string;
+
+  constructor(base: string = TTS_URL) {
+    this.base = base.replace(/\/$/, "");
+  }
+
+  async probe(): Promise<TtsServiceInfo | null> {
+    const timeout =
+      typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+        ? AbortSignal.timeout(PROBE_TIMEOUT_MS)
+        : undefined;
+    try {
+      const health = await fetch(`${this.base}/health`, { signal: timeout, cache: "no-store" });
+      if (!health.ok) {
+        return null;
+      }
+      const body = (await health.json()) as {
+        status?: string;
+        defaults?: { engine?: string; voice?: string };
+      };
+      if (body.status !== "ok") {
+        return null;
+      }
+      const engine = body.defaults?.engine ?? "";
+      const voice = body.defaults?.voice ?? "";
+      const label = await this.voiceLabel(engine, voice, timeout);
+      return { url: this.base, engine, voice, label };
+    } catch {
+      return null;
+    }
+  }
+
+  async synthesize(
+    text: string,
+    engine: string,
+    voice: string,
+    signal?: AbortSignal,
+  ): Promise<ArrayBuffer> {
+    const response = await fetch(`${this.base}/tts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, engine, voice }),
+      signal,
+    });
+    if (!response.ok) {
+      throw new Error(`tts ${response.status}`);
+    }
+    return response.arrayBuffer();
+  }
+
+  private async voiceLabel(
+    engine: string,
+    voice: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    try {
+      const response = await fetch(`${this.base}/voices`, { cache: "no-store", signal });
+      if (!response.ok) {
+        return "Voce locale";
+      }
+      const body = (await response.json()) as {
+        engines?: {
+          id?: string;
+          label?: string;
+          voices?: { id?: string; name?: string }[];
+        }[];
+      };
+      const row = body.engines?.find((item) => item.id === engine);
+      const name = row?.voices?.find((item) => item.id === voice)?.name;
+      const parts = [row?.label, name].filter((part): part is string => Boolean(part));
+      return parts.length > 0 ? parts.join(" · ") : "Voce locale";
+    } catch {
+      return "Voce locale";
+    }
+  }
+}
+
+/** WebAudio playback: source → analyser → gain → speakers. */
+export class WebAudioSink implements AudioSinkLike {
+  private context: AudioContext | null = null;
+  private analyser: AnalyserNode | null = null;
+  private gain: GainNode | null = null;
+  private source: AudioBufferSourceNode | null = null;
+  private readonly volume: number;
+
+  constructor(volume = 0.95) {
+    this.volume = volume;
+  }
+
+  private ensure(): AudioContext {
+    if (this.context === null) {
+      this.context = new AudioContext();
+      this.analyser = this.context.createAnalyser();
+      this.analyser.fftSize = 512;
+      this.analyser.smoothingTimeConstant = 0.7;
+      this.gain = this.context.createGain();
+      this.gain.gain.value = this.volume;
+      this.analyser.connect(this.gain);
+      this.gain.connect(this.context.destination);
+    }
+    return this.context;
+  }
+
+  /** Create or resume the context; call it from a user gesture. */
+  unlock(): void {
+    try {
+      const context = this.ensure();
+      if (context.state === "suspended") {
+        void context.resume().catch(() => undefined);
+      }
+    } catch {
+      // No audio device: speak() falls back to Web Speech.
+    }
+  }
+
+  analyserNode(): AnalyserNode | null {
+    return this.analyser;
+  }
+
+  async play(
+    data: ArrayBuffer,
+    handlers: { onStart: () => void; onEnd: () => void },
+  ): Promise<boolean> {
+    let context: AudioContext;
+    try {
+      context = this.ensure();
+      this.unlock();
+    } catch {
+      return false;
+    }
+    let buffer: AudioBuffer;
+    try {
+      // decodeAudioData detaches its argument: keep a copy for the caller.
+      buffer = await context.decodeAudioData(data.slice(0));
+    } catch {
+      return false;
+    }
+    if (this.analyser === null) {
+      return false;
+    }
+    this.stop();
+    const source = context.createBufferSource();
+    source.buffer = buffer;
+    source.connect(this.analyser);
+    source.onended = () => {
+      source.onended = null;
+      if (this.source === source) {
+        this.source = null;
+      }
+      handlers.onEnd();
+    };
+    try {
+      source.start();
+    } catch {
+      return false;
+    }
+    this.source = source;
+    handlers.onStart();
+    return true;
+  }
+
+  stop(): void {
+    const source = this.source;
+    this.source = null;
+    if (source !== null) {
+      source.onended = null;
+      try {
+        source.stop();
+      } catch {
+        // Already stopped.
+      }
+      source.disconnect();
+    }
+  }
+}
+
 /** One utterance at a time, gated by click, tab, voice and mute. */
 export class VoiceEngine {
   private readonly synth: SpeechSynthLike | null;
@@ -126,6 +371,10 @@ export class VoiceEngine {
   private readonly timer: TimerLike;
   private readonly watchdogMs: number;
   private readonly preferredVoice: string;
+  private readonly tts: TtsServiceLike | null;
+  private readonly audio: AudioSinkLike | null;
+  private readonly serviceUrl: string;
+  private readonly onStatusChange: ((snapshot: VoiceSnapshot) => void) | null;
 
   private voices: VoiceInfo[] = [];
   private selected: VoiceInfo | null = null;
@@ -137,6 +386,8 @@ export class VoiceEngine {
   private watchdog: number | null = null;
   private simulateTimer: number | null = null;
   private handlers: VoiceHandlers | null = null;
+  private service: TtsServiceInfo | null = null;
+  private abort: AbortController | null = null;
 
   constructor(options: VoiceOptions = {}) {
     this.synth = options.synth === undefined ? browserSynth() : options.synth;
@@ -145,12 +396,24 @@ export class VoiceEngine {
     this.timer = options.timer ?? browserTimer();
     this.watchdogMs = options.watchdogMs ?? WATCHDOG_MS;
     this.preferredVoice = (options.preferredVoice ?? "Google italiano").toLowerCase();
+    this.serviceUrl = options.serviceUrl ?? TTS_URL;
+    this.onStatusChange = options.onStatusChange ?? null;
+    this.tts =
+      options.tts === undefined
+        ? typeof window === "undefined"
+          ? null
+          : new HttpTtsClient(this.serviceUrl)
+        : options.tts;
+    this.audio = options.audio === undefined ? defaultAudioSink() : options.audio;
     this.enabled =
       options.enabled === true || this.storage?.getItem(ENABLED_KEY) === "1";
     this.muted = this.storage?.getItem(MUTED_KEY) === "1";
     this.refreshVoices();
     if (this.synth !== null) {
       this.synth.addEventListener?.("voiceschanged", () => this.refreshVoices());
+    }
+    if (this.tts !== null) {
+      void this.probeService();
     }
   }
 
@@ -159,6 +422,10 @@ export class VoiceEngine {
     this.enabled = true;
     this.unlocked = true;
     this.storage?.setItem(ENABLED_KEY, "1");
+    this.audio?.unlock?.();
+    if (this.service === null) {
+      void this.probeService();
+    }
   }
 
   /** Allow audio after a click, without changing the tab's enabled state. */
@@ -200,13 +467,13 @@ export class VoiceEngine {
   }
 
   get canSpeak(): boolean {
-    return (
-      this.enabled &&
-      this.unlocked &&
-      !this.muted &&
-      this.selected !== null &&
-      this.synth !== null
-    );
+    if (!this.enabled || !this.unlocked || this.muted) {
+      return false;
+    }
+    if (this.service !== null && this.audio !== null) {
+      return true;
+    }
+    return this.selected !== null && this.synth !== null;
   }
 
   get voiceName(): string | null {
@@ -214,7 +481,7 @@ export class VoiceEngine {
   }
 
   get available(): boolean {
-    return this.synth !== null && this.selected !== null;
+    return (this.synth !== null && this.selected !== null) || this.service !== null;
   }
 
   get isEnabled(): boolean {
@@ -223,6 +490,11 @@ export class VoiceEngine {
 
   get isMuted(): boolean {
     return this.muted;
+  }
+
+  /** The label of the local service ("Kokoro 82M · Sara"), null if absent. */
+  get serviceLabel(): string | null {
+    return this.service === null ? null : this.service.label;
   }
 
   snapshot(): VoiceSnapshot {
@@ -235,21 +507,22 @@ export class VoiceEngine {
       status = "locked";
     } else if (this.muted) {
       status = "muted";
-    } else if (this.synth === null) {
+    } else if (this.service === null && this.synth === null) {
       status = "unsupported";
-    } else if (this.selected === null) {
+    } else if (this.service === null && this.selected === null) {
       status = "no-voice";
     } else {
       status = "ready";
     }
     return {
       status,
-      label: labelFor(status, this.selected?.name ?? null),
+      label: this.labelFor(status),
       enabled: this.enabled,
       unlocked: this.unlocked,
       muted: this.muted,
       voiceName: this.selected?.name ?? null,
       available: this.available,
+      service: this.serviceLabel,
     };
   }
 
@@ -266,6 +539,18 @@ export class VoiceEngine {
       voice.name.toLowerCase().includes(this.preferredVoice),
     );
     this.selected = preferred ?? italian[0] ?? null;
+  }
+
+  /** Ask the local service once; safe to call repeatedly. */
+  async probeService(): Promise<boolean> {
+    if (this.tts === null) {
+      this.service = null;
+      return false;
+    }
+    const info = await this.tts.probe();
+    this.service = info;
+    this.onStatusChange?.(this.snapshot());
+    return info !== null;
   }
 
   /**
@@ -286,7 +571,93 @@ export class VoiceEngine {
       return false;
     }
     this.speaking = true;
+    if (this.service !== null && this.audio !== null) {
+      void this.speakLocal(text, handlers);
+      return true;
+    }
+    if (this.synth === null || this.selected === null) {
+      this.speaking = false;
+      this.simulate(text, handlers);
+      return false;
+    }
+    return this.startSynth(text, handlers);
+  }
 
+  /** Cancel the utterance in flight (vision lost, mode switch, mute). */
+  cancel(): void {
+    if (!this.speaking && !this.simulating) {
+      return;
+    }
+    if (this.abort !== null) {
+      this.abort.abort();
+      this.abort = null;
+    }
+    this.audio?.stop();
+    if (this.speaking) {
+      try {
+        this.synth?.cancel();
+      } catch {
+        // The speech stack can be gone (tab closed): nothing to cancel.
+      }
+    }
+    this.finish("cancelled");
+  }
+
+  /** Fetch the WAV from the local service and play it; fall back on failure. */
+  private async speakLocal(text: string, handlers: VoiceHandlers): Promise<void> {
+    const info = this.service;
+    if (info === null || this.tts === null || this.audio === null) {
+      this.retryWithSynth(text, handlers);
+      return;
+    }
+    const controller = new AbortController();
+    this.abort = controller;
+    try {
+      const wav = await this.tts.synthesize(text, info.engine, info.voice, controller.signal);
+      if (!this.speaking || this.abort !== controller) {
+        return;
+      }
+      const started = await this.audio.play(wav, {
+        onStart: () => {
+          handlers.onStart?.();
+          this.armWatchdog();
+        },
+        onEnd: () => this.finish("ended"),
+      });
+      if (!started) {
+        this.retryWithSynth(text, handlers);
+      }
+    } catch {
+      if (!this.speaking || this.abort !== controller) {
+        return;
+      }
+      // The service died between the probe and the request: Web Speech now.
+      this.retryWithSynth(text, handlers);
+    } finally {
+      if (this.abort === controller) {
+        this.abort = null;
+      }
+    }
+  }
+
+  /** The local path failed mid-sentence: speak this one with Web Speech. */
+  private retryWithSynth(text: string, handlers: VoiceHandlers): void {
+    if (this.synth === null || this.selected === null) {
+      this.speaking = false;
+      this.simulate(text, handlers);
+      return;
+    }
+    this.speaking = true;
+    this.startSynth(text, handlers);
+  }
+
+  /** The Web Speech path: one utterance, watchdog, mute and tab gate. */
+  private startSynth(text: string, handlers: VoiceHandlers): boolean {
+    if (this.synth === null || this.selected === null) {
+      this.simulate(text, handlers);
+      return false;
+    }
+    this.handlers = handlers;
     const utterance = this.createUtterance(text);
     utterance.lang = "it-IT";
     utterance.voice = this.selected;
@@ -301,27 +672,12 @@ export class VoiceEngine {
     utterance.onend = () => this.finish("ended");
     utterance.onerror = () => this.finish("cancelled");
     try {
-      this.synth?.speak(utterance);
+      this.synth.speak(utterance);
     } catch {
       this.finish("unavailable");
       return false;
     }
     return true;
-  }
-
-  /** Cancel the utterance in flight (vision lost, mode switch, mute). */
-  cancel(): void {
-    if (!this.speaking && !this.simulating) {
-      return;
-    }
-    if (this.speaking) {
-      try {
-        this.synth?.cancel();
-      } catch {
-        // The speech stack can be gone (tab closed): nothing to cancel.
-      }
-    }
-    this.finish("cancelled");
   }
 
   private simulate(text: string, handlers: VoiceHandlers): void {
@@ -344,6 +700,7 @@ export class VoiceEngine {
       } catch {
         // Ignore: the utterance is gone anyway.
       }
+      this.audio?.stop();
       this.finish("watchdog");
     }, this.watchdogMs);
   }
@@ -370,23 +727,28 @@ export class VoiceEngine {
     this.handlers = null;
     handlers?.onEnd?.(reason);
   }
-}
 
-function labelFor(status: VoiceStatus, voiceName: string | null): string {
-  switch (status) {
-    case "off":
-      return "Voce spenta in questa scheda";
-    case "locked":
-      return "Attiva la voce";
-    case "muted":
-      return "Voce mutata";
-    case "no-voice":
-      return "Nessuna voce italiana";
-    case "unsupported":
-      return "Voce non supportata";
-    case "speaking":
-      return voiceName === null ? "Sto parlando" : `Sto parlando · ${voiceName}`;
-    case "ready":
-      return voiceName === null ? "Voce pronta" : `Voce pronta · ${voiceName}`;
+  private labelFor(status: VoiceStatus): string {
+    if (this.service !== null && (status === "ready" || status === "speaking")) {
+      return status === "speaking" ? `Sto parlando · ${this.service.label}` : this.service.label;
+    }
+    switch (status) {
+      case "off":
+        return "Voce spenta in questa scheda";
+      case "locked":
+        return "Attiva la voce";
+      case "muted":
+        return "Voce mutata";
+      case "no-voice":
+        return "Nessuna voce italiana";
+      case "unsupported":
+        return "Voce non supportata";
+      case "speaking":
+        return this.selected === null
+          ? "Sto parlando"
+          : `Sto parlando · ${this.selected.name}`;
+      case "ready":
+        return this.selected === null ? "Voce pronta" : `Voce pronta · ${this.selected.name}`;
+    }
   }
 }

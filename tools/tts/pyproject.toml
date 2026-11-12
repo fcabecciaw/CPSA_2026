@@ -1,0 +1,60 @@
+[project]
+name = "cpsa-tts"
+version = "0.1.0"
+description = "Local Italian text-to-speech HTTP service for the CPSA showcase dashboard (Kokoro + XTTS-v2)."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "Apache-2.0" }
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.34",
+  "numpy>=1.26",
+  "soundfile>=0.12",
+  "kokoro>=0.9.4",
+  "coqui-tts[codec]>=0.27",
+  "torch>=2.7",
+  "torchaudio>=2.7",
+  "six>=1.17.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cpsa_tts"]
+
+[project.scripts]
+cpsa-tts = "cpsa_tts.cli:main"
+
+[dependency-groups]
+dev = [
+  "httpx>=0.27",
+  "mypy>=2.4.1",
+  "pytest>=8.0",
+  "ruff>=0.6",
+]
+
+[tool.uv]
+package = true
+# The dashboard package lives at the repository root and is not a dependency of
+# this one, and vice versa: keep the two uv projects independent.
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["cpsa_tts"]
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
+no_implicit_optional = true
+warn_redundant_casts = true

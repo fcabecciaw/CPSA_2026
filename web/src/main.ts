@@ -43,7 +43,10 @@ const showcase = new ShowcaseView({
 
 const face = new FaceView(byId("face"), byId("bubble"));
 // `?voice=1` marks this tab as the speaking one; the click gate still applies.
-const voice = new VoiceEngine({ enabled: params.get("voice") === "1" });
+const voice = new VoiceEngine({
+  enabled: params.get("voice") === "1",
+  onStatusChange: () => renderVoice(),
+});
 
 const voiceBadge = byId("voice-badge");
 const voiceGate = byId<HTMLButtonElement>("voice-gate");
