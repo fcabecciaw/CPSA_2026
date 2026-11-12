@@ -8,7 +8,6 @@
  * median depth, so a missing depth never punches a hole in the hologram.
  */
 
-import { formatNumber } from "./labels";
 import type { HologramHand, HologramHandsPayload, Keypoint } from "./protocol";
 
 type Edge = readonly [number, number];
@@ -292,15 +291,13 @@ export class HologramView {
 
     const hands = frame.hands.length;
     const joints = frame.hands.reduce((total, hand) => total + hand.kpts2d.length, 0);
-    const key = `${hands}:${joints}:${frame.width}:${frame.height}:${frame.timing.dpu_ms}:${frame.timing.total_ms}`;
+    const key = `${hands}:${joints}:${frame.width}:${frame.height}`;
     this.empty.hidden = hands > 0;
     if (this.metaKey === key) {
       return;
     }
     this.metaKey = key;
-    this.meta.textContent =
-      `${hands} ${hands === 1 ? "mano" : "mani"} · ${frame.width}×${frame.height} px · ` +
-      `DPU ${formatNumber(frame.timing.dpu_ms)} ms · totale ${formatNumber(frame.timing.total_ms)} ms`;
+    this.meta.textContent = `${hands} ${hands === 1 ? "mano" : "mani"} · ${frame.width}×${frame.height} px`;
     this.canvas.setAttribute(
       "aria-label",
       hands === 0

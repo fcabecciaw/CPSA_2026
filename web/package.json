@@ -1,9 +1,9 @@
 {
-  "name": "cpsa-medical-dashboard",
+  "name": "cpsa-hands-dashboard",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Dashboard web della demo medica CPSA (Vite + TypeScript, nessuna dipendenza a runtime).",
+  "description": "Dashboard web delle demo mani CPSA (Vite + TypeScript, nessuna dipendenza a runtime).",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

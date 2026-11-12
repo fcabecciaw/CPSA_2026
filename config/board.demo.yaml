@@ -2,7 +2,7 @@
 #
 # This is config/board.yaml specialized for the Thursday demo:
 # - the DPU xmodel pose backend at 512x384,
-# - the web dashboard on 0.0.0.0:8080, with the medical mode as the default,
+# - the web dashboard on 0.0.0.0:8080, booting in the `hologram` hand demo,
 # - evidence and logs under /home/kria/cpsa/runs/.
 #
 # `server` and `supervisor` are the F6 sections consumed by `cpsa-supervisor`.
@@ -164,11 +164,12 @@ server:
   port: 8080
   static_dir: web/dist
   idle_timeout_s: 30
-  video: true                     # live camera frames on /video.mjpeg (F14, demo only)
+  video: true                     # live camera frames on /video.mjpeg (F14, demo only):
+                                  # RGB in medical mode, IR in the hand modes
 
 # F6: mode selected by cpsa-supervisor at startup.
 supervisor:
-  default_mode: medical           # idle | medical
+  default_mode: hologram          # idle | hologram | rps | medical
 
 # Camera-only medical mode (FR-026): the BlueCoins are never scanned or connected,
 # and the vision trigger starts and ends the episodes instead of the IMU.

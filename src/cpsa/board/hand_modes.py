@@ -11,6 +11,10 @@ shared camera before the supervisor starts another mode.
 
 A missing model file fails the start with ``model_missing`` before the camera is
 touched; a missing INZI node fails it with ``camera_missing``.
+
+Both modes also feed ``/video.mjpeg`` (F14) with the preprocessed IR image of
+every analyzed frame, the way the medical mode feeds its RGB frames: the
+dashboard shows the camera on the left and the keypoints on the right.
 """
 
 from __future__ import annotations
@@ -122,6 +126,10 @@ class _HandMode:
         self._running = False
         self._camera_error: str | None = None
         self._errors: list[str] = []
+        # F14: the preprocessed IR image of the frame being handled, handed to
+        # the dashboard's MJPEG stream instead of the RGB camera the medical
+        # mode feeds.
+        self._model_input: NDArray[np.uint8] | None = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -137,6 +145,7 @@ class _HandMode:
                 raise ModeStartError("busy", f"{self.name} mode is already running")
             self._camera_error = None
             self._errors = []
+            self._model_input = None
         if ctx.stop_event.is_set():
             logger.info("Stop requested before %s mode started", self.name)
             return
@@ -203,6 +212,7 @@ class _HandMode:
             self._running = False
             self._camera_error = None
             self._errors = []
+            self._model_input = None
         released = True if perception is None else perception.stop(timeout_s)
         self._release()
         logger.info("%s mode stopped", self.name)
@@ -268,20 +278,60 @@ class _HandMode:
                 height=IR_HEIGHT,
             ),
             DepthModel(scale_m=hands.depth.scale_m, offset_m=hands.depth.offset_m),
-            preprocess=ir_to_input,
+            preprocess=self._preprocess,
             max_fps=hands.camera.fps,
         )
+
+    def _preprocess(self, ir: NDArray[np.uint8]) -> NDArray[np.uint8]:
+        """Preprocess one IR frame and keep the model input for the video stream.
+
+        Runs on the perception thread, just before the estimator, and the same
+        thread calls :meth:`_on_frame` afterwards, so the image offered there is
+        the one of the frame being handled. ``ir_to_input`` returns a new array
+        every time, so the encoder never sees it change under its hands.
+        """
+
+        model_input = ir_to_input(ir)
+        with self._lock:
+            self._model_input = model_input
+        return model_input
 
     def _on_frame(self, frame: HandFrame) -> None:
         with self._lock:
             ctx = self._ctx
             running = self._running
+            model_input = self._model_input
         if ctx is None or not running:
             return
+        self._offer_video(ctx, frame.seq, model_input)
         try:
             self._handle(ctx, frame)
         except Exception:
             logger.exception("%s mode failed on frame %d", self.name, frame.seq)
+
+    def _offer_video(
+        self,
+        ctx: ModeContext,
+        seq: int,
+        image: NDArray[np.uint8] | None,
+    ) -> None:
+        """Offer the preprocessed IR frame to ``/video.mjpeg`` (F14).
+
+        The dashboard shows the IR image the model saw next to the keypoints, so
+        no overlay is drawn on it. The server ignores frames while the stream is
+        disabled or no client is connected; a publisher without live video (the
+        fake publisher, a test double) simply has no ``offer_video_frame``.
+        """
+
+        if image is None:
+            return
+        offer = getattr(ctx.publisher, "offer_video_frame", None)
+        if not callable(offer):
+            return
+        try:
+            offer(seq, image)
+        except Exception:
+            logger.exception("Publisher rejected a hand video frame")
 
     # -- helpers -----------------------------------------------------------
 

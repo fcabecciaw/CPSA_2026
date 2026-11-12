@@ -282,6 +282,12 @@ def test_the_demo_config_enables_the_video_stream() -> None:
     assert load(demo).server.video is True
 
 
+def test_the_demo_config_boots_into_the_hologram() -> None:
+    demo = REPO_ROOT / "config" / "board.demo.yaml"
+
+    assert load(demo).supervisor.default_mode == "hologram"
+
+
 def test_server_and_supervisor_sections_are_loaded() -> None:
     data = valid()
     data["server"] = {

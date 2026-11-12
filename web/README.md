@@ -1,9 +1,16 @@
-# Medical dashboard (`web/`)
+# Hands dashboard (`web/`)
 
-The booth dashboard of the medical demo: a Vite + TypeScript static app that
-the Kria KV260 serves at `/`. It connects to the same origin at `/ws`, renders
-the protocol v1 snapshot and live updates, and works with no network access and
-no CDN (NFR-07, FR-501). The UI copy is Italian, as required by `PRODUCT.md`.
+The booth dashboard of the hands demos: a Vite + TypeScript static app that the
+Kria KV260 serves at `/`. It connects to the same origin at `/ws`, renders the
+protocol v1 snapshot and the two hand streams, and works with no network access
+and no CDN (NFR-07, FR-501). The UI copy is Italian, as required by
+`PRODUCT.md`.
+
+The medical views, their labels and their mock data are gone: this dashboard
+shows only the two hand demos. The server may still publish `medical.*` and
+`log` topics (medical mode still exists on the board); `protocol.ts` keeps
+their types and the store ignores them, so an unexpected topic is never an
+error.
 
 ## Commands
 
@@ -25,145 +32,60 @@ dependencies. `npm run build` produces `web/dist`; the server's
 under the KV260's static handler. All fonts are the system font stack; there
 are no font files, images or scripts fetched from the network.
 
-## Views
+## Layout
 
-1. **Header and control bar** — UNICA/EOLAB identity, connection state with
-   round-trip time, `mode` and `mode_state`, camera/model/errors health, FPS,
-   DPU time and uptime. FPS and DPU come from `status.perception.timing` when
-   the server sends it (`fps`/`dpu_ms` are the fallback), with the camera rate
-   as secondary text next to the analysed one. A compact “Tempi” line lists
-   Decodifica, Pre, DPU, Post, Tracking, Latenza and Scartati (“—” when the
-   server reports `null`). The operator toggle sends `mode.set` for `idle`,
-   `medical`, `hologram` or `rps`; `mode.progress` steps and `error` messages
-   appear in the bar.
-2. **Stato live** — IMU state, the current tag (text plus colour), and whether
-   an episode is active.
-3. **Decisioni** — the latest 20 `medical.decision` messages, newest first and
-   highlighted, each with time, tag, verdict, severity, reason and actuations.
-4. **Ultimo episodio** — contact count, repetition rate, peak severity, labels
-   and the contact table (side, region, duration, hand shape). While an episode
-   is active the panel shows its current state; when it ends the summary
-   replaces it.
-5. **Scheletro** — a `<canvas>` drawing `medical.hands` in the HALFBUST_62
-   layout, mirrored, with the bone list transcribed from
-   `src/cpsa/vision/layouts.py` (body 0–10, nine face anchors 11–19, left hand
-   20–40, right hand 41–61). Points below 0.5 confidence are dimmed and points
-   with confidence 0 are hidden. With no frame it shows “In attesa di
-   episodio…”.
+A slim top bar and one instrument surface split in two panes:
 
-   Under the transparent canvas sits the camera stream (`<img
-   src="/video.mjpeg">`, alt “Video della telecamera”). It is shown only in
-   medical mode with `perception.camera == "ok"`; the image is placed by
-   `SkeletonView` with the same letterbox and the same mirroring as the bones,
-   so keypoints in camera pixels land on the person in the frame. A failed
-   stream shows “Video non disponibile” and retries after 2 s, doubling up to
-   10 s. The mock never opens the stream (`?mock=1` has no backend) and keeps
-   the placeholder.
+1. **Top bar** — the `CPSA` wordmark, the segmented mode switch
+   (`Ologramma` | `Sasso-carta-forbice`), the connection dot, and the analysed
+   frames per second and their processing time. While Sasso-carta-forbice runs
+   the score rests in the bar (`Tu 2 · Tavolo 1`, plus the draws once there is
+   one).
+2. **Left pane** — `/video.mjpeg` (F14 the IR camera), always in the page,
+   letterboxed 4:3 with `object-fit: contain`. With no frames it shows
+   “In attesa della telecamera…”; a broken stream shows “Video non
+   disponibile” and retries after 1 s, doubling up to 10 s. The pane follows
+   the mode: while no hand mode runs, no frames exist, so the placeholder is
+   back instead of a frozen last frame.
+3. **Right pane** — `hologram` mode draws `hologram.hands` as the existing
+   glowing 3D hand on canvas 2D, with the hand count and the frame size in a
+   small footer. `rps` mode draws `rps.state.hand.kpts2d` as a 2D skeleton,
+   zoomed to fill the pane, with the countdown (“Sasso… carta… forbice!”) and
+   the result banner over it and the player's gesture next to the board's move
+   at the bottom. Any other mode shows a calm empty state.
 
-   Two further centre views take its place while their mode runs (both are
-   selected by `status.mode`): **Ologramma** draws `hologram.hands` with a
-   hand-written perspective projection on canvas 2D — a virtual camera tilted
-   30° and orbiting, cyan glow, spheres for joints, lines for bones, a faint
-   grid on the table plane and scanline overlay; a joint without a lifted depth
-   uses the hand's median depth. **Sasso-carta-forbice** shows `rps.state`: the
-   “Sasso… carta… forbice!” countdown, the player's gesture beside the board's
-   move, the result banner, the score and a small IR skeleton preview from
-   `kpts2d`.
+The top-bar numbers come from the streams themselves: in `hologram` mode the
+frame rate is measured over the last 2 s of `hologram.hands` arrivals and the
+latency is its `timing.total_ms`; in `rps` mode they come from
+`status.perception` (`timing.analyzed_fps`/`latency_ms` when present,
+`fps`/`dpu_ms` otherwise), because `rps.state` carries no timing.
 
-Trigger source: when `medical.state.trigger` is `vision` (camera-only mode), the live
-status shows an "Attivazione: telecamera" tile and the IMU tile reads "Non usato (solo
-telecamera)". With `imu`, or when the field is absent (older server), the display is unchanged.
+## Mock
 
-## Protocol handling
+`?mock=1` runs the dev-only stand-in (`src/mock.ts`, removed from the
+production bundle by the `import.meta.env.DEV` guard). It replays the `hello`
+and `status` fixtures, and synthesises both hand streams and a fake IR picture
+for the camera pane; the notice line says the data is fake.
 
-- `src/protocol.ts` is written by hand from `docs/protocol/v1/*.schema.json`.
-  The parser checks the envelope and each known payload, ignores unknown
-  message types and unknown fields (IF-103), and returns `invalid` for
-  malformed known messages so the connection bar can report them.
-  `status.perception.timing` (F13) is additive and parsed leniently: missing,
-  `null` or wrongly shaped → `null`, a single bad stage → `null` for that stage,
-  a bad `dropped` → 0, and unknown extra keys are ignored. A malformed
-  load-bearing field (e.g. `status.mode`) still makes the message `invalid`.
-  `medical.hands.seq` (F14) is an optional frame counter, `null` when absent.
-- `src/client.ts` connects to `ws://<host>/ws` (or `wss:` on HTTPS) and stamps
-  every command (`ping`, `mode.set`) with a per-connection `seq` starting at 1
-  and reset on reconnect, so `error.ref_seq` can identify the command it
-  answers. It sends `ping` every 10 s and measures `pong` RTT, and reconnects
-  with exponential backoff from 0.5 s to 5 s. Reconnecting does not reset the
-  rendering state: the server sends a fresh snapshot (FR-504), and the decision
-  feed keeps its local history (seeded from `medical.state.last_decision` after
-  a reload).
-- `src/state.ts` bounds the decision feed to 20 entries and, when `status.mode`
-  leaves `medical` (idle, lab, or a failed start), resets the IMU, tag, episode
-  and skeleton tiles to their “not active” copy; the next `medical.*` states
-  fill them again. A finished episode also clears the skeleton. It remembers
-  the `seq` of the last `mode.set`; an `error` whose `ref_seq` matches it is
-  shown next to the mode buttons (other errors go to the notice line).
-- The protocol exposes a single `imu` state for the wrist IMUs. The dashboard
-  labels the tile “IMU L/R” and notes that the state is the one reported by the
-  protocol; it does not invent per-side values.
+```sh
+# hologram, Sasso-carta-forbice; `phase` freezes a round for a screenshot
+http://localhost:5173/?mock=1&mode=hologram
+http://localhost:5173/?mock=1&mode=rps&phase=countdown&count=2
+http://localhost:5173/?mock=1&mode=rps&phase=result&outcome=win
+http://localhost:5173/?mock=1&mode=idle
+```
 
-## Development mock
-
-`?mock=1` (development only) imports `docs/protocol/v1/examples` with
-`import.meta.glob` and replays them through a WebSocket-like object. It starts
-with an active episode, cycles decisions through the four tags, animates a
-plausible HALFBUST_62 pose at the fixture's 1.4 Hz, ends the episode after 22 s
-with the example contact summary, then starts a new one. It also answers
-`ping` with `pong` and implements `mode.set`/`mode.progress`, including the
-`busy` error; leaving `medical` drops its `medical.*` states, so the tiles go
-back to their “not active” copy. It reports plausible F13 `timing` values so
-the “Tempi” line and the FPS caption can be built without a server, and it
-never opens the video stream: the skeleton panel keeps its placeholder. The
-pose is synthesized in `src/mock.ts` because the example frame has all
-keypoints at one point and would not show the skeleton.
-
-The mock is behind `import.meta.env.DEV` and a dynamic `import()`. Vite removes
-the branch and the module from the production bundle; `web/dist` contains no
-fixture data and no mock badge.
-
-`?mock=1&trigger=vision` replays the camera-only variant (`trigger: vision`, `imu: n/a`,
-camera and vision lines in the connection log).
-
-`?mock=1&mode=hologram` and `?mock=1&mode=rps` start directly in a hand-demo
-mode, and the mode buttons switch to them at any time: the mock then publishes
-`hologram.hands` at 30 Hz (a hand that opens and half-closes, with one joint
-whose depth is missing so the median-depth rule is exercised) or plays
-`rps.state` rounds (`ready`, countdown 3·2·1, `shoot`, `result`, then a new
-round, with an `unclear` round every fifth one). Leaving those modes stops the
-stream and drops the snapshot, so the view falls back to its empty copy.
-
-## Layout and accessibility
-
-- Designed for 1280×720 and 1920×1080 booth screens; below 1180 px it falls
-  back to two columns and below 780 px to one.
-- Type sizes scale with the viewport, with a further increase at ≥1600 px for
-  onlookers at 2–3 m. All text/background pairs in the palette are above the
-  WCAG AA 4.5:1 contrast threshold (most above 8:1).
-- Severity is always written out (e.g. “Pericoloso”), never colour alone; the
-  newest decision also carries the word “ultima”. The skeleton canvas has an
-  `aria-label` describing the number of visible points, and its stream image an
-  `alt` (“Video della telecamera”) that is hidden with the image; the “Video non
-  disponibile” placeholder is real text, so it is read out. The mode buttons
-  expose `aria-pressed` and are disabled during a switch.
-- No animations or flashing patterns are used.
+`count=3|2|1`, `outcome=win|lose|draw|unclear` refine a frozen round; `video=0`
+leaves the camera pane on its placeholder.
 
 ## Files
 
-```text
-web/
-  index.html          static shell, Italian copy
-  vite.config.ts      base "./", dev filesystem access for the mock
-  tsconfig.json       strict TypeScript, no emit
-  src/
-    protocol.ts       protocol v1 types and validating parser
-    client.ts         WebSocket connect, ping, backoff reconnect
-    state.ts          snapshot state and decision history (max 20)
-    views.ts          header, health, live tiles, feed, episode panel
-    skeleton.ts       HALFBUST_62 canvas renderer
-    labels.ts         Italian labels and formatters
-    dom.ts            small text-safe DOM helpers
-    mock.ts           dev-only fixture replay and synthetic pose
-    main.ts           wiring
-    styles.css        booth layout and palette
-```
+- `src/main.ts` — boot, mode switch, stream routing;
+- `src/views.ts` — top bar, notice line, score;
+- `src/metrics.ts` — the fps and latency readout;
+- `src/video.ts` — the MJPEG pane with its retry;
+- `src/hologram.ts`, `src/rps.ts` — the two right-hand views;
+- `src/state.ts` — the last snapshot of each stream;
+- `src/protocol.ts` — protocol v1 types and validation (unchanged interfaces);
+- `src/labels.ts` — Italian copy and number formatting;
+- `src/mock.ts` — the dev-only stand-in.

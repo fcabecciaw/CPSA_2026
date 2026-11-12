@@ -1,53 +1,55 @@
 /**
- * Sasso-carta-forbice view (T5): `rps.state` as a booth-facing game panel.
+ * Sasso-carta-forbice view (T5): the hand keypoints, the countdown and the
+ * result, as one booth-facing panel.
  *
- * The countdown, the player's gesture, the board's move, the result banner and
- * the score are plain DOM; the small IR skeleton preview is canvas 2D, drawn
- * from the same 21 points the classifier saw (`hand.kpts2d`).
+ * The skeleton is canvas 2D, drawn from `rps.state.hand.kpts2d` and scaled up
+ * so the booth can read the hand from a distance; the countdown and the result
+ * are DOM text over the canvas.
  */
 
-import { el } from "./dom";
 import { HAND21_BONES } from "./hologram";
 import {
   RPS_COUNTDOWN_WORDS,
-  RPS_GESTURE_ICON,
   RPS_GESTURE_LABEL,
   RPS_LABELS,
   RPS_OUTCOME_LABEL,
-  RPS_PHASE_LABEL,
 } from "./labels";
-import type { Keypoint, RpsScore, RpsStatePayload } from "./protocol";
+import type { Keypoint, RpsStatePayload } from "./protocol";
 
 const COLORS = {
-  background: "#070d17",
-  bone: "rgba(143, 208, 255, 0.6)",
-  joint: "#bff4ff",
+  background: "#050b14",
+  bone: "rgba(126, 232, 255, 0.62)",
+  joint: "#c8f6ff",
+  glow: "rgba(56, 214, 255, 0.55)",
 } as const;
 
 /** Empty slot shown before a gesture is known. */
 const NO_GESTURE = "—";
 
+/** The hand spans this share of the pane's shorter side. */
+const HAND_SHARE = 0.6;
+/** The hand sits a little below centre, under the countdown and result. */
+const HAND_CENTRE = 0.56;
+
+/** How loudly the callout reads: a hint, a countdown numeral, or the result. */
+type Emphasis = "calm" | "countdown" | "shoot" | "result";
+
 export interface RpsElements {
   count: HTMLElement;
-  phase: HTMLElement;
-  playerIcon: HTMLElement;
-  playerLabel: HTMLElement;
-  boardIcon: HTMLElement;
-  boardLabel: HTMLElement;
-  score: HTMLElement;
+  player: HTMLElement;
+  board: HTMLElement;
+  duel: HTMLElement;
   canvas: HTMLCanvasElement;
   empty: HTMLElement;
 }
-
-type ScoreKey = keyof RpsScore;
 
 export class RpsView {
   private readonly elements: RpsElements;
   private readonly context: CanvasRenderingContext2D;
   private readonly observer: ResizeObserver | null;
-  private readonly scoreValues = new Map<ScoreKey, HTMLElement>();
 
   private state: RpsStatePayload | null = null;
+  private active = false;
 
   constructor(elements: RpsElements) {
     const context = elements.canvas.getContext("2d");
@@ -56,19 +58,6 @@ export class RpsView {
     }
     this.elements = elements;
     this.context = context;
-
-    const rows: Array<[string, ScoreKey]> = [
-      [RPS_LABELS.player, "player"],
-      [RPS_LABELS.board, "board"],
-      [RPS_LABELS.draws, "draws"],
-    ];
-    for (const [label, key] of rows) {
-      const value = el("span", "rps-score-value", "0");
-      const item = el("li", "rps-score-item");
-      item.append(el("span", "rps-score-label", label), value);
-      elements.score.append(item);
-      this.scoreValues.set(key, value);
-    }
 
     this.observer =
       typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => this.draw());
@@ -83,6 +72,14 @@ export class RpsView {
     this.render();
   }
 
+  /** Draws only while the panel is visible; the mode switch calls this. */
+  setActive(active: boolean): void {
+    this.active = active;
+    if (active) {
+      this.draw();
+    }
+  }
+
   destroy(): void {
     this.observer?.disconnect();
     window.removeEventListener("resize", this.onWindowResize);
@@ -91,56 +88,35 @@ export class RpsView {
   private readonly onWindowResize = (): void => this.draw();
 
   private render(): void {
-    const { count, phase, playerIcon, playerLabel, boardIcon, boardLabel, empty } = this.elements;
+    const { count, player, board, duel, empty } = this.elements;
     const state = this.state;
+    const view = describe(state);
 
-    if (state === null) {
-      count.textContent = RPS_LABELS.waiting;
-      phase.textContent = "";
-      playerIcon.textContent = RPS_GESTURE_ICON.none;
-      playerLabel.textContent = NO_GESTURE;
-      boardIcon.textContent = RPS_GESTURE_ICON.none;
-      boardLabel.textContent = NO_GESTURE;
-      delete count.dataset.outcome;
-      empty.hidden = false;
-      this.renderScore(null);
-      this.draw();
-      return;
-    }
-
-    count.textContent = countText(state);
-    phase.textContent = RPS_PHASE_LABEL[state.phase];
-    if (state.outcome === null) {
+    count.textContent = view.text;
+    count.dataset.emphasis = view.emphasis;
+    if (view.outcome === "none") {
       delete count.dataset.outcome;
     } else {
-      // The callout doubles as the result banner, tinted by the outcome.
-      count.dataset.outcome = state.outcome;
+      count.dataset.outcome = view.outcome;
     }
 
-    const player = state.player;
-    playerIcon.textContent = player === null ? RPS_GESTURE_ICON.none : RPS_GESTURE_ICON[player];
-    playerLabel.textContent = player === null ? NO_GESTURE : RPS_GESTURE_LABEL[player];
+    const gesturePlayer = state?.player ?? null;
+    const gestureBoard = state?.board ?? null;
+    player.textContent = `${RPS_LABELS.player}: ${
+      gesturePlayer === null ? NO_GESTURE : RPS_GESTURE_LABEL[gesturePlayer]
+    }`;
+    board.textContent = `${RPS_LABELS.board}: ${
+      gestureBoard === null ? NO_GESTURE : RPS_GESTURE_LABEL[gestureBoard]
+    }`;
+    duel.hidden = gesturePlayer === null && gestureBoard === null;
 
-    const board = state.board;
-    boardIcon.textContent = board === null ? RPS_GESTURE_ICON.none : RPS_GESTURE_ICON[board];
-    boardLabel.textContent = board === null ? NO_GESTURE : RPS_GESTURE_LABEL[board];
-
-    empty.hidden = state.hand !== null && visibleCount(state.hand.kpts2d) > 0;
-    this.renderScore(state.score);
-    // The canvas label spells out the round: the icons and the count are
-    // decorative to a screen reader, which only reads this summary.
+    const points = state?.hand?.kpts2d ?? [];
+    empty.hidden = visibleAlpha(points) > 0;
     this.elements.canvas.setAttribute(
       "aria-label",
-      `${RPS_LABELS.preview}: ${count.textContent}, ` +
-        `${playerLabel.textContent} ${RPS_LABELS.versus} ${boardLabel.textContent}.`,
+      `${RPS_LABELS.player} ${player.textContent}, ${RPS_LABELS.board} ${board.textContent}, ${view.text}`,
     );
     this.draw();
-  }
-
-  private renderScore(score: RpsScore | null): void {
-    for (const [key, node] of this.scoreValues) {
-      node.textContent = String(score === null ? 0 : score[key]);
-    }
   }
 
   private draw(): void {
@@ -165,13 +141,14 @@ export class RpsView {
     context.fillRect(0, 0, rect.width, rect.height);
 
     const points = this.state?.hand?.kpts2d ?? [];
-    const mapper = previewMapper(points, rect);
+    const mapper = this.active ? handMapper(points, rect) : null;
     if (mapper === null) {
       return;
     }
 
-    const unit = Math.min(rect.width, rect.height);
-    context.lineWidth = Math.max(1, unit * 0.012);
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    context.lineWidth = Math.max(2, mapper.span * 0.014);
     context.strokeStyle = COLORS.bone;
     for (const [first, second] of HAND21_BONES) {
       const from = points[first];
@@ -179,8 +156,8 @@ export class RpsView {
       if (from === undefined || to === undefined) {
         continue;
       }
-      const alpha = Math.min(visibleAlpha(from), visibleAlpha(to));
-      if (alpha === 0) {
+      const alpha = Math.min(pointAlpha(from), pointAlpha(to));
+      if (alpha <= 0) {
         continue;
       }
       context.globalAlpha = alpha;
@@ -192,61 +169,85 @@ export class RpsView {
 
     context.globalAlpha = 1;
     context.fillStyle = COLORS.joint;
+    context.shadowColor = COLORS.glow;
+    context.shadowBlur = mapper.span * 0.05;
+    const radius = Math.max(3, mapper.span * 0.022);
     for (const point of points) {
-      const alpha = visibleAlpha(point);
-      if (alpha === 0) {
+      const alpha = pointAlpha(point);
+      if (alpha <= 0) {
         continue;
       }
       context.globalAlpha = alpha;
       context.beginPath();
-      context.arc(mapper.x(point[0]), mapper.y(point[1]), Math.max(1.5, unit * 0.014), 0, Math.PI * 2);
+      context.arc(mapper.x(point[0]), mapper.y(point[1]), radius, 0, Math.PI * 2);
       context.fill();
     }
+    context.shadowBlur = 0;
     context.globalAlpha = 1;
   }
 }
 
-/** Countdown word for the current step; the phase copy everywhere else. */
-function countText(state: RpsStatePayload): string {
+interface Callout {
+  text: string;
+  emphasis: Emphasis;
+  outcome: "none" | "win" | "lose" | "draw" | "unclear";
+}
+
+/** Countdown word, result banner or invitation, and how large to show it. */
+function describe(state: RpsStatePayload | null): Callout {
+  if (state === null || state.phase === "waiting") {
+    return { text: RPS_LABELS.waiting, emphasis: "calm", outcome: "none" };
+  }
   switch (state.phase) {
-    case "waiting":
-      return RPS_LABELS.waiting;
     case "ready":
-      return RPS_LABELS.ready;
-    case "countdown":
-      return state.count === null
-        ? RPS_LABELS.ready
-        : (RPS_COUNTDOWN_WORDS[3 - state.count] ?? RPS_LABELS.ready);
+      return { text: RPS_LABELS.ready, emphasis: "calm", outcome: "none" };
+    case "countdown": {
+      const word =
+        state.count === null
+          ? RPS_LABELS.ready
+          : (RPS_COUNTDOWN_WORDS[3 - state.count] ?? RPS_LABELS.ready);
+      return { text: word, emphasis: "countdown", outcome: "none" };
+    }
     case "shoot":
-      return RPS_LABELS.shoot;
+      return { text: RPS_LABELS.shoot, emphasis: "shoot", outcome: "none" };
     case "result":
-      return state.outcome === null ? RPS_LABELS.shoot : RPS_OUTCOME_LABEL[state.outcome];
+      return state.outcome === null
+        ? { text: RPS_LABELS.shoot, emphasis: "shoot", outcome: "none" }
+        : {
+            text: RPS_OUTCOME_LABEL[state.outcome],
+            emphasis: "result",
+            outcome: state.outcome,
+          };
   }
 }
 
-function visibleCount(points: Keypoint[]): number {
-  return points.filter((point) => visibleAlpha(point) > 0).length;
+/** Confidence of the most visible keypoint; `0` when the hand is not visible. */
+function visibleAlpha(points: Keypoint[]): number {
+  return points.reduce((best, point) => Math.max(best, pointAlpha(point)), 0);
 }
 
-function visibleAlpha(point: Keypoint): number {
+function pointAlpha(point: Keypoint): number {
   const confidence = point[2] ?? 0;
   return confidence >= 0.5 ? 1 : confidence >= 0.2 ? 0.5 : confidence > 0 ? 0.2 : 0;
 }
 
-interface PointMapper {
+interface HandMapper {
+  /** Pixel length the hand spans after the zoom, for line widths. */
+  span: number;
   x: (u: number) => number;
   y: (v: number) => number;
 }
 
 /**
- * Fits the visible joints into the canvas with a 20 % margin, mirrored like the
- * medical skeleton so the preview reads like a mirror to the player.
+ * Zooms the visible keypoints into the pane. The booth reads the hand, not the
+ * camera frame, so the skeleton is not drawn in IR pixels: it fills
+ * `HAND_SHARE` of the shorter side and sits below the countdown.
  */
-function previewMapper(
+function handMapper(
   points: Keypoint[],
   rect: { width: number; height: number },
-): PointMapper | null {
-  const visible = points.filter((point) => visibleAlpha(point) > 0);
+): HandMapper | null {
+  const visible = points.filter((point) => pointAlpha(point) > 0);
   if (visible.length === 0) {
     return null;
   }
@@ -262,13 +263,15 @@ function previewMapper(
     maxV = Math.max(maxV, point[1]);
   }
 
+  const span = Math.max(maxU - minU, maxV - minV, 1) * 1.15;
+  const scale = (Math.min(rect.width, rect.height) * HAND_SHARE) / span;
   const centreU = (minU + maxU) / 2;
   const centreV = (minV + maxV) / 2;
-  const span = Math.max(maxU - minU, maxV - minV, 1) * 1.2;
-  const scale = Math.min(rect.width, rect.height) / span;
-
+  const centreX = rect.width / 2;
+  const centreY = rect.height * HAND_CENTRE;
   return {
-    x: (u: number) => rect.width / 2 - (u - centreU) * scale,
-    y: (v: number) => rect.height / 2 + (v - centreV) * scale,
+    span: span * scale,
+    x: (u: number) => centreX + (u - centreU) * scale,
+    y: (v: number) => centreY + (v - centreV) * scale,
   };
 }

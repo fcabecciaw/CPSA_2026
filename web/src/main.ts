@@ -9,32 +9,29 @@ import {
 } from "./client";
 import { byId } from "./dom";
 import { HologramView } from "./hologram";
+import { MetricsTracker } from "./metrics";
 import { MODES, type Mode } from "./protocol";
 import { RpsView } from "./rps";
-import { SkeletonView } from "./skeleton";
 import { DashboardStore, type StateRegion } from "./state";
 import {
   collectElements,
   renderAll,
   renderConnection,
-  renderEpisode,
-  renderFeed,
-  renderLive,
-  renderLog,
+  renderMetrics,
   renderMode,
   renderNotice,
-  shouldStreamVideo,
+  type RenderInput,
 } from "./views";
+import { VideoFeed, type VideoSource } from "./video";
 
 const elements = collectElements();
 const store = new DashboardStore();
-const skeleton = new SkeletonView(
-  byId<HTMLCanvasElement>("skeleton"),
-  byId("canvas-empty"),
-  byId("skeleton-meta"),
-  byId<HTMLImageElement>("video"),
-  byId("video-note"),
-);
+const metrics = new MetricsTracker();
+
+const videoImage = byId<HTMLImageElement>("video");
+const videoNote = byId("video-note");
+let video: VideoSource = new VideoFeed(videoImage, videoNote);
+
 const hologram = new HologramView(
   byId<HTMLCanvasElement>("hologram"),
   byId("hologram-empty"),
@@ -42,46 +39,19 @@ const hologram = new HologramView(
 );
 const rps = new RpsView({
   count: byId("rps-count"),
-  phase: byId("rps-phase"),
-  playerIcon: byId("rps-player-icon"),
-  playerLabel: byId("rps-player"),
-  boardIcon: byId("rps-board-icon"),
-  boardLabel: byId("rps-board"),
-  score: byId("rps-score"),
+  player: byId("rps-player"),
+  board: byId("rps-board"),
+  duel: byId("rps-duel"),
   canvas: byId<HTMLCanvasElement>("rps-canvas"),
   empty: byId("rps-empty"),
 });
 
-/** The three centre views; exactly one is visible at a time (T5). */
-const views = {
-  medical: byId("view-medical"),
+/** The three right-hand panes; exactly one is visible at a time (T5). */
+const panes = {
   hologram: byId("view-hologram"),
   rps: byId("view-rps"),
+  idle: byId("view-idle"),
 };
-
-/**
- * T5: `hologram` and `rps` replace the medical skeleton panel while they run;
- * idle and lab keep showing it, as the dashboard always has.
- */
-function refreshView(): void {
-  const mode: Mode | null = store.state.status?.mode ?? store.state.modeProgress?.mode ?? null;
-  const hologramVisible = mode === "hologram";
-  views.medical.hidden = hologramVisible || mode === "rps";
-  views.hologram.hidden = !hologramVisible;
-  views.rps.hidden = mode !== "rps";
-  hologram.setActive(hologramVisible);
-}
-
-/** `?mock=1` has no backend, so it never opens the F14 stream. */
-let mockActive = false;
-
-/**
- * F14: the stream follows the status snapshot (medical mode, camera ok) and is
- * always off in the mock, where the panel keeps the placeholder.
- */
-function refreshVideo(): void {
-  skeleton.setVideo(!mockActive && shouldStreamVideo(store.state));
-}
 
 const socketUrl = defaultSocketUrl();
 let connection: ConnectionInfo = {
@@ -91,13 +61,74 @@ let connection: ConnectionInfo = {
   retryInMs: null,
   rttMs: null,
 };
+let connectionPhase: ConnectionPhase = "connecting";
 let sourceLabel: string | null = null;
 let transportNotice: string | null = null;
 let noticeTimer: ReturnType<typeof setTimeout> | null = null;
-let connectionPhase: ConnectionPhase = "connecting";
+let lastMode: Mode | null = null;
+let streaming = false;
+
+function input(): RenderInput {
+  const mode = store.mode;
+  return {
+    state: store.state,
+    connection,
+    mode,
+    readout: metrics.read(mode),
+    sourceLabel,
+    transportNotice,
+  };
+}
+
+/** Shows the pane of the current mode; idle (and anything else) gets the invitation. */
+function refreshView(): void {
+  const mode = store.mode;
+  const hologramVisible = mode === "hologram";
+  panes.hologram.hidden = !hologramVisible;
+  panes.rps.hidden = mode !== "rps";
+  panes.idle.hidden = hologramVisible || mode === "rps";
+  hologram.setActive(hologramVisible);
+  rps.setActive(mode === "rps");
+}
+
+/**
+ * F14: the camera pane follows the mode, not the connection alone. While no
+ * hand mode runs, no frames are produced, so the pane shows its placeholder
+ * instead of a frozen last frame.
+ */
+function refreshVideo(): void {
+  const mode = store.mode;
+  const wanted =
+    connection.phase === "open" && (mode === "hologram" || mode === "rps");
+  if (wanted === streaming) {
+    return;
+  }
+  streaming = wanted;
+  if (wanted) {
+    video.start();
+  } else {
+    video.stop();
+  }
+}
+
+/** The bar, the pane and the notice line all follow the `status` snapshot. */
+function refreshMode(): void {
+  const mode = store.mode;
+  if (mode !== lastMode) {
+    // A new mode starts a new stream: the previous frame arrivals are not a
+    // frame rate any more.
+    metrics.reset();
+    lastMode = mode;
+  }
+  refreshVideo();
+  refreshView();
+  renderMode(elements, input());
+  renderMetrics(elements, input().readout);
+  renderNotice(elements, input());
+}
 
 function refreshNotice(): void {
-  renderNotice(elements, store.state, sourceLabel, transportNotice);
+  renderNotice(elements, input());
 }
 
 function showTransportNotice(text: string): void {
@@ -117,36 +148,20 @@ function renderRegions(regions: StateRegion[]): void {
   for (const region of regions) {
     switch (region) {
       case "mode":
-        renderMode(elements, store.state, connection);
-        refreshNotice();
-        refreshView();
-        break;
-      case "live":
-        renderLive(elements, store.state);
-        break;
-      case "feed":
-        renderFeed(elements, store.state);
-        break;
-      case "episode":
-        renderEpisode(elements, store.state);
-        break;
-      case "hands":
-        skeleton.setHands(store.state.hands);
-        break;
-      case "logs":
-        renderLog(elements, store.state);
+        refreshMode();
         break;
       case "hologram":
         hologram.setFrame(store.state.hologram);
+        renderMetrics(elements, input().readout);
         break;
       case "rps":
         rps.setState(store.state.rps);
+        // The score lives in the bar, so the bar follows the round.
+        renderMode(elements, input());
+        renderMetrics(elements, input().readout);
         break;
     }
   }
-  // The stream follows the mode/camera state, not the hands stream: a camera
-  // that stops reporting must take the video away too.
-  refreshVideo();
 }
 
 async function boot(): Promise<void> {
@@ -159,7 +174,7 @@ async function boot(): Promise<void> {
     const mock = await import("./mock");
     factory = mock.createMockSocket;
     sourceLabel = mock.MOCK_BADGE;
-    mockActive = true;
+    video = mock.createMockVideo(videoImage, videoNote);
   }
 
   const client = new DashboardClient({
@@ -167,7 +182,14 @@ async function boot(): Promise<void> {
     factory,
     handlers: {
       onMessage: (message) => {
-        renderRegions(store.apply(message, Date.now()));
+        const now = Date.now();
+        if (message.type === "status") {
+          metrics.status(message.data);
+        }
+        if (message.type === "hologram.hands") {
+          metrics.frame(now, message.data.timing.total_ms);
+        }
+        renderRegions(store.apply(message, now));
       },
       onConnection: (info) => {
         if (info.phase === "open" && connectionPhase !== "open") {
@@ -176,8 +198,9 @@ async function boot(): Promise<void> {
         }
         connectionPhase = info.phase;
         connection = info;
+        refreshVideo();
         renderConnection(elements, info);
-        renderMode(elements, store.state, info);
+        renderMode(elements, input());
       },
       onNotice: showTransportNotice,
     },
@@ -192,14 +215,13 @@ async function boot(): Promise<void> {
       const seq = client.sendMode(requested);
       if (seq !== null) {
         store.markModeSent(seq);
-        renderMode(elements, store.state, connection);
+        renderMode(elements, input());
       }
     });
   }
 
-  renderAll(elements, store.state, connection, sourceLabel, transportNotice);
+  renderAll(elements, input());
   refreshView();
-  refreshVideo();
   client.start();
 }
 

@@ -11,7 +11,9 @@ from typing import Any
 
 import numpy as np
 import pytest
+from numpy.typing import NDArray
 
+from cpsa.adapters.camera.irdepth import ir_to_input
 from cpsa.application.config import (
     Config,
     HandsConfig,
@@ -58,6 +60,17 @@ class FakePublisher:
     def last(self, message_type: str) -> Mapping[str, Any] | None:
         payloads = self.payloads(message_type)
         return payloads[-1] if payloads else None
+
+
+class VideoPublisher(FakePublisher):
+    """A publisher that also accepts the F14 video frames of the hand modes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.video: list[tuple[int, NDArray[np.uint8]]] = []
+
+    def offer_video_frame(self, seq: int, image: NDArray[np.uint8]) -> None:
+        self.video.append((int(seq), np.array(image, copy=True)))
 
 
 class FakeSource:
@@ -234,6 +247,37 @@ def test_hologram_publishes_frames_and_reports_health(tmp_path: Path) -> None:
     assert len(publisher.payloads("hologram.hands")) == published
 
 
+def test_hologram_feeds_the_preprocessed_ir_to_the_video_stream(tmp_path: Path) -> None:
+    config = config_with(tmp_path)
+    source = FakeSource()
+    mode = HologramMode(
+        config,
+        source_factory=lambda _hands: source,
+        estimator_factory=lambda _hands: FakeEstimator(),
+    )
+    publisher = VideoPublisher()
+    ctx = context(config, publisher)
+
+    mode.start(ctx)
+    try:
+        push_until(source, lambda: bool(publisher.video))
+        seq, image = publisher.video[-1]
+
+        assert seq >= 1
+        assert image.shape == (HEIGHT, WIDTH, 3)
+        assert image.dtype == np.uint8
+        expected = ir_to_input(new_ir_frame(seq).ir)
+        np.testing.assert_array_equal(image, expected)
+    finally:
+        assert mode.stop(1.0) is True
+
+    # The stream stops with the mode: no frame after stop().
+    offered = len(publisher.video)
+    push(source, 99)
+    time.sleep(0.05)
+    assert len(publisher.video) == offered
+
+
 def test_hologram_reports_a_missing_camera(tmp_path: Path) -> None:
     config = config_with(tmp_path)
     source = FakeSource(FileNotFoundError("/dev/video0"))
@@ -374,6 +418,21 @@ def test_rps_starts_in_waiting_and_plays_a_round(tmp_path: Path) -> None:
         assert mode.stop(1.0) is True
 
     assert source.stops == 1
+
+
+def test_rps_feeds_the_ir_to_the_video_stream_too(tmp_path: Path) -> None:
+    mode, source, _, _, _ = rps_mode(tmp_path)
+    publisher = VideoPublisher()
+    ctx = context(config_with(tmp_path), publisher)
+
+    mode.start(ctx)
+    try:
+        push_until(source, lambda: bool(publisher.video))
+        _, image = publisher.video[-1]
+        assert image.shape == (HEIGHT, WIDTH, 3)
+        assert image.dtype == np.uint8
+    finally:
+        assert mode.stop(1.0) is True
 
 
 def test_rps_reports_a_missing_classifier_before_touching_the_camera(tmp_path: Path) -> None:

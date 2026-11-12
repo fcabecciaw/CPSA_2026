@@ -6,43 +6,16 @@
     <meta name="color-scheme" content="dark" />
     <meta
       name="description"
-      content="Dashboard della demo medica CPSA: gesti mano-viso rilevati sulla Kria KV260."
+      content="CPSA: ologramma 3D della mano e sasso-carta-forbice rilevati sulla Kria KV260."
     />
-    <title>Demo medica · UNICA EOLAB</title>
+    <title>CPSA · Ologramma e sasso-carta-forbice</title>
   </head>
   <body>
     <div class="app">
-      <header class="masthead">
-        <div class="identity">
-          <p class="brand">
-            <span class="brand-unica">UNICA</span>
-            <span class="brand-sep" aria-hidden="true">·</span>
-            <span class="brand-eolab">EOLAB</span>
-          </p>
-          <p class="affiliation">Università di Cagliari</p>
-        </div>
-        <div class="headline">
-          <h1>Demo medica</h1>
-          <p class="subtitle">Gesti mano-viso rilevati sulla Kria KV260</p>
-        </div>
-        <div class="connection" role="status" aria-live="polite">
-          <span id="conn-dot" class="dot dot-connecting" aria-hidden="true"></span>
-          <div class="connection-copy">
-            <p id="conn-text" class="conn-text">Connessione…</p>
-            <p id="conn-detail" class="conn-detail"></p>
-          </div>
-        </div>
-      </header>
+      <header class="topbar">
+        <p class="wordmark">CPSA</p>
 
-      <section class="controlbar" aria-labelledby="mode-label">
-        <div class="mode-group" role="group" aria-labelledby="mode-label">
-          <span id="mode-label" class="control-label">Modalità</span>
-          <button type="button" id="mode-idle" data-mode="idle" aria-pressed="false">
-            Idle
-          </button>
-          <button type="button" id="mode-medical" data-mode="medical" aria-pressed="false">
-            Medicale
-          </button>
+        <div class="modes" role="group" aria-label="Modalità">
           <button type="button" id="mode-hologram" data-mode="hologram" aria-pressed="false">
             Ologramma
           </button>
@@ -50,131 +23,66 @@
             Sasso-carta-forbice
           </button>
         </div>
-        <p id="mode-status" class="mode-status">In attesa di connessione…</p>
-        <p id="mode-error" class="mode-error" role="status" aria-live="polite"></p>
-        <ul id="health" class="health" aria-label="Salute del sistema"></ul>
-        <ul id="timing" class="timing" aria-label="Tempi di elaborazione"></ul>
-        <p id="notice" class="notice" role="status" aria-live="polite"></p>
-      </section>
 
-      <main class="layout">
-        <div class="side side-left">
-          <section class="panel live-panel" aria-labelledby="live-title">
-            <header class="panel-head">
-              <h2 id="live-title">Stato live</h2>
-            </header>
-            <div id="live-tiles" class="tiles"></div>
-          </section>
-
-          <section class="panel episode-panel" aria-labelledby="episode-title">
-            <header class="panel-head">
-              <h2 id="episode-title">Ultimo episodio</h2>
-              <div id="episode-badge" class="episode-badge"></div>
-            </header>
-            <div id="episode-body" class="episode-body"></div>
-          </section>
+        <div class="readout">
+          <span class="conn" id="conn">
+            <span id="conn-dot" class="dot dot-connecting" aria-hidden="true"></span>
+            <span id="conn-text" class="conn-text">Connessione…</span>
+          </span>
+          <span class="gauge" id="fps" title="Fotogrammi analizzati al secondo">— fps</span>
+          <span class="gauge" id="latency" title="Tempo di elaborazione del fotogramma"
+            >— ms</span
+          >
+          <span class="score" id="rps-score" aria-label="Punteggio" hidden></span>
         </div>
+      </header>
 
-        <section class="panel skeleton-panel" id="view-medical" aria-labelledby="skeleton-title">
-          <header class="panel-head">
-            <h2 id="skeleton-title">Scheletro</h2>
-            <span class="hint">HALFBUST_62 · specchiato</span>
-          </header>
-          <div class="canvas-wrap">
-            <img id="video" class="video" alt="Video della telecamera" hidden />
-            <canvas
-              id="skeleton"
-              role="img"
-              aria-label="Scheletro non disponibile: in attesa di dati."
-            ></canvas>
-            <p class="canvas-empty" id="canvas-empty">In attesa di episodio…</p>
-            <p class="video-note" id="video-note">Video non disponibile</p>
-          </div>
-          <div class="skeleton-footer">
-            <ul class="legend" aria-label="Legenda dello scheletro">
-              <li><span class="legend-swatch legend-body" aria-hidden="true"></span>Corpo</li>
-              <li><span class="legend-swatch legend-face" aria-hidden="true"></span>Volto</li>
-              <li><span class="legend-swatch legend-hands" aria-hidden="true"></span>Mani</li>
-            </ul>
-            <p class="hint" id="skeleton-meta"></p>
+      <p id="mode-status" class="sr-only" role="status" aria-live="polite"></p>
+      <p id="notice" class="notice" role="status" aria-live="polite"></p>
+
+      <main class="stage">
+        <section class="pane pane-camera" aria-labelledby="camera-title">
+          <h2 id="camera-title" class="sr-only">Telecamera infrarossa</h2>
+          <div class="frame">
+            <img id="video" class="video" alt="Video della telecamera infrarossa" hidden />
+            <p id="video-note" class="frame-note">In attesa della telecamera…</p>
+            <span class="frame-badge" aria-hidden="true">IR</span>
           </div>
         </section>
 
-        <section
-          class="panel hologram-panel"
-          id="view-hologram"
-          aria-labelledby="hologram-title"
-          hidden
-        >
-          <header class="panel-head">
-            <h2 id="hologram-title">Ologramma</h2>
-            <span class="hint">hand21 · 3D · profondità IR</span>
-          </header>
-          <div class="canvas-wrap">
-            <canvas
-              id="hologram"
-              role="img"
-              aria-label="Ologramma non disponibile: in attesa di dati."
-            ></canvas>
-            <p class="canvas-empty" id="hologram-empty">In attesa della mano…</p>
+        <section class="pane pane-view" id="view-hologram" aria-labelledby="hologram-title">
+          <h2 id="hologram-title" class="sr-only">Ologramma 3D della mano</h2>
+          <canvas
+            id="hologram"
+            role="img"
+            aria-label="Ologramma non disponibile: in attesa di dati."
+          ></canvas>
+          <p class="view-note" id="hologram-empty">In attesa della mano…</p>
+          <p class="view-meta" id="hologram-meta"></p>
+        </section>
+
+        <section class="pane pane-view" id="view-rps" aria-labelledby="rps-title" hidden>
+          <h2 id="rps-title" class="sr-only">Sasso, carta, forbice</h2>
+          <canvas id="rps-canvas" role="img" aria-label="Mano non visibile."></canvas>
+          <p class="view-note" id="rps-empty">Mano non visibile</p>
+          <div class="callout">
+            <p class="rps-count" id="rps-count" role="status" aria-live="polite">
+              Mostra la mano per iniziare
+            </p>
           </div>
-          <div class="skeleton-footer">
-            <ul class="legend" aria-label="Legenda dell'ologramma">
-              <li><span class="legend-swatch legend-joint" aria-hidden="true"></span>Articolazioni</li>
-              <li><span class="legend-swatch legend-bone" aria-hidden="true"></span>Ossa</li>
-              <li><span class="legend-swatch legend-grid" aria-hidden="true"></span>Piano del tavolo</li>
-            </ul>
-            <p class="hint" id="hologram-meta"></p>
+          <div class="duel" id="rps-duel" hidden>
+            <span class="move move-player" id="rps-player">Tu —</span>
+            <span class="duel-vs">contro</span>
+            <span class="move move-board" id="rps-board">Tavolo —</span>
           </div>
         </section>
 
-        <section class="panel rps-panel" id="view-rps" aria-labelledby="rps-title" hidden>
-          <header class="panel-head">
-            <h2 id="rps-title">Sasso, carta, forbice</h2>
-            <span class="hint" id="rps-phase"></span>
-          </header>
-          <p class="rps-count" id="rps-count" aria-live="polite" role="status">Mostra la mano per iniziare</p>
-          <div class="rps-duel">
-            <div class="rps-side">
-              <span class="rps-icon" id="rps-player-icon" aria-hidden="true">·</span>
-              <p class="rps-side-label">Tu</p>
-              <p class="rps-gesture" id="rps-player">—</p>
-            </div>
-            <p class="rps-versus">contro</p>
-            <div class="rps-side">
-              <span class="rps-icon" id="rps-board-icon" aria-hidden="true">·</span>
-              <p class="rps-side-label">Tavolo</p>
-              <p class="rps-gesture" id="rps-board">—</p>
-            </div>
-          </div>
-          <ul class="rps-score" id="rps-score" aria-label="Punteggio"></ul>
-          <div class="canvas-wrap rps-preview">
-            <canvas id="rps-canvas" role="img" aria-label="Anteprima della mano"></canvas>
-            <p class="canvas-empty" id="rps-empty">Mano non visibile</p>
+        <section class="pane pane-view pane-idle" id="view-idle" aria-labelledby="idle-title" hidden>
+          <div class="idle-copy">
+            <h2 id="idle-title">Nessuna demo attiva</h2>
+            <p>Scegli Ologramma o Sasso-carta-forbice nella barra in alto.</p>
           </div>
         </section>
-
-        <div class="side feed-side">
-          <section class="panel feed-panel" aria-labelledby="feed-title">
-            <header class="panel-head">
-              <h2 id="feed-title">Decisioni</h2>
-              <span class="hint" id="feed-count">0 / 20</span>
-            </header>
-            <ol id="feed" class="feed" aria-label="Ultime 20 decisioni, dalla più recente"></ol>
-          </section>
-
-          <section class="panel log-panel" aria-labelledby="log-title">
-            <header class="panel-head">
-              <h2 id="log-title">Registro connessioni</h2>
-              <span class="hint" id="log-count">0 / 50</span>
-            </header>
-            <ol
-              id="log"
-              class="log"
-              aria-label="Ultime 50 righe del registro connessioni, dalla più vecchia"
-            ></ol>
-          </section>
-        </div>
       </main>
 
       <noscript>Questa dashboard richiede JavaScript.</noscript>
