@@ -19,7 +19,7 @@ import { MetricsTracker } from "./metrics";
 import { ShowcaseView } from "./showcase";
 import { RoomView } from "./room";
 import { DashboardStore } from "./state";
-import { VoiceEngine, voiceAudioNode } from "./voice";
+import { FIXED_VOICE, VoiceEngine, voiceAudioNode } from "./voice";
 import { attachVoicePicker } from "./voicepicker";
 import { collectElements, renderAll, renderConnection, renderMetrics, renderNotice } from "./views";
 import type { PoseStatePayload } from "./protocol";
@@ -80,6 +80,8 @@ const room = new RoomView(byId("room"));
 // `?voice=1` marks this tab as the speaking one; the click gate still applies.
 const voice = new VoiceEngine({
   enabled: params.get("voice") === "1",
+  // XTTS Ana Florence is the demo's voice; the debug picker can still override it.
+  defaultPick: FIXED_VOICE,
   onStatusChange: () => renderVoice(),
 });
 // The voice picker keeps its own module: see `voicepicker.ts`.
@@ -88,6 +90,7 @@ attachVoicePicker(byId("voice-picker"), voice);
 const voiceBadge = byId("voice-badge");
 const voiceGate = byId<HTMLButtonElement>("voice-gate");
 const muteToggle = byId<HTMLButtonElement>("mute-toggle");
+const voicePaused = byId("voice-paused");
 const showcaseEmpty = byId("showcase-empty");
 const mente = byId("mente");
 const menteEvent = byId("mente-event");
@@ -271,6 +274,7 @@ function renderVoice(): void {
   muteToggle.hidden = !snapshot.enabled;
   muteToggle.setAttribute("aria-pressed", String(snapshot.muted));
   muteToggle.textContent = snapshot.muted ? "Muto" : "Voce";
+  voicePaused.hidden = !snapshot.audioSuspended;
 }
 
 /** One gesture is enough for this page: audio and the tab's voice switch. */

@@ -7,11 +7,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { memoryStorage } from "./cognitive/testkit";
 import {
+  FIXED_VOICE,
   HttpTtsClient,
   PICK_KEY,
   VoiceEngine,
   voiceAudioNode,
   type AudioSinkLike,
+  type AudioState,
+  type PlayResult,
   type SpeechSynthLike,
   type TimerLike,
   type TtsServiceInfo,
@@ -68,20 +71,44 @@ class FakeSink implements AudioSinkLike {
   played = 0;
   stopped = 0;
   unlocked = 0;
-  startResult = true;
-  handlers: { onStart: () => void; onEnd: () => void } | null = null;
+  startResult: PlayResult = true;
+  /** Decoded length reported to `onStart`; undefined keeps the 8 s watchdog. */
+  duration: number | undefined;
+  hangPlay = false;
+  context: AudioState = "running";
+  private readonly listeners: (() => void)[] = [];
+  handlers: { onStart: (durationS?: number) => void; onEnd: () => void } | null = null;
 
   async play(
     _data: ArrayBuffer,
-    handlers: { onStart: () => void; onEnd: () => void },
-  ): Promise<boolean> {
+    handlers: { onStart: (durationS?: number) => void; onEnd: () => void },
+  ): Promise<PlayResult> {
     this.played += 1;
     this.handlers = handlers;
-    if (!this.startResult) {
-      return false;
+    if (this.hangPlay) {
+      return new Promise<PlayResult>(() => {});
     }
-    handlers.onStart();
+    if (this.startResult !== true) {
+      return this.startResult;
+    }
+    handlers.onStart(this.duration);
     return true;
+  }
+
+  state(): AudioState {
+    return this.context;
+  }
+
+  onStateChange(listener: () => void): void {
+    this.listeners.push(listener);
+  }
+
+  /** The browser suspended or resumed the context (device change). */
+  setContext(state: AudioState): void {
+    this.context = state;
+    for (const listener of this.listeners) {
+      listener();
+    }
   }
 
   stop(): void {
@@ -537,5 +564,180 @@ describe("R2-V — the voice picked in the dashboard", () => {
     reloaded.speak("Ciao", {});
     await flush();
     expect(tts.calls.at(-1)).toBe("edge/it-IT-ElsaNeural/Ciao");
+  });
+});
+
+describe("service voice robustness (silent voice after a hung request)", () => {
+  it("gives up on a hung POST /tts after 6 s and falls back to Web Speech", async () => {
+    const tts = new FakeTts();
+    tts.hang = true;
+    const sink = new FakeSink();
+    const synth = fakeSynth();
+    const voice = makeVoice(tts, sink, synth);
+    await flush();
+    voice.activate();
+    expect(voice.speak("Frase appesa.", {})).toBe(true);
+    await flush();
+    expect(synth.spoken).toHaveLength(0);
+
+    vi.advanceTimersByTime(6_001);
+    await flush();
+    expect(tts.lastSignal?.aborted).toBe(true);
+    expect(synth.spoken).toHaveLength(1);
+    expect(synth.spoken[0].text).toBe("Frase appesa.");
+  });
+
+  it("never stays speaking after a hung request without Web Speech", async () => {
+    const tts = new FakeTts();
+    tts.hang = true;
+    const sink = new FakeSink();
+    const voice = makeVoice(tts, sink, fakeSynth([]));
+    await flush();
+    voice.activate();
+    const ended = vi.fn();
+    voice.speak("Frase appesa.", { onEnd: ended });
+    await flush();
+    vi.advanceTimersByTime(6_001);
+    await flush();
+    // The silent line still runs its course for the face and the bubble.
+    vi.advanceTimersByTime(8_001);
+    expect(ended).toHaveBeenCalledWith("unavailable");
+    expect(voice.isSpeaking).toBe(false);
+
+    // The next sentence reaches the service again.
+    tts.hang = false;
+    expect(voice.speak("Ci sono ancora.", {})).toBe(true);
+    await flush();
+    expect(tts.calls.at(-1)).toBe("kokoro/if_sara/Ci sono ancora.");
+    expect(sink.played).toBe(1);
+  });
+
+  it("falls back when the WAV never starts", async () => {
+    const tts = new FakeTts();
+    const sink = new FakeSink();
+    sink.hangPlay = true;
+    const synth = fakeSynth();
+    const voice = makeVoice(tts, sink, synth);
+    await flush();
+    voice.activate();
+    voice.speak("Decodifica lenta.", {});
+    await flush();
+    vi.advanceTimersByTime(3_001);
+    await flush();
+    expect(synth.spoken).toHaveLength(1);
+    // A late start of the abandoned attempt is stopped, not played over it.
+    const stopsBefore = sink.stopped;
+    sink.handlers?.onStart(2);
+    expect(sink.stopped).toBe(stopsBefore + 1);
+  });
+
+  it("does not cut a long XTTS sentence at 8 s: watchdog = duration + 1.5 s", async () => {
+    const tts = new FakeTts();
+    const sink = new FakeSink();
+    sink.duration = 10;
+    const voice = makeVoice(tts, sink);
+    await flush();
+    voice.activate();
+    const ended = vi.fn();
+    voice.speak("Un fatto lungo sui nuraghi.", { onEnd: ended });
+    await flush();
+
+    vi.advanceTimersByTime(11_000);
+    expect(ended).not.toHaveBeenCalled();
+    expect(voice.isSpeaking).toBe(true);
+    vi.advanceTimersByTime(600);
+    expect(ended).toHaveBeenCalledWith("watchdog");
+    expect(voice.isSpeaking).toBe(false);
+  });
+
+  it("ends the line and shows the click gate when the context stays suspended", async () => {
+    const tts = new FakeTts();
+    const sink = new FakeSink();
+    sink.startResult = "suspended";
+    const synth = fakeSynth();
+    const voice = makeVoice(tts, sink, synth);
+    await flush();
+    voice.activate();
+    const ended = vi.fn();
+    expect(voice.speak("Ciao", { onEnd: ended })).toBe(true);
+    await flush();
+
+    expect(ended).toHaveBeenCalledWith("unavailable");
+    expect(voice.isSpeaking).toBe(false);
+    // Not a silent Web Speech line either: the gate asks for one click.
+    expect(synth.spoken).toHaveLength(0);
+    expect(voice.snapshot().status).toBe("locked");
+    expect(voice.snapshot().audioSuspended).toBe(true);
+
+    sink.startResult = true;
+    voice.activate();
+    expect(sink.unlocked).toBe(2);
+    sink.setContext("running");
+    expect(voice.snapshot().audioSuspended).toBe(false);
+    expect(voice.speak("Eccomi", {})).toBe(true);
+    await flush();
+    expect(sink.played).toBe(2);
+  });
+
+  it("follows the context state: suspended locks, running re-unlocks", async () => {
+    const tts = new FakeTts();
+    const sink = new FakeSink();
+    const voice = makeVoice(tts, sink);
+    await flush();
+    voice.activate();
+    const ended = vi.fn();
+    voice.speak("Frase interrotta.", { onEnd: ended });
+    await flush();
+    expect(voice.isSpeaking).toBe(true);
+
+    sink.setContext("suspended");
+    expect(ended).toHaveBeenCalledWith("unavailable");
+    expect(voice.isSpeaking).toBe(false);
+    expect(voice.snapshot().status).toBe("locked");
+    expect(voice.snapshot().audioSuspended).toBe(true);
+
+    sink.setContext("running");
+    expect(voice.snapshot().status).toBe("ready");
+    expect(voice.snapshot().audioSuspended).toBe(false);
+  });
+});
+
+describe("fixed demo voice", () => {
+  it("uses XTTS Ana Florence when the picker never stored a voice", async () => {
+    const tts = new FakeTts();
+    const voice = new VoiceEngine({
+      synth: fakeSynth(),
+      createUtterance: utterance,
+      storage: memoryStorage(),
+      pickStorage: memoryStorage(),
+      timer,
+      tts,
+      audio: new FakeSink(),
+      defaultPick: FIXED_VOICE,
+    });
+    await flush();
+    expect(voice.serviceInfo()).toMatchObject({ engine: "xtts", voice: "ana_florence" });
+    expect(voice.serviceLabel).toBe("XTTS-v2 (Coqui) · Ana Florence");
+    voice.activate();
+    voice.speak("Ciao!", {});
+    await flush();
+    expect(tts.calls).toEqual(["xtts/ana_florence/Ciao!"]);
+  });
+
+  it("keeps a voice chosen in debug mode over the fixed one", async () => {
+    const pick = memoryStorage();
+    pick.setItem(PICK_KEY, JSON.stringify({ engine: "edge", voice: "it-IT-ElsaNeural" }));
+    const voice = new VoiceEngine({
+      synth: fakeSynth(),
+      createUtterance: utterance,
+      storage: memoryStorage(),
+      pickStorage: pick,
+      timer,
+      tts: new FakeTts(),
+      audio: new FakeSink(),
+      defaultPick: FIXED_VOICE,
+    });
+    await flush();
+    expect(voice.serviceInfo()).toMatchObject({ engine: "edge", voice: "it-IT-ElsaNeural" });
   });
 });

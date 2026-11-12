@@ -797,3 +797,7 @@ body {
 .voice-badge[data-status="unsupported"] {
   color: var(--warn);
 }
+
+.voice-paused {
+  color: var(--warn);
+}

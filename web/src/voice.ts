@@ -11,8 +11,13 @@
  *
  * The rules do not change with the back end: speech starts only after the
  * "Attiva la voce" click (#15), only the enabled tab speaks (#18), the mute
- * toggle keeps face and bubble alive (#19), a watchdog cancels after 8 s (#17)
+ * toggle keeps face and bubble alive (#19), a watchdog cancels a stuck line
+ * (#17: 8 s for Web Speech, the WAV's own duration plus 1.5 s for the service)
  * and everything is injected so the engine is testable without Chrome.
+ *
+ * The service path never hangs: `POST /tts` and the WAV start are bounded by
+ * timeouts, and a suspended AudioContext (a new output device) ends the line
+ * and brings the click gate back instead of playing into silence.
  */
 
 export interface StorageLike {
@@ -78,6 +83,11 @@ export interface VoiceSnapshot {
   available: boolean;
   /** "Kokoro 82M · Sara" when the local service answered, else null. */
   service: string | null;
+  /**
+   * The WebAudio context is suspended (output device changed, no gesture yet):
+   * service audio cannot play until a click resumes it.
+   */
+  audioSuspended: boolean;
 }
 
 /** What one local TTS sentence is: resolved engine, voice and a readable label. */
@@ -156,17 +166,32 @@ export interface TtsVoiceClient {
   pregenerateStatus(): Promise<PregenerateStatus | null>;
 }
 
-/** The playback graph; `play` resolves true when the audio actually started. */
+/**
+ * What `AudioSinkLike.play` reports: `true` when the audio actually started,
+ * `false` when it could not (decode error, no device: fall back to Web Speech),
+ * `"suspended"` when the audio context stayed suspended and needs a gesture.
+ */
+export type PlayResult = boolean | "suspended";
+
+/** The audio context: `none` before the first gesture created it. */
+export type AudioState = "running" | "suspended" | "none";
+
+/** The playback graph. */
 export interface AudioSinkLike {
+  /** `onStart` receives the decoded duration in seconds, when known. */
   play(
     data: ArrayBuffer,
-    handlers: { onStart: () => void; onEnd: () => void },
-  ): Promise<boolean>;
+    handlers: { onStart: (durationS?: number) => void; onEnd: () => void },
+  ): Promise<PlayResult>;
   stop(): void;
   /** Create or resume the audio context from a user gesture, when supported. */
   unlock?(): void;
   /** The analyser feeding the mouth, or null before the first gesture. */
   analyserNode(): AnalyserNode | null;
+  /** The context state, for the click gate and the debug indicator. */
+  state?(): AudioState;
+  /** Called when `state()` may have changed (context statechange, devicechange). */
+  onStateChange?(listener: () => void): void;
 }
 
 export interface VoiceOptions {
@@ -179,6 +204,12 @@ export interface VoiceOptions {
   /** `?voice=1` enables this tab without a click, still needs `unlock()`. */
   enabled?: boolean;
   watchdogMs?: number;
+  /** Give up on a `POST /tts` after this long (fall back, never stay speaking). */
+  requestTimeoutMs?: number;
+  /** Give up on decoding and starting the WAV after this long. */
+  playTimeoutMs?: number;
+  /** The voice used when the picker never stored one (the fixed demo voice). */
+  defaultPick?: VoicePick | null;
   preferredVoice?: string;
   /** Local TTS service; `null` forces the Web Speech path. */
   tts?: TtsServiceLike | null;
@@ -194,8 +225,23 @@ export const MUTED_KEY = "cpsa.voice.muted.v1";
 /** The engine/voice chosen with the picker, per browser profile. */
 export const PICK_KEY = "cpsa.voice.pick.v1";
 export const TTS_URL = "http://127.0.0.1:8765";
+/** Web Speech has no duration: a sentence longer than this is stuck. */
 const WATCHDOG_MS = 8_000;
 const PROBE_TIMEOUT_MS = 750;
+/** A cached WAV answers in milliseconds; XTTS synthesis of a fact in ~2-4 s. */
+const REQUEST_TIMEOUT_MS = 6_000;
+const PLAY_TIMEOUT_MS = 3_000;
+/** Service audio: the watchdog is the decoded duration plus this margin. */
+const WATCHDOG_MARGIN_MS = 1_500;
+/** `resume()` without a gesture can stay pending forever in Chrome. */
+const RESUME_TIMEOUT_MS = 1_000;
+
+/** The fixed voice of the demo: XTTS-v2 Ana Florence, every line pre-cached. */
+export const FIXED_VOICE: VoicePick = {
+  engine: "xtts",
+  voice: "ana_florence",
+  label: "XTTS-v2 (Coqui) · Ana Florence",
+};
 
 /** One voice chosen from the picker, as written to `PICK_KEY`. */
 export interface VoicePick {
@@ -406,6 +452,23 @@ export class HttpTtsClient implements TtsServiceLike, TtsVoiceClient {
   }
 }
 
+/** Wait for a promise at most `ms`; its result and rejection are ignored. */
+function settleWithin(promise: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const handle = setTimeout(resolve, ms);
+    promise.then(
+      () => {
+        clearTimeout(handle);
+        resolve();
+      },
+      () => {
+        clearTimeout(handle);
+        resolve();
+      },
+    );
+  });
+}
+
 /** WebAudio playback: source → analyser → gain → speakers. */
 export class WebAudioSink implements AudioSinkLike {
   private context: AudioContext | null = null;
@@ -413,14 +476,25 @@ export class WebAudioSink implements AudioSinkLike {
   private gain: GainNode | null = null;
   private source: AudioBufferSourceNode | null = null;
   private readonly volume: number;
+  private readonly listeners: (() => void)[] = [];
+  private watchingDevices = false;
 
   constructor(volume = 0.95) {
     this.volume = volume;
   }
 
   private ensure(): AudioContext {
+    if (this.context !== null && this.context.state === "closed") {
+      // A closed context never plays again: build a fresh graph.
+      this.context = null;
+      this.analyser = null;
+      this.gain = null;
+      this.source = null;
+    }
     if (this.context === null) {
       this.context = new AudioContext();
+      this.context.addEventListener("statechange", () => this.notify());
+      this.watchDevices();
       this.analyser = this.context.createAnalyser();
       this.analyser.fftSize = 512;
       this.analyser.smoothingTimeConstant = 0.7;
@@ -430,6 +504,46 @@ export class WebAudioSink implements AudioSinkLike {
       this.gain.connect(this.context.destination);
     }
     return this.context;
+  }
+
+  state(): AudioState {
+    if (this.context === null) {
+      return "none";
+    }
+    return this.context.state === "running" ? "running" : "suspended";
+  }
+
+  onStateChange(listener: () => void): void {
+    this.listeners.push(listener);
+  }
+
+  private notify(): void {
+    for (const listener of this.listeners) {
+      listener();
+    }
+  }
+
+  /**
+   * A new output device (the Bluetooth speaker) can suspend the context: try
+   * to resume it, which the page's earlier gesture usually allows, and tell
+   * the engine either way so the click gate can reappear.
+   */
+  private watchDevices(): void {
+    if (this.watchingDevices) {
+      return;
+    }
+    this.watchingDevices = true;
+    try {
+      navigator.mediaDevices?.addEventListener?.("devicechange", () => {
+        const context = this.context;
+        if (context !== null && context.state === "suspended") {
+          void context.resume().catch(() => undefined).finally(() => this.notify());
+        }
+        this.notify();
+      });
+    } catch {
+      // No mediaDevices (insecure context): statechange alone still works.
+    }
   }
 
   /** Create or resume the context; call it from a user gesture. */
@@ -450,14 +564,22 @@ export class WebAudioSink implements AudioSinkLike {
 
   async play(
     data: ArrayBuffer,
-    handlers: { onStart: () => void; onEnd: () => void },
-  ): Promise<boolean> {
+    handlers: { onStart: (durationS?: number) => void; onEnd: () => void },
+  ): Promise<PlayResult> {
     let context: AudioContext;
     try {
       context = this.ensure();
-      this.unlock();
     } catch {
       return false;
+    }
+    // Read through a call: the state changes across the await below.
+    const running = (): boolean => context.state === "running";
+    if (!running()) {
+      // `start()` on a suspended context "succeeds" in silence: resume first.
+      await settleWithin(context.resume(), RESUME_TIMEOUT_MS);
+      if (!running()) {
+        return "suspended";
+      }
     }
     let buffer: AudioBuffer;
     try {
@@ -486,7 +608,7 @@ export class WebAudioSink implements AudioSinkLike {
       return false;
     }
     this.source = source;
-    handlers.onStart();
+    handlers.onStart(buffer.duration);
     return true;
   }
 
@@ -513,6 +635,9 @@ export class VoiceEngine {
   private readonly pickStorage: StorageLike | null;
   private readonly timer: TimerLike;
   private readonly watchdogMs: number;
+  private readonly requestTimeoutMs: number;
+  private readonly playTimeoutMs: number;
+  private readonly defaultPick: VoicePick | null;
   private readonly preferredVoice: string;
   private readonly tts: TtsServiceLike | null;
   private readonly audio: AudioSinkLike | null;
@@ -531,6 +656,9 @@ export class VoiceEngine {
   private handlers: VoiceHandlers | null = null;
   private service: TtsServiceInfo | null = null;
   private abort: AbortController | null = null;
+  private audioSuspended = false;
+  /** The gate came back because the context suspended, not by choice. */
+  private lockedBySuspend = false;
 
   constructor(options: VoiceOptions = {}) {
     this.synth = options.synth === undefined ? browserSynth() : options.synth;
@@ -540,6 +668,9 @@ export class VoiceEngine {
       options.pickStorage === undefined ? defaultPickStorage() : options.pickStorage;
     this.timer = options.timer ?? browserTimer();
     this.watchdogMs = options.watchdogMs ?? WATCHDOG_MS;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.playTimeoutMs = options.playTimeoutMs ?? PLAY_TIMEOUT_MS;
+    this.defaultPick = options.defaultPick ?? null;
     this.preferredVoice = (options.preferredVoice ?? "Google italiano").toLowerCase();
     this.serviceUrl = options.serviceUrl ?? TTS_URL;
     this.onStatusChange = options.onStatusChange ?? null;
@@ -550,6 +681,7 @@ export class VoiceEngine {
           : new HttpTtsClient(this.serviceUrl)
         : options.tts;
     this.audio = options.audio === undefined ? defaultAudioSink() : options.audio;
+    this.audio?.onStateChange?.(() => this.onAudioState());
     this.enabled =
       options.enabled === true || this.storage?.getItem(ENABLED_KEY) === "1";
     this.muted = this.storage?.getItem(MUTED_KEY) === "1";
@@ -566,6 +698,7 @@ export class VoiceEngine {
   activate(): void {
     this.enabled = true;
     this.unlocked = true;
+    this.lockedBySuspend = false;
     this.storage?.setItem(ENABLED_KEY, "1");
     this.audio?.unlock?.();
     if (this.service === null) {
@@ -702,6 +835,7 @@ export class VoiceEngine {
       voiceName: this.selected?.name ?? null,
       available: this.available,
       service: this.serviceLabel,
+      audioSuspended: this.audioSuspended,
     };
   }
 
@@ -727,8 +861,9 @@ export class VoiceEngine {
       return false;
     }
     const info = await this.tts.probe();
-    // A voice chosen while the service was down survives the probe.
-    const pick = this.savedPick();
+    // A voice chosen while the service was down survives the probe; without
+    // one, the fixed demo voice (if configured) wins over the service default.
+    const pick = this.savedPick() ?? this.defaultPick;
     this.service =
       info === null
         ? null
@@ -818,41 +953,140 @@ export class VoiceEngine {
     this.finish("cancelled");
   }
 
-  /** Fetch the WAV from the local service and play it; fall back on failure. */
+  /**
+   * Fetch the WAV from the local service and play it; fall back on failure.
+   *
+   * Every await is bounded: a hung request or a decode that never resolves
+   * falls back after `requestTimeoutMs` / `playTimeoutMs`, so the engine can
+   * never stay `speaking` and swallow every later sentence.
+   */
   private async speakLocal(text: string, handlers: VoiceHandlers): Promise<void> {
     const info = this.service;
-    if (info === null || this.tts === null || this.audio === null) {
+    const audio = this.audio;
+    if (info === null || this.tts === null || audio === null) {
       this.retryWithSynth(text, handlers);
       return;
     }
     const controller = new AbortController();
     this.abort = controller;
+    /** Late callbacks of an attempt that timed out must not touch the engine. */
+    let stale = false;
     try {
-      const wav = await this.tts.synthesize(text, info.engine, info.voice, controller.signal);
+      const wav = await this.bounded(
+        this.tts.synthesize(text, info.engine, info.voice, controller.signal),
+        this.requestTimeoutMs,
+        () => controller.abort(),
+      );
       if (!this.speaking || this.abort !== controller) {
         return;
       }
-      const started = await this.audio.play(wav, {
-        onStart: () => {
-          handlers.onStart?.();
-          this.armWatchdog();
+      const result = await this.bounded(
+        audio.play(wav, {
+          onStart: (durationS) => {
+            if (stale) {
+              audio.stop();
+              return;
+            }
+            handlers.onStart?.();
+            // The real length of the WAV: a long XTTS fact is not cut at 8 s.
+            this.armWatchdog(
+              durationS === undefined || !Number.isFinite(durationS)
+                ? this.watchdogMs
+                : durationS * 1_000 + WATCHDOG_MARGIN_MS,
+            );
+          },
+          onEnd: () => {
+            if (!stale) {
+              this.finish("ended");
+            }
+          },
+        }),
+        this.playTimeoutMs,
+        () => {
+          stale = true;
+          audio.stop();
         },
-        onEnd: () => this.finish("ended"),
-      });
-      if (!started) {
+      );
+      if (!this.speaking || this.abort !== controller) {
+        return;
+      }
+      if (result === "suspended") {
+        this.onSuspendedPlayback();
+        return;
+      }
+      if (!result) {
         this.retryWithSynth(text, handlers);
       }
     } catch {
       if (!this.speaking || this.abort !== controller) {
         return;
       }
-      // The service died between the probe and the request: Web Speech now.
+      // The service died, hung or timed out: Web Speech (or a silent line) now.
       this.retryWithSynth(text, handlers);
     } finally {
       if (this.abort === controller) {
         this.abort = null;
       }
     }
+  }
+
+  /** Resolve like `promise`, or reject after `ms` once `onTimeout` ran. */
+  private bounded<T>(promise: Promise<T>, ms: number, onTimeout: () => void): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const handle = this.timer.setTimeout(() => {
+        onTimeout();
+        reject(new Error("timeout"));
+      }, ms);
+      promise.then(
+        (value) => {
+          this.timer.clearTimeout(handle);
+          resolve(value);
+        },
+        (error: unknown) => {
+          this.timer.clearTimeout(handle);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        },
+      );
+    });
+  }
+
+  /**
+   * The context stayed suspended: end this line and bring the click gate back,
+   * so one click on "Attiva la voce" resumes the audio.
+   */
+  private onSuspendedPlayback(): void {
+    this.audioSuspended = true;
+    if (this.unlocked) {
+      this.unlocked = false;
+      this.lockedBySuspend = true;
+    }
+    this.finish("unavailable");
+    this.onStatusChange?.(this.snapshot());
+  }
+
+  /** The sink's context changed state (statechange, devicechange). */
+  private onAudioState(): void {
+    const suspended = this.audio?.state?.() === "suspended";
+    if (suspended === this.audioSuspended) {
+      return;
+    }
+    this.audioSuspended = suspended;
+    if (suspended) {
+      if (this.service !== null && this.unlocked) {
+        this.unlocked = false;
+        this.lockedBySuspend = true;
+      }
+      if (this.speaking && this.service !== null) {
+        // The source is frozen with the context: end the line now.
+        this.audio?.stop();
+        this.finish("unavailable");
+      }
+    } else if (this.lockedBySuspend) {
+      // The context came back by itself (device change): re-unlock.
+      this.lockedBySuspend = false;
+      this.unlocked = true;
+    }
+    this.onStatusChange?.(this.snapshot());
   }
 
   /** The local path failed mid-sentence: speak this one with Web Speech. */
@@ -906,7 +1140,7 @@ export class VoiceEngine {
     }, duration);
   }
 
-  private armWatchdog(): void {
+  private armWatchdog(ms: number = this.watchdogMs): void {
     this.disarmWatchdog();
     this.watchdog = this.timer.setTimeout(() => {
       this.watchdog = null;
@@ -917,7 +1151,7 @@ export class VoiceEngine {
       }
       this.audio?.stop();
       this.finish("watchdog");
-    }, this.watchdogMs);
+    }, ms);
   }
 
   private disarmWatchdog(): void {
