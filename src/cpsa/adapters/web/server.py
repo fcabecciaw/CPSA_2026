@@ -71,13 +71,15 @@ VIDEO_JPEG_QUALITY = 70
 VIDEO_DISCONNECT_CHECK_S = 0.5
 """How often an idle video response checks that its client is still connected."""
 
-MODES = ("idle", "medical")
+MODES = ("idle", "medical", "hologram", "rps")
 CAPABILITIES = (
     "status",
     "medical.state",
     "medical.decision",
     "medical.episode",
     "medical.hands",
+    "hologram.hands",
+    "rps.state",
     "log",
 )
 DEFAULT_STATUS: Mapping[str, Any] = {
@@ -620,6 +622,10 @@ class WebServer:
             return mode == "medical"
         if topic.startswith("lab."):
             return mode == "lab"
+        if topic.startswith("hologram."):
+            return mode == "hologram"
+        if topic.startswith("rps."):
+            return mode == "rps"
         return True
 
     async def _send(self, client: _Client, topic: str, data: Mapping[str, Any]) -> bool:

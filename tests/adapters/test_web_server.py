@@ -155,7 +155,7 @@ def test_connect_receives_hello_then_the_full_snapshot(tmp_path: Path) -> None:
             hello = messages[0]["data"]
             assert hello["server_version"] == "test-version"
             assert hello["protocol_version"] == 1
-            assert hello["modes"] == ["idle", "medical"]
+            assert hello["modes"] == ["idle", "medical", "hologram", "rps"]
             assert "status" in hello["capabilities"]
             assert messages[1]["data"]["mode"] == "medical"
 
@@ -295,6 +295,52 @@ def test_mode_set_is_forwarded_with_the_client_seq_and_errors_quote_it(tmp_path:
             assert "ref_seq" not in bad_seq["data"]
             for message in (invalid_mode, unknown, malformed, bad_seq):
                 validate_server_message(message)
+
+        run(scenario)
+
+
+def test_mode_set_forwards_the_hand_modes(tmp_path: Path) -> None:
+    with running_server(tmp_path) as (server, commands):
+
+        async def scenario() -> None:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.ws_connect(f"http://127.0.0.1:{server.port}/ws") as ws,
+            ):
+                await receive(ws)
+                for seq, mode in ((1, "hologram"), (2, "rps")):
+                    await ws.send_json(
+                        {"v": 1, "type": "mode.set", "seq": seq, "data": {"mode": mode}}
+                    )
+                await ws.send_json({"v": 1, "type": "ping", "data": {"id": 1}})
+                pong = await receive(ws)
+
+            assert pong["type"] == "pong"
+            assert commands == [
+                ("mode.set", {"mode": "hologram"}, 1),
+                ("mode.set", {"mode": "rps"}, 2),
+            ]
+
+        run(scenario)
+
+
+def test_hand_mode_states_are_not_snapshot_in_medical(tmp_path: Path) -> None:
+    with running_server(tmp_path) as (server, _):
+        publish_state(server, "status", status_data(mode="medical"))
+        publish_state(server, "rps.state", {"phase": "waiting"})
+        publish_state(server, "hologram.hands", {"hands": []})
+
+        async def scenario() -> None:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.ws_connect(f"http://127.0.0.1:{server.port}/ws") as ws,
+            ):
+                hello = await receive(ws)
+                status = await receive(ws)
+                await ws.send_json({"v": 1, "type": "ping", "data": {"id": 1}})
+                pong = await receive(ws)
+
+            assert [hello["type"], status["type"], pong["type"]] == ["hello", "status", "pong"]
 
         run(scenario)
 
