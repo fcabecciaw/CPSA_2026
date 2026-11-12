@@ -199,6 +199,23 @@ def test_cors_allows_the_two_dashboard_origins_and_nothing_else(tmp_path, engine
     assert "access-control-allow-origin" not in response.headers
 
 
+def test_cors_answers_chrome_private_network_preflight(tmp_path, engine) -> None:
+    # The board page (a private IP) calling this loopback service triggers
+    # Chrome's Private/Local Network Access preflight.
+    client, _ = make_app(tmp_path, engine)
+    response = client.options(
+        "/tts",
+        headers={
+            "Origin": "http://10.42.0.83:8080",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+            "Access-Control-Request-Private-Network": "true",
+        },
+    )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-private-network"] == "true"
+
+
 def test_concurrent_identical_requests_synthesize_once(tmp_path, engine) -> None:
     settings = Settings(
         cache_dir=tmp_path / "cache", default_engine="fake", default_voice="fake_sara"

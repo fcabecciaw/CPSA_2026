@@ -123,6 +123,11 @@ def create_app(
                 "X-TTS-Synth-Ms",
             ],
             max_age=600,
+            # The dashboard page lives on the board (http://10.42.0.83:8080) and
+            # calls this loopback service: Chrome's Private/Local Network Access
+            # preflight carries Access-Control-Request-Private-Network and needs
+            # Access-Control-Allow-Private-Network back, or it rejects the call.
+            allow_private_network=True,
         )
 
     @app.exception_handler(UnknownEngineError)
