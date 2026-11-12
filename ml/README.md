@@ -244,8 +244,8 @@ uv run python -m cpsa_ml.pseudolabel --video clip.mp4 --stride 5 --out data/labe
   frame whose label exists is skipped, and `stats.json` is rewritten atomically
   after every chunk. `--min-hand-keypoints` (default 10) and `--hand-score`
   decide which teacher hands become crops.
-* The recordings contain faces: keep them local, record only people who agreed,
-  and do not publish the frames.
+* The recordings contain faces: record only people who agreed. Uploading them to
+  Kaggle for training is allowed (project decision, 2026-11-12).
 
 ## Teacher labels for HaGRID (notebook 06)
 
@@ -715,8 +715,9 @@ automatically.
 **Safety.** On 2026-11-11 the board froze when an IR capture ran alongside the
 demo services. The capture script refuses to open the camera while
 `cpsa-supervisor` or `cpsa-dpu` is active, so the services must be stopped first.
-The recordings contain faces: keep the frames, the auto-labelled dataset and the
-fine-tuned weights local; never upload them to Kaggle or anywhere else.
+The recordings contain faces: record only people who agreed. The frames, the
+auto-labelled dataset and the fine-tuned weights may be uploaded to Kaggle for
+training (project decision, 2026-11-12).
 
 ### 1. Stop the demo services on the board
 

@@ -22,8 +22,9 @@ run writes ``stats.json`` (kept/dropped counts, thresholds, sources) and
 ``--mix-handframe`` copies a seeded subset of an existing full-frame dataset's
 train split into the new train split to limit forgetting.
 
-The recordings contain faces: keep the frames and the derived datasets local;
-do not upload them.
+The recordings contain faces: record only people who agreed. Uploading the
+frames and the derived datasets to Kaggle for training is allowed (project
+decision, 2026-11-12).
 """
 
 from __future__ import annotations
@@ -622,9 +623,7 @@ def build_dataset(config: IrPseudoConfig, predictor: Predictor) -> dict[str, Any
         "mix": mix,
         "contact_sheet": contact_sheet,
         "frames": counters.to_dict(),
-        "license_warning": (
-            "Board recordings may contain faces: keep this dataset and the frames local."
-        ),
+        "license_warning": ("Board recordings may contain faces: record only people who agreed."),
     }
     _write_json_atomic(config.out / "stats.json", payload)
     LOGGER.info(

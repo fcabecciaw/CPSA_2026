@@ -29,7 +29,8 @@ F200 INZI (IR + depth, pixel-aligned)
 - `build/ir_capture_20261112_empty/` 30 frames of the empty table; `build/ir_capture_20261112_hand/` 300 frames,
   one hand moving (open, fist, scissors, rotations, entering/leaving); `build/ir_capture_20261112/` 270 frames,
   one hand plus the user's bust in view at the start. Each has `ir_XXXXX.png` (raw 8-bit IR 640x480),
-  `depth_XXXXX.npy` (raw Z16), `meta.json`. They may contain faces: local only, never committed or uploaded.
+  `depth_XXXXX.npy` (raw Z16), `meta.json`. They may contain faces: never committed to git; uploading to Kaggle for training is allowed
+  (user decision 2026-11-12).
 - Depth: `depth_m = raw * 3.125e-5`. Empty table: 67% valid pixels; RANSAC plane fits 91% of them; camera
   ~0.42 m above the table, tilted ~29 deg (image top = far side, 0.55-0.85 m; bottom = near, ~0.39 m).
 - Intrinsics: nominal `fx = fy = 430, cx = 320, cy = 240` (config `hands.intrinsics`).
