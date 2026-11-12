@@ -579,6 +579,7 @@ def test_the_int8_decode_keeps_the_reference_threshold_and_prior() -> None:
     assert pose.keypoints[1, 0] == pytest.approx(320.0, abs=0.5)
 
 
+@pytest.mark.benchmark
 def test_the_int8_decode_is_at_least_ten_times_faster_than_the_reference() -> None:
     """R2-G: the A53 decode is what buys the MoveNet view its frame rate.
 

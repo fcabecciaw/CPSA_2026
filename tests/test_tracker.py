@@ -178,6 +178,7 @@ def test_a_disabled_tracker_returns_the_raw_boxes() -> None:
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.benchmark
 def test_twenty_boxes_cost_less_than_a_fraction_of_a_frame() -> None:
     tracker = Tracker(tracker_config())
     detections = [

@@ -33,8 +33,11 @@ packages = ["src/cpsa"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["target: requires aarch64/KV260 and the Vitis AI runtime"]
-addopts = "-m 'not target'"
+markers = [
+    "target: requires aarch64/KV260 and the Vitis AI runtime",
+    "benchmark: wall-clock speed check; noisy on a loaded host, run on demand with -m benchmark",
+]
+addopts = "-m 'not target and not benchmark'"
 
 [tool.ruff]
 target-version = "py310"
