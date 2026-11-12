@@ -218,3 +218,65 @@ describe("C3 smile — queued while ARI is speaking", () => {
     expect(next?.ruleId).toBe(smile!.ruleId);
   });
 });
+
+describe("C3 smile — during Engage (greeting and self-introduction)", () => {
+  /** Scene + engine with sentences of `sentenceMs`; a smile at `smileAt`. */
+  function engage(sentenceMs: number, smileAt: number): Array<{ ruleId: string; at: number }> {
+    const memory = new CognitiveMemory({ storage: null });
+    const engine = new CognitiveEngine([], { rng: () => 0.5 });
+    const machine = new SceneMachine({ rng: () => 0 });
+    machine.reset(0);
+    const world = { people: 1, crowd: false, posePerson: false, mode: "yolox" as const };
+    const spoken: Array<{ ruleId: string; at: number }> = [];
+    let endAt: number | null = null;
+    for (let now = 1_000; now <= 30_000; now += HEARTBEAT_MS) {
+      if (now === smileAt) {
+        machine.observe([{ type: "face", kind: "smile", score: 0.8, faces: 1, now }]);
+      }
+      if (endAt !== null && now >= endAt) {
+        engine.endSpeech();
+        endAt = null;
+      }
+      const line = machine.step(now, memory, world);
+      if (line !== null) {
+        engine.offerScene(line, memory, now);
+      }
+      const utterance = engine.tick(now, memory);
+      if (utterance !== null) {
+        machine.noteSpoken(utterance, memory, now);
+        spoken.push({ ruleId: utterance.ruleId, at: now });
+        endAt = now + sentenceMs;
+      }
+    }
+    expect(machine.scene).toBe("play");
+    return spoken;
+  }
+
+  it("never displaces the self-introduction from the queue slot", () => {
+    // A 4 s greeting, a smile near its end: the smile line holds the voice
+    // when the next Engage step would come; the intro must still be said.
+    const ids = engage(4_000, 4_500).map((entry) => entry.ruleId);
+    expect(ids.slice(0, 2).map((id) => id.split(".").slice(0, 2).join("."))).toEqual([
+      "scene.greeting",
+      "scene.smile",
+    ]);
+    expect(ids.filter((id) => id === "scene.intro")).toHaveLength(1);
+    expect(ids.filter((id) => id.startsWith("scene.prompt."))).toHaveLength(1);
+  });
+
+  it("reacts right after the greeting, then keeps one intro and one invitation", () => {
+    // 1.5 s sentences; the visitor smiles while ARI is still greeting.
+    const spoken = engage(1_500, 1_500);
+    const ids = spoken.map((entry) => entry.ruleId);
+    expect(ids[0]).toMatch(/^scene\.greeting\./);
+    expect(ids[1]).toMatch(/^scene\.smile/);
+    // Right after the greeting ended, not after a full Engage step.
+    expect(spoken[1]!.at - spoken[0]!.at).toBeLessThanOrEqual(2_000);
+    expect(ids.filter((id) => id.startsWith("scene.greeting."))).toHaveLength(1);
+    expect(ids.filter((id) => id === "scene.intro")).toHaveLength(1);
+    expect(ids.filter((id) => id.startsWith("scene.prompt."))).toHaveLength(1);
+    expect(ids.indexOf("scene.intro")).toBeLessThan(
+      ids.findIndex((id) => id.startsWith("scene.prompt.")),
+    );
+  });
+});

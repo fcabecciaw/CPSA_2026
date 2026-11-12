@@ -398,7 +398,11 @@ export class SceneMachine {
     for (const event of events) {
       if (event.type === "pose" && this.name === "play") {
         this.push({ type: "pose", kind: event.kind, at: event.now });
-      } else if (event.type === "face" && this.name === "play") {
+      } else if (
+        event.type === "face" &&
+        (this.name === "play" || (this.name === "engage" && event.kind === "smile"))
+      ) {
+        // A smile during the greeting gets its reaction too (C3).
         this.push({ type: "face", kind: event.kind, at: event.now });
       } else if (event.type === "appear" && !event.scenery && !event.doubtful) {
         this.push({
@@ -596,9 +600,40 @@ export class SceneMachine {
 
   // --- Engage ---------------------------------------------------------------
 
+  /** Remove the pending smiles; returns the freshest one still relevant. */
+  private takeSmile(now: number): Stimulus | null {
+    let fresh: Stimulus | null = null;
+    for (let index = this.stimuli.length - 1; index >= 0; index -= 1) {
+      const stimulus = this.stimuli[index]!;
+      if (stimulus.type !== "face" || stimulus.kind !== "smile") {
+        continue;
+      }
+      this.stimuli.splice(index, 1);
+      // Same relevance window as Play (F-E4 #13).
+      if (fresh === null && now - stimulus.at <= 3_000) {
+        fresh = stimulus;
+      }
+    }
+    return fresh;
+  }
+
   private engageLine(now: number, memory: CognitiveMemory): SceneLine | null {
     if (!this.present) {
       return null;
+    }
+    if (this.engageStep > 0) {
+      // A smile while ARI greets or introduces itself: react right after the
+      // current line (priority 85 waits in the queue slot), then the next
+      // Engage step waits a full step again, so the self-introduction and
+      // the invitation are never displaced from the single queue slot (C3).
+      const smile = this.takeSmile(now);
+      if (smile !== null) {
+        const line = this.reactFace("smile", now, memory);
+        if (line !== null) {
+          this.engageAt = now;
+          return line;
+        }
+      }
     }
     if (this.engageStep > 0 && now - this.engageAt < this.options.engageStepMs) {
       return null;
@@ -837,7 +872,7 @@ export class SceneMachine {
         gaze: "person",
         phrases: recently ? SMILES_AGAIN : SMILES,
         memory,
-        valid: () => this.name === "play" && this.present,
+        valid: () => (this.name === "play" || this.name === "engage") && this.present,
       });
     }
     if (kind === "mouth_open") {
