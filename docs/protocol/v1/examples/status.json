@@ -28,7 +28,10 @@
       ],
       "gain": 200,
       "exposure": 100,
-      "saturation": 110
+      "saturation": 110,
+      "person_conf": 0.4,
+      "held_conf": 0.3,
+      "object_conf": 0.45
     }
   }
 }

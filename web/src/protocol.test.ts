@@ -116,7 +116,16 @@ describe("status.calibration (debug panel)", () => {
   }
 
   it("parses the five values", () => {
-    const values = { zoom: 1.5, zoom_center: [0.5, 0.45], gain: 320, exposure: 200, saturation: 110 };
+    const values = {
+      zoom: 1.5,
+      zoom_center: [0.5, 0.45],
+      gain: 320,
+      exposure: 200,
+      saturation: 110,
+      person_conf: 0.4,
+      held_conf: 0.3,
+      object_conf: 0.45,
+    };
     // A board without the YOLOv5 switch: YOLOX, the only detector.
     expect(calibrationOf(status(values))).toEqual({
       ...values,

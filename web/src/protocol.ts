@@ -65,6 +65,12 @@ export interface CalibrationValues {
   gain: number;
   exposure: number;
   saturation: number;
+  /** Threshold of the `person` class (0.10–0.90). */
+  person_conf: number;
+  /** Loosest held object (bottle, cup, cell phone, book); the others keep their offset. */
+  held_conf: number;
+  /** Every other class (`model.object_conf`). */
+  object_conf: number;
 }
 
 /** `status.calibration`: the values plus the detectors the board has installed. */
@@ -330,6 +336,9 @@ function parseCalibration(value: unknown): CalibrationStatus | null {
       gain: reqNumber(data, "gain"),
       exposure: reqNumber(data, "exposure"),
       saturation: reqNumber(data, "saturation"),
+      person_conf: reqNumber(data, "person_conf"),
+      held_conf: reqNumber(data, "held_conf"),
+      object_conf: reqNumber(data, "object_conf"),
     };
   } catch (error) {
     if (error instanceof PayloadError) {

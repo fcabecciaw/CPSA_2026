@@ -225,12 +225,15 @@ export function createMockSocket(_url: string): SocketLike {
   const startedAt = STARTED_AT;
   /** The debug panel's calibration, as `config/showcase.yaml` ships it. */
   const yamlCalibration: CalibrationValues = {
-    detector: "yolox",
+    detector: "yolov5",
     zoom: 1.3,
     zoom_center: [0.5, 0.5],
     gain: 200,
     exposure: 100,
     saturation: 110,
+    person_conf: 0.4,
+    held_conf: 0.3,
+    object_conf: 0.45,
   };
   let calibration: CalibrationValues = { ...yamlCalibration };
 

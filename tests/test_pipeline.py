@@ -6,7 +6,7 @@ import logging
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -1503,6 +1503,9 @@ def test_the_status_reports_the_yaml_calibration_by_default(tmp_path: Path) -> N
             "gain": 300,
             "exposure": 100,
             "saturation": 110,
+            "person_conf": 0.35,
+            "held_conf": 0.35,
+            "object_conf": 0.35,
         }
     finally:
         channel.close()
@@ -1543,6 +1546,9 @@ def test_a_calibration_command_reaches_the_detector_the_camera_and_the_file(
         "gain": 640,
         "exposure": 200,
         "saturation": 110,
+        "person_conf": 0.35,
+        "held_conf": 0.35,
+        "object_conf": 0.35,
     }
     assert sink.topics("status")[-1]["calibration"] == expected
     assert camera.controls[-1] == {"gain": 640, "exposure": 200, "saturation": 110}
@@ -1553,6 +1559,9 @@ def test_a_calibration_command_reaches_the_detector_the_camera_and_the_file(
         "gain": 640,
         "exposure": 200,
         "saturation": 110,
+        "person_conf": 0.35,
+        "held_conf": 0.35,
+        "object_conf": 0.35,
     }
     # The zoom changed in place: the runner was closed only by the final stop,
     # and the frames after it went to the same runner.
@@ -1920,3 +1929,94 @@ def test_yolov5_ignores_the_zoom(tmp_path: Path) -> None:
 
     assert [model.kind for model in built] == ["yolov5"]
     assert pipeline.calibration.zoom == 1.8
+
+
+# --------------------------------------------------------------------------- #
+# Live detection thresholds (calibration.set person/held/object_conf)
+# --------------------------------------------------------------------------- #
+
+
+class ThresholdDetector(FakeDetector):
+    """A fake runner of either kind that records the live threshold tables."""
+
+    def __init__(self, kind: str) -> None:
+        super().__init__([PERSON])
+        self.kind = kind
+        self.tables: list[dict[int, float]] = []
+
+    def set_class_thresholds(self, class_thr: Mapping[int, float]) -> None:
+        self.tables.append(dict(class_thr))
+
+
+@pytest.mark.parametrize("kind", ["yolox", "yolov5"])
+def test_new_thresholds_reach_the_active_detector_without_a_reload(
+    tmp_path: Path, kind: str
+) -> None:
+    built: list[ThresholdDetector] = []
+
+    def factory(model: ModelConfig) -> ThresholdDetector:
+        built.append(ThresholdDetector(model.kind))
+        return built[-1]
+
+    commands = CommandChannel(FakeQueue())
+    store = CalibrationStore(tmp_path / "calibration.json")
+    base = config(tmp_path)
+    yolov5 = tmp_path / "yolov5_nano.xmodel"
+    yolov5.write_bytes(b"x")
+    model = replace(
+        base.model,
+        kind=kind,
+        yolov5_path=yolov5,
+        class_conf={"person": 0.40, "bottle": 0.30, "book": 0.35},
+        object_conf=0.45,
+    )
+    camera = FakeCamera()
+    channel = FrameChannel.create(WIDTH, HEIGHT)
+    pipeline = Pipeline(
+        replace(base, model=model),
+        channel=channel,
+        messages=Sink(),  # type: ignore[arg-type]
+        detector_factory=factory,
+        movenet_factory=lambda settings: FakePoseDetector(),
+        camera_factory=lambda settings: camera,
+        commands=commands,
+        calibration_store=store,
+    )
+    try:
+        with RunningPipeline(pipeline):
+            feed(camera, 2)
+            commands.put(
+                "calibration.set", {"person_conf": 0.6, "held_conf": 0.2, "object_conf": 0.7}
+            )
+            wait_until(lambda: bool(built[0].tables))
+            pipeline._calibration_worker.wait_idle()
+            status = pipeline.status()
+    finally:
+        channel.close()
+        channel.unlink()
+
+    assert [runner.kind for runner in built] == [kind]  # no reload
+    table = built[0].tables[-1]
+    assert table[0] == 0.6  # person
+    assert table[39] == 0.2  # bottle: the loosest held class
+    assert table[73] == 0.25  # book: keeps its 0.05 offset
+    assert table[62] == 0.7  # tv: every other class
+    assert status["calibration"]["person_conf"] == 0.6
+    assert store.load()["held_conf"] == 0.2
+
+
+def test_a_reset_restores_the_yaml_thresholds(tmp_path: Path) -> None:
+    detector = ThresholdDetector("yolox")
+    pipeline, _camera, _sink, channel = build(tmp_path, detector=detector)
+    try:
+        pipeline.start()
+        assert pipeline.set_calibration({"object_conf": 0.8})
+        pipeline.reset_calibration()
+    finally:
+        pipeline.stop()
+        channel.close()
+        channel.unlink()
+
+    assert detector.tables[0][62] == 0.8
+    assert detector.tables[-1][62] == 0.35  # conf_thr of the test config
+    assert pipeline.calibration.object_conf == 0.35

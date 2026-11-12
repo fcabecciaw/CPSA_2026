@@ -48,10 +48,17 @@ export const EXPOSURES = [
 ] as const;
 
 /** The object detectors of the "Modello oggetti" control. */
-export const DETECTOR_CHOICES: ReadonlyArray<{ value: DetectorName; label: string }> = [
-  { value: "yolox", label: "YOLOX-nano" },
-  { value: "yolov5", label: "YOLOv5-nano" },
+export const DETECTOR_CHOICES: ReadonlyArray<{
+  value: DetectorName;
+  label: string;
+  detail: string;
+}> = [
+  { value: "yolov5", label: "YOLOv5-nano", detail: "640 px · intero" },
+  { value: "yolox", label: "YOLOX-nano", detail: "416 px · zoom" },
 ];
+
+/** `person_conf`, `held_conf`, `object_conf`: the "Soglie di rilevamento" sliders. */
+export const THRESHOLD_RANGE: SliderRange = { min: 0.1, max: 0.9, step: 0.01 };
 
 /** `presence.min_box_height`: a person counts at the stand from this box height. */
 export const PERSON_HEIGHT_RANGE: SliderRange = { min: 0.1, max: 0.8, step: 0.01 };
@@ -175,6 +182,12 @@ export function normalizePatch(patch: Partial<CalibrationValues>): Partial<Calib
   if (patch.saturation !== undefined) {
     normalized.saturation = snap(patch.saturation, SATURATION_RANGE, 0);
   }
+  for (const key of ["person_conf", "held_conf", "object_conf"] as const) {
+    const value = patch[key];
+    if (value !== undefined) {
+      normalized[key] = snap(value, THRESHOLD_RANGE, 2);
+    }
+  }
   return normalized;
 }
 
@@ -186,6 +199,9 @@ function copyValues(values: CalibrationValues): CalibrationValues {
     gain: values.gain,
     exposure: values.exposure,
     saturation: values.saturation,
+    person_conf: values.person_conf,
+    held_conf: values.held_conf,
+    object_conf: values.object_conf,
   };
 }
 
@@ -200,7 +216,10 @@ export function sameCalibration(a: CalibrationValues | null, b: CalibrationValue
     a.zoom_center[1] === b.zoom_center[1] &&
     a.gain === b.gain &&
     a.exposure === b.exposure &&
-    a.saturation === b.saturation
+    a.saturation === b.saturation &&
+    a.person_conf === b.person_conf &&
+    a.held_conf === b.held_conf &&
+    a.object_conf === b.object_conf
   );
 }
 
@@ -216,6 +235,9 @@ export function calibrationCommand(values: CalibrationValues): Partial<Calibrati
     zoom_center: [values.zoom_center[0], values.zoom_center[1]],
     gain: values.gain,
     saturation: values.saturation,
+    person_conf: values.person_conf,
+    held_conf: values.held_conf,
+    object_conf: values.object_conf,
   };
   if (EXPOSURES.some((choice) => choice.value === values.exposure)) {
     command.exposure = values.exposure;

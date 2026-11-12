@@ -917,3 +917,25 @@ def test_a_multi_label_frame_decodes_well_inside_the_decode_budget() -> None:
     per_frame_ms = min(samples)
 
     assert per_frame_ms < 2.5, f"{per_frame_ms:.3f} ms per frame for the whole decode"
+
+
+def test_live_class_thresholds_apply_to_the_next_decode_without_a_reload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    payloads = {
+        8: _payload(8, 3, 0),
+        16: np.full(OUTPUT_DIMS[16], -128, np.int8),
+        32: np.full(OUTPUT_DIMS[32], -128, np.int8),
+    }
+    detector = _detector(monkeypatch, tmp_path, payloads=payloads, class_thr={0: 1.0})
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    runner = detector._runner
+    assert detector.detect(frame) == []
+
+    detector.set_class_thresholds({0: 0.1})
+    assert [item.class_id for item in detector.detect(frame)] == [0]
+    assert detector._runner is runner
+
+    with pytest.raises(ValueError):
+        detector.set_class_thresholds({0: 1.5})
+    assert detector.class_thresholds == {0: 0.1}

@@ -194,3 +194,45 @@ def test_yolov5_is_available_only_when_its_model_is_installed(tmp_path: Path) ->
 
     assert available_detectors(missing) == ("yolox",)
     assert available_detectors(installed) == ("yolox", "yolov5")
+
+
+def test_the_shipped_thresholds_are_the_base_and_held_keeps_its_offsets() -> None:
+    base = Calibration.from_config(SHIPPED)
+    assert (base.person_conf, base.held_conf, base.object_conf) == (0.40, 0.30, 0.45)
+
+    model = (
+        base.updated({"person_conf": 0.6, "held_conf": 0.2, "object_conf": 0.7})
+        .applied_to(SHIPPED)
+        .model
+    )
+
+    assert model.object_conf == 0.7
+    assert model.class_conf["person"] == 0.6
+    # bottle and cup were the loosest (0.30), cell phone and book 0.05 above.
+    assert {name: model.class_conf[name] for name in ("bottle", "cup", "cell phone", "book")} == {
+        "bottle": 0.2,
+        "cup": 0.2,
+        "cell phone": 0.25,
+        "book": 0.25,
+    }
+    # Applying twice is stable (the offsets survive a shift).
+    again = base.updated({"held_conf": 0.2}).applied_to(SHIPPED)
+    assert Calibration.from_config(again).held_conf == 0.2
+    assert again.model.class_conf["book"] == 0.25
+
+
+def test_the_thresholds_are_validated_and_persisted(tmp_path: Path) -> None:
+    assert parse_update({"person_conf": 0.1, "held_conf": 0.9, "object_conf": 0.5}) == {
+        "person_conf": 0.1,
+        "held_conf": 0.9,
+        "object_conf": 0.5,
+    }
+    for key in ("person_conf", "held_conf", "object_conf"):
+        for bad in (0.05, 0.95, "0.5", True):
+            with pytest.raises(ValueError, match=key):
+                parse_update({key: bad})
+
+    store = CalibrationStore(tmp_path / "calibration.json")
+    tuned = Calibration.from_config(SHIPPED).updated({"person_conf": 0.55, "object_conf": 0.65})
+    store.save(tuned)
+    assert Calibration.from_config(SHIPPED).updated(store.load()) == tuned

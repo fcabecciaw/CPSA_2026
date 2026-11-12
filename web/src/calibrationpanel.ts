@@ -24,6 +24,7 @@ import {
   PERSON_HEIGHT_RANGE,
   GAIN_SLIDER,
   SATURATION_RANGE,
+  THRESHOLD_RANGE,
   ZOOM_RANGE,
   analysisRect,
   containRect,
@@ -66,7 +67,10 @@ type SliderKey =
   | "gain"
   | "saturation"
   | "person_height"
-  | "face_width";
+  | "face_width"
+  | "person_conf"
+  | "held_conf"
+  | "object_conf";
 
 const ZOOM_KEYS: readonly SliderKey[] = ["zoom", "centre_x", "centre_y"];
 const PRESENCE_KEYS: readonly SliderKey[] = ["person_height", "face_width"];
@@ -163,6 +167,13 @@ export class CalibrationPanel {
       ),
     );
 
+    const thresholds = group("Soglie di rilevamento");
+    thresholds.append(
+      this.slider("person_conf", "Persone", THRESHOLD_RANGE, percent),
+      this.slider("held_conf", "Oggetti in mano", THRESHOLD_RANGE, percent),
+      this.slider("object_conf", "Altri oggetti", THRESHOLD_RANGE, percent),
+    );
+
     const people = group("Distanza persone");
     this.presenceHint = el("p", "calibration-hint calibration-presence-hint", "nessuno in vista");
     people.append(
@@ -181,7 +192,7 @@ export class CalibrationPanel {
     this.resetButton.addEventListener("click", () => this.controller.reset());
     footer.append(this.resetButton, el("span", "calibration-hint", "torna a showcase.yaml"));
 
-    this.card.append(header, analysis, image, people, footer);
+    this.card.append(header, analysis, thresholds, image, people, footer);
     this.root.replaceChildren(this.toggleButton, this.card);
 
     window.addEventListener("keydown", (event) => {
@@ -280,14 +291,20 @@ export class CalibrationPanel {
     }
   }
 
+  /** "Modello oggetti": the two detectors stacked, one full-width option each. */
   private detectorRow(): HTMLElement {
     const row = el("div", "calibration-row calibration-row-stacked");
     const name = el("span", "calibration-label", "Modello oggetti");
-    const segmented = el("div", "calibration-segmented calibration-segmented-wide");
+    const segmented = el("div", "calibration-choices");
     segmented.setAttribute("role", "group");
     segmented.setAttribute("aria-label", "Modello oggetti");
     for (const choice of DETECTOR_CHOICES) {
-      const button = el("button", "calibration-segment", choice.label);
+      const button = el("button", "calibration-choice");
+      button.append(
+        el("span", "calibration-choice-mark"),
+        el("span", "calibration-choice-name", choice.label),
+        el("span", "calibration-choice-detail", choice.detail),
+      );
       button.type = "button";
       button.dataset.detector = choice.value;
       button.setAttribute("aria-pressed", "false");
@@ -380,6 +397,9 @@ export class CalibrationPanel {
       this.show("centre_y", values.zoom_center[1]);
       this.show("gain", values.gain);
       this.show("saturation", values.saturation);
+      this.show("person_conf", values.person_conf);
+      this.show("held_conf", values.held_conf);
+      this.show("object_conf", values.object_conf);
     }
     this.renderPresence();
     this.renderRect();

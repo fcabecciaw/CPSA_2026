@@ -84,7 +84,7 @@ def test_the_camera_mirrors_by_default_and_can_be_turned_off(tmp_path: Path) -> 
 def test_the_shipped_configuration_parses_and_names_the_machine() -> None:
     config = load(SHIPPED)
 
-    assert config.model.name == "yolox_nano"
+    assert config.model.name == "yolov5_nano"  # the shipped detector (model.kind)
     assert config.model.path == Path("models/yolox_nano.xmodel")
     assert config.model.conf_thr == 0.35
     assert config.model.class_conf == {
@@ -557,7 +557,9 @@ def test_the_object_detector_defaults_to_yolox_with_the_yolov5_path() -> None:
 def test_the_shipped_configuration_names_both_detectors() -> None:
     model = load(Path(__file__).resolve().parents[1] / "config" / "showcase.yaml").model
 
-    assert model.kind == "yolox"
+    # YOLOv5-nano is the shipped detector; YOLOX stays the fallback and the
+    # other choice of the Calibrazione card.
+    assert model.kind == "yolov5"
     assert model.yolov5_path == Path("models/yolov5_nano.xmodel")
 
 

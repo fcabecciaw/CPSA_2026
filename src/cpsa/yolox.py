@@ -1119,6 +1119,10 @@ def _detections_from_decoded(
 # --------------------------------------------------------------------------- #
 
 
+_THRESHOLD_CACHE_MAX = 32
+"""Threshold tables kept per decoder before a live calibration clears them."""
+
+
 class YoloxDetector:
     """Run one compiled YOLOX ``.xmodel`` graph on the KV260 DPU.
 
@@ -1254,6 +1258,30 @@ class YoloxDetector:
             raise ValueError(f"zoom_center must be fractions in [0, 1], got {zoom_center}")
         self._zoom = float(zoom)
         self._zoom_center = (float(zoom_center[0]), float(zoom_center[1]))
+
+    @property
+    def class_thresholds(self) -> dict[int, float]:
+        """The per-class thresholds the next decode uses, by COCO-80 class id."""
+        return dict(self._class_thr)
+
+    def set_class_thresholds(self, class_thr: Mapping[int, float]) -> None:
+        """Replace the per-class thresholds from the next decode on (live calibration).
+
+        No reload: the decoder keys its float thresholds and int8 prefilter
+        gates by the threshold table, so the next frame builds (and caches) the
+        new ones. A job already in flight decodes with the new table too.
+
+        Raises:
+            ValueError: If a threshold is outside ``[0, 1]`` or names a class the
+                graph does not have; the previous table is kept.
+        """
+
+        _class_thresholds(self._conf_thr, class_thr, self._outputs[0].shape[2] - _CLASS_START)
+        self._class_thr = dict(class_thr)
+        cache = self._decoder._threshold_cache
+        if len(cache) > _THRESHOLD_CACHE_MAX:
+            # A slider dragged for a while leaves one entry per stop.
+            cache.clear()
 
     def submit(self, rgb: NDArray[np.uint8], pass_: Pass | None = None) -> int:
         """Preprocess ``rgb`` and start the DPU without waiting for it.

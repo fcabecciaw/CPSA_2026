@@ -29,14 +29,14 @@ optional `seq` (`client-envelope.schema.json`): the server echoes it as
 | Type | Direction | Payload |
 |---|---|---|
 | `hello` | server → client | `server_version`, `protocol_version` (`1`). Sent first, on every connection. |
-| `status` | server | `state` (`starting`, `running`, `error`), `camera` (`ok`, `missing`, `error`), `model`, `active_model` (`yolox`, `movenet`), `switching`, `swap_ms`, `fps`, `dpu_ms`, `errors`, `uptime_s`, `calibration` (`detector`, `detectors`, `zoom`, `zoom_center`, `gain`, `exposure`, `saturation`, or `null`). 1 Hz and on change. |
+| `status` | server | `state` (`starting`, `running`, `error`), `camera` (`ok`, `missing`, `error`), `model`, `active_model` (`yolox`, `movenet`), `switching`, `swap_ms`, `fps`, `dpu_ms`, `errors`, `uptime_s`, `calibration` (`detector`, `detectors`, `zoom`, `zoom_center`, `gain`, `exposure`, `saturation`, `person_conf`, `held_conf`, `object_conf`, or `null`). 1 Hz and on change. |
 | `showcase.state` | server | `model`, `width`, `height`, `fps`, `dpu_ms`, `total_ms`, `objects`, `counts`. At most 10 Hz, while YOLOX is loaded. |
 | `pose.state` | server | `model`, `width`, `height`, `fps`, `dpu_ms`, `total_ms`, `score`, `keypoints` (17 × `[x, y, score]`). At most `movenet.publish_hz`, while MoveNet is loaded (R2-G). |
 | `error` | server | `code`, `message`, optional `ref_seq`. |
 | `pong` | server | `id`, the value of the `ping` it answers. |
 | `ping` | client → server | `id`, echoed back unchanged. |
 | `model.set` | client → server | `model` (`yolox`, `movenet`): releases the loaded DPU model and loads the other one. An unknown or disabled model is `error bad_command` and nothing is switched. |
-| `calibration.set` | client → server | Any non-empty subset of `detector` (`yolox`, `yolov5`), `zoom` (1.0–2.0), `zoom_center` (`[x, y]`, 0–1), `gain` (64–2540), `exposure` (`100` = 1/100 s or `200` = 1/50 s) and `saturation` (0–255). Applied from the next frame and kept across restarts. |
+| `calibration.set` | client → server | Any non-empty subset of `detector` (`yolox`, `yolov5`), `zoom` (1.0–2.0), `zoom_center` (`[x, y]`, 0–1), `gain` (64–2540), `exposure` (`100` = 1/100 s or `200` = 1/50 s), `saturation` (0–255) and the detection thresholds `person_conf`, `held_conf`, `object_conf` (0.10–0.90). Applied from the next frame and kept across restarts. |
 | `calibration.reset` | client → server | Empty `data`: forget the stored calibration and go back to `config/showcase.yaml`. |
 
 `errors` lists the conditions the process reports, once each:
@@ -83,6 +83,14 @@ released and the other built, with `status.switching` true meanwhile; a load
 that fails restores the previous detector and reports it in
 `status.calibration.detector`. `status.calibration.detectors` lists what the
 board has installed, and `yolov5` without its `.xmodel` is `error bad_command`.
+
+`person_conf`, `held_conf` and `object_conf` rebuild the per-class threshold
+table of the active detector (YOLOX or YOLOv5, int8 prefilter gates included)
+for the next frame, with no reload. `person_conf` is the `person` class,
+`object_conf` every class without its own threshold (`model.object_conf`), and
+`held_conf` the loosest of the held objects (bottle, cup, cell phone, book):
+the others keep the offset `config/showcase.yaml` gives them above it (shipped
+0.30/0.30/0.35/0.35, so `held_conf` 0.25 gives 0.25/0.25/0.30/0.30).
 
 A measurement that does not exist yet is `null`, never an absent key. `t` is
 monotonic seconds on the board; `wall` is the UTC wall clock.

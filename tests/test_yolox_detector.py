@@ -580,3 +580,26 @@ def test_a_live_zoom_out_of_range_is_rejected_and_keeps_the_crop(
     with pytest.raises(ValueError, match="zoom"):
         detector.set_zoom(zoom, centre)
     assert detector.zoom == (1.3, (0.5, 0.5))
+
+
+def test_live_class_thresholds_apply_to_the_next_decode_without_a_reload(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    outputs = {
+        8: _head(3, [(0, 0, {"tx": 2.5, "ty": 10.0, "log_w": math.log(2.0)})], 8),
+        16: _head(3, [], 16),
+        32: _head(3, [], 32),
+    }
+    detector = _detector(monkeypatch, tmp_path, payloads=outputs, class_thr={0: 1.0})
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    runner = detector._runner
+    assert detector.detect(frame) == []
+
+    detector.set_class_thresholds({0: 0.5})
+    assert [item.class_id for item in detector.detect(frame)] == [0]
+    assert detector.class_thresholds == {0: 0.5}
+    assert detector._runner is runner
+
+    with pytest.raises(ValueError):
+        detector.set_class_thresholds({500: 0.5})
+    assert detector.class_thresholds == {0: 0.5}

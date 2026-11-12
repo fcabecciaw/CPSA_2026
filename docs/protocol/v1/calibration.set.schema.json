@@ -46,9 +46,27 @@
       "minimum": 0,
       "maximum": 255,
       "description": "V4L2 saturation of the RGB camera."
+    },
+    "person_conf": {
+      "type": "number",
+      "minimum": 0.1,
+      "maximum": 0.9,
+      "description": "Detection threshold of the person class (objectness * class score)."
+    },
+    "held_conf": {
+      "type": "number",
+      "minimum": 0.1,
+      "maximum": 0.9,
+      "description": "Threshold of the loosest held-object class (bottle, cup, cell phone, book); the others keep their config/showcase.yaml offset above it."
+    },
+    "object_conf": {
+      "type": "number",
+      "minimum": 0.1,
+      "maximum": 0.9,
+      "description": "Threshold of every other class (model.object_conf)."
     }
   },
   "minProperties": 1,
   "additionalProperties": false,
-  "description": "Any non-empty subset of the six values. Process A applies the zoom to the next frame and the camera controls to the open stream, and stores the accepted values in ~/cpsa/config/calibration.json as overrides of config/showcase.yaml. A value out of range or an unknown key is error bad_command and nothing changes."
+  "description": "Any non-empty subset of the values (detector, zoom, camera image, detection thresholds). The thresholds reach the active detector on the next frame, with no reload. Process A applies the zoom to the next frame and the camera controls to the open stream, and stores the accepted values in ~/cpsa/config/calibration.json as overrides of config/showcase.yaml. A value out of range or an unknown key is error bad_command and nothing changes."
 }

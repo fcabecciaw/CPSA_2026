@@ -778,3 +778,25 @@ def test_an_unavailable_or_unknown_detector_is_a_bad_command(
     assert error["code"] == "bad_command"
     assert reason in error["message"]
     assert forwarded == []
+
+
+@pytest.mark.parametrize(
+    ("data", "ok"),
+    [
+        ({"person_conf": 0.5, "held_conf": 0.25, "object_conf": 0.6}, True),
+        ({"person_conf": 0.05}, False),
+        ({"held_conf": 0.95}, False),
+        ({"object_conf": "high"}, False),
+    ],
+)
+def test_detection_thresholds_are_validated(tmp_path: Path, data: dict[str, Any], ok: bool) -> None:
+    command = {"v": 1, "type": "calibration.set", "seq": 11, "data": data}
+    with Running(tmp_path) as running:
+        error, forwarded = run(lambda: _send_and_collect(running, command, expect_error=not ok))
+
+    if ok:
+        assert error is None
+        assert forwarded == [("calibration.set", data)]
+    else:
+        assert error is not None and error["code"] == "bad_command"
+        assert forwarded == []

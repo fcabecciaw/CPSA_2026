@@ -1,9 +1,10 @@
 """Live calibration of the showcase: YOLOX zoom and the camera image (debug panel).
 
-The operator tunes six values from the dashboard's debug panel while the demo
-runs: the object detector (``detector``: YOLOX-nano or YOLOv5-nano), the YOLOX
-centre crop (``zoom``, ``zoom_center``) and three camera controls (``gain``,
-``exposure``, ``saturation``). ``config/showcase.yaml``
+The operator tunes these values from the dashboard's debug panel while the
+demo runs: the object detector (``detector``: YOLOX-nano or YOLOv5-nano), the
+YOLOX centre crop (``zoom``, ``zoom_center``), three camera controls
+(``gain``, ``exposure``, ``saturation``) and three detection thresholds
+(``person_conf``, ``held_conf``, ``object_conf``). ``config/showcase.yaml``
 holds the defaults; the accepted values are written to
 ``~/cpsa/config/calibration.json`` and loaded at the next start as overrides on
 top of it, so a calibration survives a restart until ``calibration.reset``
@@ -35,6 +36,7 @@ from cpsa.config import (
     GAIN_RANGE,
     SATURATION_RANGE,
     ZOOM_RANGE,
+    ModelConfig,
     ShowcaseConfig,
 )
 
@@ -43,6 +45,9 @@ logger = logging.getLogger("cpsa.calibration")
 __all__ = [
     "CALIBRATION_KEYS",
     "CAMERA_KEYS",
+    "HELD_CLASSES",
+    "THRESHOLD_KEYS",
+    "THRESHOLD_RANGE",
     "DEFAULT_CALIBRATION_PATH",
     "EXPOSURE_CHOICES",
     "Calibration",
@@ -61,7 +66,21 @@ EXPOSURE_CHOICES = (100, 200)
 CAMERA_KEYS = ("gain", "exposure", "saturation")
 """The calibration values that are V4L2 controls of the open camera stream."""
 
-CALIBRATION_KEYS = ("detector", "zoom", "zoom_center", *CAMERA_KEYS)
+THRESHOLD_KEYS = ("person_conf", "held_conf", "object_conf")
+"""The detection thresholds of the card: persons, held objects, every other class."""
+
+THRESHOLD_RANGE = (0.10, 0.90)
+"""Range of the three ``*_conf`` sliders (``objectness * class`` score)."""
+
+HELD_CLASSES = ("bottle", "cup", "cell phone", "book")
+"""The objects visitors hold up: ``held_conf`` moves their thresholds together.
+
+``held_conf`` is the loosest of them; the others keep the offset
+``config/showcase.yaml`` gives them above it (shipped: bottle and cup 0.30,
+cell phone and book 0.35, so ``held_conf`` 0.25 makes them 0.25 and 0.30).
+"""
+
+CALIBRATION_KEYS = ("detector", "zoom", "zoom_center", *CAMERA_KEYS, *THRESHOLD_KEYS)
 """Every value ``calibration.set`` accepts, in the order ``status`` lists them."""
 
 
@@ -76,6 +95,12 @@ class Calibration:
     saturation: int
     detector: str = DETECTOR_KINDS[0]
     """``yolox`` or ``yolov5``: the object detector of the ``yolox`` view."""
+    person_conf: float = 0.35
+    """Threshold of the ``person`` class."""
+    held_conf: float = 0.35
+    """Threshold of the loosest :data:`HELD_CLASSES` class (the others keep their offset)."""
+    object_conf: float = 0.35
+    """Threshold of every other class (``model.object_conf``)."""
 
     @classmethod
     def from_config(cls, config: ShowcaseConfig) -> Calibration:
@@ -87,6 +112,7 @@ class Calibration:
             exposure=config.camera.exposure,
             saturation=config.camera.saturation,
             detector=config.model.kind,
+            **_thresholds_of(config.model),
         )
 
     def updated(self, update: Mapping[str, Any]) -> Calibration:
@@ -102,6 +128,8 @@ class Calibration:
                 zoom=self.zoom,
                 zoom_center=self.zoom_center,
                 kind=self.detector,
+                class_conf=self._class_conf(config.model),
+                object_conf=self.object_conf,
             ),
             camera=replace(
                 config.camera,
@@ -110,6 +138,20 @@ class Calibration:
                 saturation=self.saturation,
             ),
         )
+
+    def _class_conf(self, model: ModelConfig) -> dict[str, float]:
+        """``model.class_conf`` with ``person`` and the held classes at these values.
+
+        The held offsets come from ``model`` itself: a uniform shift keeps them,
+        so applying a calibration to an already calibrated config is stable.
+        """
+        held = _held_thresholds(model)
+        floor = min(held.values())
+        class_conf = dict(model.class_conf)
+        class_conf["person"] = self.person_conf
+        for name, threshold in held.items():
+            class_conf[name] = round(min(1.0, self.held_conf + threshold - floor), 4)
+        return class_conf
 
     def camera_controls(self) -> dict[str, int]:
         """The V4L2 part: ``{"gain", "exposure", "saturation"}``."""
@@ -124,7 +166,30 @@ class Calibration:
             "gain": self.gain,
             "exposure": self.exposure,
             "saturation": self.saturation,
+            "person_conf": round(self.person_conf, 3),
+            "held_conf": round(self.held_conf, 3),
+            "object_conf": round(self.object_conf, 3),
         }
+
+
+def _object_default(model: ModelConfig) -> float:
+    """The threshold of a class ``class_conf`` does not name."""
+    return model.conf_thr if model.object_conf is None else float(model.object_conf)
+
+
+def _held_thresholds(model: ModelConfig) -> dict[str, float]:
+    """The current threshold of each :data:`HELD_CLASSES` class."""
+    default = _object_default(model)
+    return {name: float(model.class_conf.get(name, default)) for name in HELD_CLASSES}
+
+
+def _thresholds_of(model: ModelConfig) -> dict[str, float]:
+    """The three card thresholds a model config implies."""
+    return {
+        "person_conf": float(model.class_conf.get("person", _object_default(model))),
+        "held_conf": min(_held_thresholds(model).values()),
+        "object_conf": _object_default(model),
+    }
 
 
 def available_detectors(config: ShowcaseConfig) -> tuple[str, ...]:
@@ -184,6 +249,9 @@ def parse_update(data: object) -> dict[str, Any]:
         update["exposure"] = _whole(exposure)
     if "saturation" in data:
         update["saturation"] = _integer(data["saturation"], "saturation", *SATURATION_RANGE)
+    for key in THRESHOLD_KEYS:
+        if key in data:
+            update[key] = _number(data[key], key, *THRESHOLD_RANGE)
     return update
 
 

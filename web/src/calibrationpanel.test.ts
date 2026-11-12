@@ -12,6 +12,9 @@ const YAML: CalibrationValues = {
   gain: 200,
   exposure: 100,
   saturation: 110,
+  person_conf: 0.4,
+  held_conf: 0.3,
+  object_conf: 0.45,
 };
 
 function setup(presence?: { thresholds: { minBoxHeight: number; minFaceWidth: number } }) {
@@ -197,5 +200,53 @@ describe("CalibrationPanel: YOLOv5 and Distanza persone", () => {
       (node) => node.textContent?.includes("Distanza persone"),
     ) as HTMLElement;
     expect(group.hidden).toBe(true);
+  });
+});
+
+describe("CalibrationPanel: vertical model switch and detection thresholds", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("stacks the two detectors, YOLOv5 first, one full-width option each", () => {
+    const { panel } = setup();
+    panel.setConnected(true);
+    panel.setStatus({ ...YAML, detector: "yolov5", detectors: ["yolox", "yolov5"] });
+
+    const options = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(".calibration-choices > .calibration-choice"),
+    );
+    expect(options.map((button) => button.dataset.detector)).toEqual(["yolov5", "yolox"]);
+    expect(options.map((button) => button.getAttribute("aria-pressed"))).toEqual(["true", "false"]);
+    expect(options[0].textContent).toContain("YOLOv5-nano");
+    expect(options[0].textContent).toContain("640 px");
+  });
+
+  it("sends the three thresholds after the debounce, shown as percentages", () => {
+    const { panel, sent, slider } = setup();
+    panel.setConnected(true);
+    panel.setStatus({ ...YAML, detectors: ["yolox", "yolov5"] });
+    const card = document.querySelector(".calibration-card") as HTMLElement;
+    expect(card.textContent).toContain("Soglie di rilevamento");
+    expect(slider("person_conf").value).toBe("0.4");
+    expect(slider("held_conf").disabled).toBe(false);
+
+    drag(slider("person_conf"), 0.55);
+    drag(slider("held_conf"), 0.22);
+    drag(slider("object_conf"), 0.7);
+    expect(card.textContent).toContain("55%");
+    expect(sent).toEqual([]);
+
+    vi.advanceTimersByTime(150);
+    expect(sent).toEqual([{ ...YAML, person_conf: 0.55, held_conf: 0.22, object_conf: 0.7 }]);
+  });
+
+  it("keeps the thresholds disabled until the board reports them", () => {
+    const { slider } = setup();
+    expect(slider("object_conf").disabled).toBe(true);
   });
 });

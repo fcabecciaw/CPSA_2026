@@ -130,6 +130,24 @@
           "minimum": 0,
           "maximum": 255,
           "description": "V4L2 saturation of the RGB camera."
+        },
+        "person_conf": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Detection threshold of the person class (objectness * class score)."
+        },
+        "held_conf": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Threshold of the loosest held-object class (bottle, cup, cell phone, book); the others keep their config/showcase.yaml offset above it."
+        },
+        "object_conf": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Threshold of every other class (model.object_conf)."
         }
       },
       "required": [

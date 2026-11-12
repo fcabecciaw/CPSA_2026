@@ -995,6 +995,13 @@ class Pipeline:
             self._config = target.applied_to(self._config)
             runner = self._runner
             active = self._active_model
+            model = self._config.model
+        if _thresholds(target) != _thresholds(previous):
+            # Both detectors key their int8 prefilter gates by this table: the
+            # next decode uses it, with no reload.
+            set_class_thresholds = getattr(runner, "set_class_thresholds", None)
+            if active == "yolox" and callable(set_class_thresholds):
+                set_class_thresholds(_class_table(model))
         if (target.zoom, target.zoom_center) != (previous.zoom, previous.zoom_center):
             set_zoom = getattr(runner, "set_zoom", None)
             if active == "yolox" and callable(set_zoom):
@@ -1342,6 +1349,17 @@ def _pose_period(publish_hz: float) -> float:
     return 1.0 / max(float(publish_hz), 1e-6)
 
 
+def _thresholds(calibration: Calibration) -> tuple[float, float, float]:
+    return (calibration.person_conf, calibration.held_conf, calibration.object_conf)
+
+
+def _class_table(model: ModelConfig) -> dict[int, float]:
+    """The per-class threshold table of ``model``, by COCO-80 class id."""
+    return class_thresholds(
+        model.conf_thr, class_conf=model.class_conf, object_conf=model.object_conf
+    )
+
+
 def _default_detector(model: ModelConfig) -> Detector:
     """Build the object detector ``model.kind`` names: YOLOX-nano or YOLOv5-nano.
 
@@ -1353,21 +1371,13 @@ def _default_detector(model: ModelConfig) -> Detector:
             model.yolov5_path,
             conf_thr=model.conf_thr,
             iou_thr=model.iou_thr,
-            class_thr=class_thresholds(
-                model.conf_thr,
-                class_conf=model.class_conf,
-                object_conf=model.object_conf,
-            ),
+            class_thr=_class_table(model),
         )
     return YoloxDetector(
         model.path,
         conf_thr=model.conf_thr,
         iou_thr=model.iou_thr,
-        class_thr=class_thresholds(
-            model.conf_thr,
-            class_conf=model.class_conf,
-            object_conf=model.object_conf,
-        ),
+        class_thr=_class_table(model),
         zoom=model.zoom,
         zoom_center=model.zoom_center,
     )

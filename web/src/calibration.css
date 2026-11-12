@@ -167,8 +167,80 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
-.calibration-segmented-wide {
+/* "Modello oggetti": one option above the other, the whole card wide. */
+.calibration-choices {
   display: grid;
+  gap: 0.3rem;
+}
+
+.calibration-choice {
+  display: grid;
+  grid-template-columns: auto max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid var(--hairline);
+  border-radius: 0.55rem;
+  background: var(--glass);
+  color: var(--muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease;
+}
+
+.calibration-choice:hover:not(:disabled) {
+  border-color: var(--rim-strong);
+  color: var(--starlight);
+}
+
+.calibration-choice-mark {
+  width: 0.7rem;
+  height: 0.7rem;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  opacity: 0.7;
+}
+
+.calibration-choice-name {
+  white-space: nowrap;
+  color: inherit;
+}
+
+.calibration-choice-detail {
+  justify-self: end;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dim);
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.calibration-choice[aria-pressed="true"] {
+  border-color: rgba(79, 214, 255, 0.55);
+  background: rgba(79, 214, 255, 0.12);
+  color: var(--beam);
+}
+
+.calibration-choice[aria-pressed="true"] .calibration-choice-mark {
+  border-color: var(--ion);
+  background: radial-gradient(circle, var(--ion) 0 45%, transparent 50%);
+  opacity: 1;
+}
+
+.calibration-choice:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.calibration-choice:focus-visible {
+  outline: 2px solid var(--ion);
+  outline-offset: 2px;
 }
 
 /* YOLOv5 sees the whole frame: the zoom controls stay visible but quiet. */
@@ -178,8 +250,9 @@
   filter: grayscale(1);
 }
 
-.calibration-zoom-note,
-.calibration-presence-hint {
+/* Notes wrap inside the card (`.calibration-hint` alone stays on one line). */
+.calibration-hint.calibration-zoom-note,
+.calibration-hint.calibration-presence-hint {
   margin: 0;
   white-space: normal;
   line-height: 1.35;
@@ -262,6 +335,7 @@
 @media (prefers-reduced-motion: reduce) {
   .analysis-rect,
   .calibration-segment,
+  .calibration-choice,
   .calibration-reset {
     transition: none;
   }

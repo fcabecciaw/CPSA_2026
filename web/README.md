@@ -122,10 +122,13 @@ modes; the mock badge only in debug mode.
 
 The round button with a viewfinder icon in the top bar (or `c`)
 opens **Calibrazione**, a compact card for the calibration day: the object
-detector ("Modello oggetti": YOLOX-nano or YOLOv5-nano, the latter disabled
-when `status.calibration.detectors` lacks it; with YOLOv5 the zoom controls are
+detector ("Modello oggetti": YOLOv5-nano, the shipped one, above YOLOX-nano,
+one full-width option each; YOLOv5 is disabled when `status.calibration.detectors`
+lacks it; with YOLOv5 the zoom controls are
 greyed out and the outline hidden, since it analyses the whole frame at 640 px),
-the YOLOX crop (zoom 1.0–2.0, centre X/Y), the camera gain (logarithmic slider, 64–2540),
+the YOLOX crop (zoom 1.0–2.0, centre X/Y), the "Soglie di rilevamento"
+(Persone, Oggetti in mano, Altri oggetti: `person_conf`, `held_conf`,
+`object_conf`, 10–90%, applied to the active detector without a reload), the camera gain (logarithmic slider, 64–2540),
 the exposure (1/100 s or 1/50 s, both flicker-safe at 50 Hz), the saturation
 and "Ripristina". Every change is shown at once and sent as one
 `calibration.set` about 150 ms after the last movement; the board applies it on

@@ -18,6 +18,9 @@ const YAML: CalibrationValues = {
   gain: 200,
   exposure: 100,
   saturation: 110,
+  person_conf: 0.4,
+  held_conf: 0.3,
+  object_conf: 0.45,
 };
 
 /** `cpsa.yolox.zoom_crop(640, 480, zoom, centre)` as the board computes it. */
@@ -87,6 +90,11 @@ describe("normalizePatch and calibrationCommand", () => {
     expect(normalizePatch({ gain: 10.4, saturation: 300 })).toEqual({ gain: 64, saturation: 255 });
     expect(normalizePatch({ exposure: 200 })).toEqual({ exposure: 200 });
     expect(normalizePatch({ exposure: 150 })).toEqual({});
+    expect(normalizePatch({ person_conf: 0.957, held_conf: 0.05, object_conf: 0.456 })).toEqual({
+      person_conf: 0.9,
+      held_conf: 0.1,
+      object_conf: 0.46,
+    });
   });
 
   it("sends every value, but an exposure outside the two choices stays out", () => {
