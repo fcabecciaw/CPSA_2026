@@ -80,9 +80,9 @@ def test_scene_parser_skips_keys_comments_and_slots(tmp_path: Path) -> None:
         '  /** "Citazione" in a comment. */\n'
         '  single: ["Ciao!", "Ciao a {n}!"],\n'
         "};\n"
-        "// \"riga\" commentata\n"
+        '// "riga" commentata\n'
         'const CONTINUITY = { "a+b": ["Prima a, poi b."] };\n'
-        "export const SCENE_PHRASES = { X: [\"Dopo\"] };\n",
+        'export const SCENE_PHRASES = { X: ["Dopo"] };\n',
         encoding="utf-8",
     )
     assert [phrase.text for phrase in parse_scene(source)] == ["Ciao!", "Prima a, poi b."]
