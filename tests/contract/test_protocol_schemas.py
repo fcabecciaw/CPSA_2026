@@ -171,7 +171,15 @@ def test_a_calibrated_status_validates_and_needs_the_calibration_key() -> None:
 
 @pytest.mark.parametrize(
     "data",
-    [{}, {"zoom": 2.5}, {"exposure": 150}, {"gain": 10}, {"zoom_center": [0.5]}, {"hue": 3}],
+    [
+        {},
+        {"zoom": 2.5},
+        {"exposure": 150},
+        {"gain": 10},
+        {"zoom_center": [0.5]},
+        {"hue": 3},
+        {"detector": "yolov8"},
+    ],
 )
 def test_a_bad_calibration_set_is_rejected_by_its_schema(data: dict[str, Any]) -> None:
     with pytest.raises(ValidationError):

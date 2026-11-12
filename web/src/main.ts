@@ -9,6 +9,7 @@ import {
 import { CognitiveAgent, HEARTBEAT_MS, type MindSnapshot } from "./cognitive/agent";
 import { CognitiveMemory } from "./cognitive/memory";
 import { Perception } from "./cognitive/perception";
+import { presenceThresholds, setPresenceThresholds } from "./cognitive/presence";
 import { RULEBOOK } from "./cognitive/rulebook";
 import { CognitiveEngine, type Expression } from "./cognitive/rules";
 import { AttractView, type LiveNumbers } from "./attract";
@@ -106,6 +107,8 @@ const calibration = new CalibrationPanel({
   send: (values) => client.setCalibration(values),
   reset: () => client.resetCalibration(),
   isDebug: () => document.documentElement.dataset.ui === "debug",
+  // "Distanza persone": the laptop-side presence gate, live and in localStorage.
+  presence: { get: presenceThresholds, set: (next) => setPresenceThresholds(next) },
 });
 if (params.get("calibration") === "1") {
   // `?debug=1&calibration=1`: open the card at load (screenshots, calibration day).
@@ -353,6 +356,7 @@ function renderPresence(snapshot: MindSnapshot): void {
     `persona h ≥ ${formatNumber(presence.thresholds.minBoxHeight, 2)} · ` +
       `volto l ≥ ${formatNumber(presence.thresholds.minFaceWidth, 2)}`,
   );
+  calibration.setPresenceTracks(presence.tracks);
   setText(
     presenceTracks,
     presence.tracks.length === 0

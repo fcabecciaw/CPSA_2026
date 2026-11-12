@@ -1,8 +1,9 @@
 """Live calibration of the showcase: YOLOX zoom and the camera image (debug panel).
 
-The operator tunes five values from the dashboard's debug panel while the demo
-runs: the YOLOX centre crop (``zoom``, ``zoom_center``) and three camera
-controls (``gain``, ``exposure``, ``saturation``). ``config/showcase.yaml``
+The operator tunes six values from the dashboard's debug panel while the demo
+runs: the object detector (``detector``: YOLOX-nano or YOLOv5-nano), the YOLOX
+centre crop (``zoom``, ``zoom_center``) and three camera controls (``gain``,
+``exposure``, ``saturation``). ``config/showcase.yaml``
 holds the defaults; the accepted values are written to
 ``~/cpsa/config/calibration.json`` and loaded at the next start as overrides on
 top of it, so a calibration survives a restart until ``calibration.reset``
@@ -29,7 +30,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
-from cpsa.config import GAIN_RANGE, SATURATION_RANGE, ZOOM_RANGE, ShowcaseConfig
+from cpsa.config import (
+    DETECTOR_KINDS,
+    GAIN_RANGE,
+    SATURATION_RANGE,
+    ZOOM_RANGE,
+    ShowcaseConfig,
+)
 
 logger = logging.getLogger("cpsa.calibration")
 
@@ -39,6 +46,7 @@ __all__ = [
     "DEFAULT_CALIBRATION_PATH",
     "EXPOSURE_CHOICES",
     "Calibration",
+    "available_detectors",
     "CalibrationStore",
     "LatestWorker",
     "parse_update",
@@ -53,19 +61,21 @@ EXPOSURE_CHOICES = (100, 200)
 CAMERA_KEYS = ("gain", "exposure", "saturation")
 """The calibration values that are V4L2 controls of the open camera stream."""
 
-CALIBRATION_KEYS = ("zoom", "zoom_center", *CAMERA_KEYS)
+CALIBRATION_KEYS = ("detector", "zoom", "zoom_center", *CAMERA_KEYS)
 """Every value ``calibration.set`` accepts, in the order ``status`` lists them."""
 
 
 @dataclass(frozen=True)
 class Calibration:
-    """The five values the debug panel tunes, as the pipeline applies them."""
+    """The values the debug panel tunes, as the pipeline applies them."""
 
     zoom: float
     zoom_center: tuple[float, float]
     gain: int
     exposure: int
     saturation: int
+    detector: str = DETECTOR_KINDS[0]
+    """``yolox`` or ``yolov5``: the object detector of the ``yolox`` view."""
 
     @classmethod
     def from_config(cls, config: ShowcaseConfig) -> Calibration:
@@ -76,6 +86,7 @@ class Calibration:
             gain=config.camera.gain,
             exposure=config.camera.exposure,
             saturation=config.camera.saturation,
+            detector=config.model.kind,
         )
 
     def updated(self, update: Mapping[str, Any]) -> Calibration:
@@ -86,7 +97,12 @@ class Calibration:
         """Return ``config`` with these values in its ``model`` and ``camera`` sections."""
         return replace(
             config,
-            model=replace(config.model, zoom=self.zoom, zoom_center=self.zoom_center),
+            model=replace(
+                config.model,
+                zoom=self.zoom,
+                zoom_center=self.zoom_center,
+                kind=self.detector,
+            ),
             camera=replace(
                 config.camera,
                 gain=self.gain,
@@ -102,6 +118,7 @@ class Calibration:
     def to_json(self) -> dict[str, Any]:
         """The ``status.calibration`` object and the content of the file."""
         return {
+            "detector": self.detector,
             "zoom": round(self.zoom, 4),
             "zoom_center": [round(self.zoom_center[0], 4), round(self.zoom_center[1], 4)],
             "gain": self.gain,
@@ -110,10 +127,22 @@ class Calibration:
         }
 
 
+def available_detectors(config: ShowcaseConfig) -> tuple[str, ...]:
+    """The object detectors this board can load: YOLOX, and YOLOv5 if deployed.
+
+    ``deploy.sh`` installs YOLOv5-nano only when it was compiled, so a missing
+    ``model.yolov5_path`` leaves the dashboard's YOLOv5 option disabled.
+    """
+    if config.model.yolov5_path.is_file():
+        return DETECTOR_KINDS
+    return DETECTOR_KINDS[:1]
+
+
 def parse_update(data: object) -> dict[str, Any]:
     """Validate a ``calibration.set`` payload and return its normalized values.
 
-    Any non-empty subset of :data:`CALIBRATION_KEYS` is accepted: ``zoom`` a
+    Any non-empty subset of :data:`CALIBRATION_KEYS` is accepted: ``detector``
+    ``yolox`` or ``yolov5``, ``zoom`` a
     number in ``1.0..2.0``, ``zoom_center`` two numbers in ``0..1``, ``gain`` an
     integer in ``64..2540``, ``exposure`` one of :data:`EXPOSURE_CHOICES` and
     ``saturation`` an integer in ``0..255``.
@@ -131,6 +160,10 @@ def parse_update(data: object) -> dict[str, Any]:
     if not data:
         raise ValueError("calibration.set needs at least one value")
     update: dict[str, Any] = {}
+    if "detector" in data:
+        if data["detector"] not in DETECTOR_KINDS:
+            raise ValueError(f"detector must be {' or '.join(DETECTOR_KINDS)}")
+        update["detector"] = str(data["detector"])
     if "zoom" in data:
         update["zoom"] = _number(data["zoom"], "zoom", *ZOOM_RANGE)
     if "zoom_center" in data:

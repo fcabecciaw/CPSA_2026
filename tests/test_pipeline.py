@@ -560,6 +560,7 @@ def test_the_state_counts_a_bottle_inside_the_person_box(tmp_path: Path) -> None
     assert [item["class_id"] for item in state["objects"]] == [PERSON.class_id, BOTTLE.class_id]
 
 
+@pytest.mark.benchmark  # wall-clock: frames paced by sleep, a loaded host drops one
 def test_the_tracker_keeps_the_published_box_still(tmp_path: Path) -> None:
     detector = FakeDetector()
     pipeline, camera, sink, channel = build(tmp_path, detector=detector)
@@ -715,6 +716,7 @@ def test_a_still_scene_is_refreshed_every_force_every_s(tmp_path: Path) -> None:
     assert 2 <= submitted < 14
 
 
+@pytest.mark.benchmark  # wall-clock: frames paced by sleep, a loaded host drops one
 def test_a_disabled_gate_infers_on_every_frame(tmp_path: Path) -> None:
     detector = FakeDetector([PERSON])
     pipeline, camera, sink, channel = build(
@@ -1494,6 +1496,8 @@ def test_the_status_reports_the_yaml_calibration_by_default(tmp_path: Path) -> N
     pipeline, _camera, _sink, channel = build(tmp_path)
     try:
         assert pipeline.status()["calibration"] == {
+            "detector": "yolox",
+            "detectors": ["yolox"],
             "zoom": 1.0,
             "zoom_center": [0.5, 0.5],
             "gain": 300,
@@ -1532,6 +1536,8 @@ def test_a_calibration_command_reaches_the_detector_the_camera_and_the_file(
         channel.unlink()
 
     expected = {
+        "detector": "yolox",
+        "detectors": ["yolox"],
         "zoom": 1.5,
         "zoom_center": [0.4, 0.6],
         "gain": 640,
@@ -1541,6 +1547,7 @@ def test_a_calibration_command_reaches_the_detector_the_camera_and_the_file(
     assert sink.topics("status")[-1]["calibration"] == expected
     assert camera.controls[-1] == {"gain": 640, "exposure": 200, "saturation": 110}
     assert store.load() == {
+        "detector": "yolox",
         "zoom": 1.5,
         "zoom_center": (0.4, 0.6),
         "gain": 640,
@@ -1660,3 +1667,256 @@ def test_an_invalid_calibration_from_the_channel_changes_nothing(tmp_path: Path)
     assert pipeline.calibration == before
     assert camera.controls == []
     assert sink.topics("status") == []
+
+
+# --------------------------------------------------------------------------- #
+# Object detector switch: YOLOX-nano <-> YOLOv5-nano (calibration.set detector)
+# --------------------------------------------------------------------------- #
+
+
+class DetectorFactory:
+    """Builds a fake runner per kind, records every build, can fail one kind."""
+
+    def __init__(self, fail: set[str] | None = None) -> None:
+        self.fail = fail if fail is not None else set()
+        self.built: list[tuple[str, FakeDetector]] = []
+
+    def __call__(self, model: ModelConfig) -> FakeDetector:
+        if model.kind in self.fail:
+            raise RuntimeError(f"{model.kind} graph rejected")
+        runner = FakeDetector([PERSON])
+        self.built.append((model.kind, runner))
+        return runner
+
+    def kinds(self) -> list[str]:
+        return [kind for kind, _ in self.built]
+
+
+def build_with_yolov5(
+    tmp_path: Path,
+    factory: DetectorFactory,
+    *,
+    commands: CommandChannel | None = None,
+    store: CalibrationStore | None = None,
+    installed: bool = True,
+    kind: str = "yolox",
+) -> tuple[Pipeline, FakeCamera, Sink, FrameChannel]:
+    base = config(tmp_path)
+    yolov5 = tmp_path / "yolov5_nano.xmodel"
+    if installed:
+        yolov5.write_bytes(b"fake yolov5 xmodel")
+    settings = replace(base, model=replace(base.model, yolov5_path=yolov5, kind=kind))
+    camera = FakeCamera()
+    sink = Sink()
+    channel = FrameChannel.create(WIDTH, HEIGHT)
+    pipeline = Pipeline(
+        settings,
+        channel=channel,
+        messages=sink,  # type: ignore[arg-type]
+        detector_factory=factory,
+        movenet_factory=lambda settings: FakePoseDetector(),
+        camera_factory=lambda settings: camera,
+        commands=commands,
+        calibration_store=store,
+    )
+    return pipeline, camera, sink, channel
+
+
+def test_calibration_swaps_the_object_detector_with_the_exclusive_swap(tmp_path: Path) -> None:
+    commands = CommandChannel(FakeQueue())
+    factory = DetectorFactory()
+    store = CalibrationStore(tmp_path / "calibration.json")
+    pipeline, camera, sink, channel = build_with_yolov5(
+        tmp_path, factory, commands=commands, store=store
+    )
+    try:
+        with RunningPipeline(pipeline):
+            feed(camera, 2)
+            first = factory.built[0][1]
+            commands.put("calibration.set", {"detector": "yolov5"})
+            wait_until(lambda: factory.kinds() == ["yolox", "yolov5"])
+            wait_until(lambda: pipeline.status()["model"] == "yolov5_nano")
+            feed(camera, 2)
+            second = factory.built[1][1]
+            wait_until(lambda: "submit" in second.calls)
+            pipeline._calibration_worker.wait_idle()
+    finally:
+        channel.close()
+        channel.unlink()
+
+    # Released before the other graph was built; the frames went to YOLOv5.
+    assert first.closed
+    assert sink.topics("status")[-1]["calibration"]["detector"] == "yolov5"
+    assert sink.topics("status")[-1]["calibration"]["detectors"] == ["yolox", "yolov5"]
+    assert any(status["switching"] for status in sink.topics("status"))
+    assert sink.topics("showcase.state")[-1]["model"] == "yolov5_nano"
+    assert store.load()["detector"] == "yolov5"
+    assert sink.topics("status")[-1]["active_model"] == "yolox"
+
+
+def test_the_job_in_flight_is_drained_before_the_detector_is_released(tmp_path: Path) -> None:
+    factory = DetectorFactory()
+    pipeline, _camera, _sink, channel = build_with_yolov5(tmp_path, factory)
+    try:
+        pipeline.start()
+        yolox = factory.built[0][1]
+        token = yolox.submit(np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8))
+        pending = _pending_frame(token)
+        assert pipeline.set_calibration({"detector": "yolov5"})
+
+        assert pipeline._apply_model_request(pending) is None
+    finally:
+        pipeline.stop()
+        channel.close()
+        channel.unlink()
+
+    assert yolox.calls[-3:] == ["submit", "wait", "close"]
+    assert factory.kinds() == ["yolox", "yolov5"]
+
+
+def _pending_frame(token: int) -> Any:
+    """A ``_PendingFrame`` holding only a DPU token, as a frame in flight."""
+    from cpsa.pipeline import _PendingFrame
+
+    fields = {name: None for name in _PendingFrame.__dataclass_fields__}
+    fields.update(token=token, camera_ms=0.0)
+    return _PendingFrame(**fields)
+
+
+def test_a_detector_that_fails_to_load_rolls_back_and_says_so(tmp_path: Path) -> None:
+    factory = DetectorFactory(fail={"yolov5"})
+    store = CalibrationStore(tmp_path / "calibration.json")
+    pipeline, _camera, sink, channel = build_with_yolov5(tmp_path, factory, store=store)
+    try:
+        pipeline.start()
+        assert pipeline.set_calibration({"detector": "yolov5", "gain": 640})
+        pipeline._apply_model_request(None)
+        pipeline._calibration_worker.wait_idle()
+        status = pipeline.status()
+    finally:
+        pipeline.stop()
+        channel.close()
+        channel.unlink()
+
+    assert factory.kinds() == ["yolox", "yolox"]
+    assert factory.built[0][1].closed
+    assert status["calibration"]["detector"] == "yolox"
+    assert status["calibration"]["gain"] == 640
+    assert status["model"] == "yolox_nano"
+    assert "dpu_error" in status["errors"]
+    assert store.load()["detector"] == "yolox"
+    # No retry loop: the restored detector matches the calibration.
+    pipeline._apply_model_request(None)
+    assert factory.kinds() == ["yolox", "yolox"]
+    assert sink.topics("status")[-1]["calibration"]["detector"] == "yolox"
+
+
+def test_an_uninstalled_yolov5_is_refused(tmp_path: Path) -> None:
+    factory = DetectorFactory()
+    pipeline, _camera, _sink, channel = build_with_yolov5(tmp_path, factory, installed=False)
+    try:
+        assert not pipeline.set_calibration({"detector": "yolov5"})
+        assert pipeline.status()["calibration"]["detectors"] == ["yolox"]
+        assert pipeline.calibration.detector == "yolox"
+    finally:
+        channel.close()
+        channel.unlink()
+
+
+def test_the_skeleton_view_keeps_the_choice_for_the_way_back(tmp_path: Path) -> None:
+    factory = DetectorFactory()
+    pipeline, _camera, _sink, channel = build_with_yolov5(tmp_path, factory)
+    try:
+        pipeline.start()
+        assert pipeline.set_model("movenet")
+        pipeline._apply_model_request(None)
+        assert pipeline.set_calibration({"detector": "yolov5"})
+        pipeline._apply_model_request(None)
+        assert factory.kinds() == ["yolox"]  # MoveNet stays loaded
+
+        assert pipeline.set_model("yolox")
+        pipeline._apply_model_request(None)
+    finally:
+        pipeline.stop()
+        channel.close()
+        channel.unlink()
+
+    assert factory.kinds() == ["yolox", "yolov5"]
+
+
+def test_a_stored_yolov5_that_cannot_load_starts_with_yolox(tmp_path: Path) -> None:
+    store = CalibrationStore(tmp_path / "calibration.json")
+    store.save(
+        Calibration(
+            zoom=1.0,
+            zoom_center=(0.5, 0.5),
+            gain=300,
+            exposure=100,
+            saturation=110,
+            detector="yolov5",
+        )
+    )
+    factory = DetectorFactory(fail={"yolov5"})
+    pipeline, _camera, _sink, channel = build_with_yolov5(tmp_path, factory, store=store)
+    try:
+        pipeline.start()
+        pipeline._calibration_worker.wait_idle()
+        status = pipeline.status()
+    finally:
+        pipeline.stop()
+        channel.close()
+        channel.unlink()
+
+    assert factory.kinds() == ["yolox"]
+    assert status["calibration"]["detector"] == "yolox"
+    assert store.load()["detector"] == "yolox"
+
+
+def test_a_yolov5_kind_without_its_model_starts_with_yolox(tmp_path: Path) -> None:
+    factory = DetectorFactory()
+    pipeline, _camera, _sink, channel = build_with_yolov5(
+        tmp_path, factory, installed=False, kind="yolov5"
+    )
+    try:
+        pipeline.start()
+    finally:
+        pipeline.stop()
+        channel.close()
+        channel.unlink()
+
+    assert factory.kinds() == ["yolox"]
+
+
+def test_yolov5_ignores_the_zoom(tmp_path: Path) -> None:
+    class PlainDetector(FakeDetector):
+        set_zoom = None  # type: ignore[assignment]  # YOLOv5 has no crop
+
+    built: list[ModelConfig] = []
+
+    def factory(model: ModelConfig) -> FakeDetector:
+        built.append(model)
+        return PlainDetector([PERSON]) if model.kind == "yolov5" else FakeDetector([PERSON])
+
+    base = config(tmp_path)
+    yolov5 = tmp_path / "yolov5_nano.xmodel"
+    yolov5.write_bytes(b"x")
+    settings = replace(base, model=replace(base.model, yolov5_path=yolov5, kind="yolov5"))
+    channel = FrameChannel.create(WIDTH, HEIGHT)
+    pipeline = Pipeline(
+        settings,
+        channel=channel,
+        messages=Sink(),  # type: ignore[arg-type]
+        detector_factory=factory,
+        movenet_factory=lambda settings: FakePoseDetector(),
+        camera_factory=lambda settings: FakeCamera(),
+    )
+    try:
+        pipeline.start()
+        assert pipeline.set_calibration({"zoom": 1.8})
+    finally:
+        pipeline.stop()
+        channel.close()
+        channel.unlink()
+
+    assert [model.kind for model in built] == ["yolov5"]
+    assert pipeline.calibration.zoom == 1.8

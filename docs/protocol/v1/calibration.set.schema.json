@@ -4,6 +4,13 @@
   "title": "calibration.set data (client to server), live YOLOX zoom and camera image (debug panel)",
   "type": "object",
   "properties": {
+    "detector": {
+      "enum": [
+        "yolox",
+        "yolov5"
+      ],
+      "description": "Swap the object detector (the same exclusive DPU swap as model.set, status.switching while it runs); yolov5 is error bad_command when not installed. A failed load restores the previous detector."
+    },
     "zoom": {
       "type": "number",
       "minimum": 1.0,
@@ -43,5 +50,5 @@
   },
   "minProperties": 1,
   "additionalProperties": false,
-  "description": "Any non-empty subset of the five values. Process A applies the zoom to the next frame and the camera controls to the open stream, and stores the accepted values in ~/cpsa/config/calibration.json as overrides of config/showcase.yaml. A value out of range or an unknown key is error bad_command and nothing changes."
+  "description": "Any non-empty subset of the six values. Process A applies the zoom to the next frame and the camera controls to the open stream, and stores the accepted values in ~/cpsa/config/calibration.json as overrides of config/showcase.yaml. A value out of range or an unknown key is error bad_command and nothing changes."
 }

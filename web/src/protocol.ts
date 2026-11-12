@@ -45,20 +45,31 @@ export interface StatusPayload {
    * The live calibration of the debug panel, as the board applies it now;
    * `null` (or absent, on a board that predates the panel) when unknown.
    */
-  calibration?: CalibrationValues | null;
+  calibration?: CalibrationStatus | null;
 }
 
+/** The object detectors of the objects view (`calibration.set detector`). */
+export const DETECTORS = ["yolox", "yolov5"] as const;
+export type DetectorName = (typeof DETECTORS)[number];
+
 /**
- * The five values of the "Calibrazione" panel: the YOLOX centre crop
- * (`zoom` 1.0–2.0, `zoom_center` [x, y] in 0–1 of the mirrored frame) and the
- * camera's gain, exposure (100 = 1/100 s, 200 = 1/50 s) and saturation.
+ * The values of the "Calibrazione" panel: the object detector (YOLOX-nano or
+ * YOLOv5-nano), the YOLOX centre crop (`zoom` 1.0–2.0, `zoom_center` [x, y] in
+ * 0–1 of the mirrored frame) and the camera's gain, exposure (100 = 1/100 s,
+ * 200 = 1/50 s) and saturation.
  */
 export interface CalibrationValues {
+  detector: DetectorName;
   zoom: number;
   zoom_center: [number, number];
   gain: number;
   exposure: number;
   saturation: number;
+}
+
+/** `status.calibration`: the values plus the detectors the board has installed. */
+export interface CalibrationStatus extends CalibrationValues {
+  detectors: DetectorName[];
 }
 
 export interface ErrorPayload {
@@ -294,7 +305,7 @@ function parseStatus(data: JsonObject): StatusPayload {
  * `status.calibration` only feeds the debug panel: a missing or malformed
  * object is `null`, never a reason to drop the whole `status` (IF-103).
  */
-function parseCalibration(value: unknown): CalibrationValues | null {
+function parseCalibration(value: unknown): CalibrationStatus | null {
   if (value == null) {
     return null;
   }
@@ -304,7 +315,16 @@ function parseCalibration(value: unknown): CalibrationValues | null {
     if (!Array.isArray(centre) || centre.length !== 2) {
       return null;
     }
+    // A board that predates the YOLOv5 switch has only YOLOX.
+    const detector = data.detector === undefined ? "yolox" : enumValue(data.detector, DETECTORS, "detector");
+    const detectors = Array.isArray(data.detectors)
+      ? data.detectors.filter((item): item is DetectorName =>
+          (DETECTORS as readonly unknown[]).includes(item),
+        )
+      : (["yolox"] as DetectorName[]);
     return {
+      detector,
+      detectors,
       zoom: reqNumber(data, "zoom"),
       zoom_center: [numberValue(centre[0], "zoom_center[0]"), numberValue(centre[1], "zoom_center[1]")],
       gain: reqNumber(data, "gain"),

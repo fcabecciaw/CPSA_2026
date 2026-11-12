@@ -115,7 +115,12 @@ class Running:
     """A ``WebServer`` started in its own thread and stopped at the end."""
 
     def __init__(
-        self, tmp_path: Path, *, models: Sequence[str] | None = None, **overrides: Any
+        self,
+        tmp_path: Path,
+        *,
+        models: Sequence[str] | None = None,
+        detectors: Sequence[str] = ("yolox", "yolov5"),
+        **overrides: Any,
     ) -> None:
         self.frames = FakeFrames()
         self.messages = MessageChannel(FakeQueue())
@@ -126,6 +131,7 @@ class Running:
             messages=self.messages,
             commands=self.commands,
             models=models if models is not None else ACTIVE_MODELS,
+            detectors=detectors,
             server_version="9.9.9",
         )
 
@@ -744,5 +750,31 @@ def test_a_bad_calibration_is_a_bad_command_and_is_not_forwarded(
     assert error is not None
     assert error["code"] == "bad_command"
     assert error["ref_seq"] == 7
+    assert reason in error["message"]
+    assert forwarded == []
+
+
+def test_the_detector_switch_is_forwarded_when_installed(tmp_path: Path) -> None:
+    command = {"v": 1, "type": "calibration.set", "seq": 8, "data": {"detector": "yolov5"}}
+    with Running(tmp_path) as running:
+        error, forwarded = run(lambda: _send_and_collect(running, command, expect_error=False))
+
+    assert error is None
+    assert forwarded == [("calibration.set", {"detector": "yolov5"})]
+
+
+@pytest.mark.parametrize(
+    ("detectors", "detector", "reason"),
+    [(("yolox",), "yolov5", "not installed"), (("yolox", "yolov5"), "yolov8", "detector")],
+)
+def test_an_unavailable_or_unknown_detector_is_a_bad_command(
+    tmp_path: Path, detectors: tuple[str, ...], detector: str, reason: str
+) -> None:
+    command = {"v": 1, "type": "calibration.set", "seq": 9, "data": {"detector": detector}}
+    with Running(tmp_path, detectors=detectors) as running:
+        error, forwarded = run(lambda: _send_and_collect(running, command, expect_error=True))
+
+    assert error is not None
+    assert error["code"] == "bad_command"
     assert reason in error["message"]
     assert forwarded == []

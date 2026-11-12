@@ -29,14 +29,14 @@ optional `seq` (`client-envelope.schema.json`): the server echoes it as
 | Type | Direction | Payload |
 |---|---|---|
 | `hello` | server → client | `server_version`, `protocol_version` (`1`). Sent first, on every connection. |
-| `status` | server | `state` (`starting`, `running`, `error`), `camera` (`ok`, `missing`, `error`), `model`, `active_model` (`yolox`, `movenet`), `switching`, `swap_ms`, `fps`, `dpu_ms`, `errors`, `uptime_s`, `calibration` (`zoom`, `zoom_center`, `gain`, `exposure`, `saturation`, or `null`). 1 Hz and on change. |
+| `status` | server | `state` (`starting`, `running`, `error`), `camera` (`ok`, `missing`, `error`), `model`, `active_model` (`yolox`, `movenet`), `switching`, `swap_ms`, `fps`, `dpu_ms`, `errors`, `uptime_s`, `calibration` (`detector`, `detectors`, `zoom`, `zoom_center`, `gain`, `exposure`, `saturation`, or `null`). 1 Hz and on change. |
 | `showcase.state` | server | `model`, `width`, `height`, `fps`, `dpu_ms`, `total_ms`, `objects`, `counts`. At most 10 Hz, while YOLOX is loaded. |
 | `pose.state` | server | `model`, `width`, `height`, `fps`, `dpu_ms`, `total_ms`, `score`, `keypoints` (17 × `[x, y, score]`). At most `movenet.publish_hz`, while MoveNet is loaded (R2-G). |
 | `error` | server | `code`, `message`, optional `ref_seq`. |
 | `pong` | server | `id`, the value of the `ping` it answers. |
 | `ping` | client → server | `id`, echoed back unchanged. |
 | `model.set` | client → server | `model` (`yolox`, `movenet`): releases the loaded DPU model and loads the other one. An unknown or disabled model is `error bad_command` and nothing is switched. |
-| `calibration.set` | client → server | Any non-empty subset of `zoom` (1.0–2.0), `zoom_center` (`[x, y]`, 0–1), `gain` (64–2540), `exposure` (`100` = 1/100 s or `200` = 1/50 s) and `saturation` (0–255). Applied from the next frame and kept across restarts. |
+| `calibration.set` | client → server | Any non-empty subset of `detector` (`yolox`, `yolov5`), `zoom` (1.0–2.0), `zoom_center` (`[x, y]`, 0–1), `gain` (64–2540), `exposure` (`100` = 1/100 s or `200` = 1/50 s) and `saturation` (0–255). Applied from the next frame and kept across restarts. |
 | `calibration.reset` | client → server | Empty `data`: forget the stored calibration and go back to `config/showcase.yaml`. |
 
 `errors` lists the conditions the process reports, once each:
@@ -74,6 +74,15 @@ written atomically to `~/cpsa/config/calibration.json` (`cpsa-showcase
 of `config/showcase.yaml`; `calibration.reset` removes the file and applies the
 YAML values again. `status.calibration` always reports the values in use, and a
 change publishes a new `status` at once.
+
+`detector` swaps the object detector of the objects view between YOLOX-nano
+(`model.path`, 416x416, zoomable) and YOLOv5-nano (`model.yolov5_path`,
+640x640 on the whole frame: the zoom is kept but ignored). The swap is the
+exclusive one of `model.set`: the frame in flight is drained, the runner
+released and the other built, with `status.switching` true meanwhile; a load
+that fails restores the previous detector and reports it in
+`status.calibration.detector`. `status.calibration.detectors` lists what the
+board has installed, and `yolov5` without its `.xmodel` is `error bad_command`.
 
 A measurement that does not exist yet is `null`, never an absent key. `t` is
 monotonic seconds on the board; `wall` is the UTC wall clock.

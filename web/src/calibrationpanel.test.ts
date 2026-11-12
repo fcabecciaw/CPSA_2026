@@ -6,6 +6,7 @@ import { CalibrationPanel } from "./calibrationpanel";
 import type { CalibrationValues } from "./protocol";
 
 const YAML: CalibrationValues = {
+  detector: "yolox",
   zoom: 1.3,
   zoom_center: [0.5, 0.5],
   gain: 200,
@@ -13,7 +14,7 @@ const YAML: CalibrationValues = {
   saturation: 110,
 };
 
-function setup() {
+function setup(presence?: { thresholds: { minBoxHeight: number; minFaceWidth: number } }) {
   document.body.innerHTML = `
     <div id="calibration"></div>
     <div id="frame"><div id="rect" hidden></div></div>`;
@@ -27,6 +28,15 @@ function setup() {
     reset: () => {
       resets += 1;
     },
+    presence:
+      presence === undefined
+        ? undefined
+        : {
+            get: () => presence.thresholds,
+            set: (next) => {
+              presence.thresholds = { ...presence.thresholds, ...next };
+            },
+          },
   });
   const slider = (key: string) =>
     document.querySelector<HTMLInputElement>(`input[data-key="${key}"]`) as HTMLInputElement;
@@ -91,7 +101,7 @@ describe("CalibrationPanel", () => {
     panel.setConnected(true);
     panel.setStatus(YAML);
     const [hundredth, fiftieth] = Array.from(
-      document.querySelectorAll<HTMLButtonElement>(".calibration-segment"),
+      document.querySelectorAll<HTMLButtonElement>(".calibration-segment[data-value]"),
     );
     expect(hundredth.getAttribute("aria-pressed")).toBe("true");
 
@@ -113,5 +123,79 @@ describe("CalibrationPanel", () => {
     drag(slider("gain"), gainToSlider(640));
     panel.toggle();
     expect(sent).toEqual([{ ...YAML, gain: sliderToGain(gainToSlider(640)) }]);
+  });
+});
+
+describe("CalibrationPanel: YOLOv5 and Distanza persone", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const detectorButton = (name: string) =>
+    document.querySelector<HTMLButtonElement>(`button[data-detector="${name}"]`) as HTMLButtonElement;
+
+  it("disables YOLOv5 when the board does not have it", () => {
+    const { panel } = setup();
+    panel.setConnected(true);
+    panel.setStatus({ ...YAML, detectors: ["yolox"] });
+
+    expect(detectorButton("yolox").getAttribute("aria-pressed")).toBe("true");
+    expect(detectorButton("yolov5").disabled).toBe(true);
+  });
+
+  it("switches to YOLOv5, greys the zoom out and hides the crop outline", () => {
+    const { panel, sent, slider } = setup();
+    panel.setConnected(true);
+    panel.setStatus({ ...YAML, detectors: ["yolox", "yolov5"] });
+    panel.toggle();
+    const rect = document.getElementById("rect") as HTMLElement;
+    const note = document.querySelector<HTMLElement>(".calibration-zoom-note") as HTMLElement;
+    expect(rect.hidden).toBe(false);
+    expect(note.hidden).toBe(true);
+
+    detectorButton("yolov5").click();
+    expect(detectorButton("yolov5").getAttribute("aria-pressed")).toBe("true");
+    expect(slider("zoom").disabled).toBe(true);
+    expect(slider("centre_x").disabled).toBe(true);
+    expect(slider("gain").disabled).toBe(false);
+    expect(note.hidden).toBe(false);
+    expect(rect.hidden).toBe(true);
+    vi.advanceTimersByTime(150);
+    expect(sent).toEqual([{ ...YAML, detector: "yolov5" }]);
+  });
+
+  it("sets the presence thresholds live and shows the tracked sizes", () => {
+    const presence = { thresholds: { minBoxHeight: 0.35, minFaceWidth: 0.08 } };
+    const { panel, sent, slider } = setup(presence);
+    panel.setStatus(YAML); // not connected: the laptop-side sliders still work
+    expect(slider("person_height").value).toBe("0.35");
+    expect(slider("person_height").disabled).toBe(false);
+
+    drag(slider("person_height"), 0.5);
+    drag(slider("face_width"), 0.12);
+    expect(presence.thresholds).toEqual({ minBoxHeight: 0.5, minFaceWidth: 0.12 });
+    expect(sent).toEqual([]);
+
+    const hint = document.querySelector(".calibration-presence-hint") as HTMLElement;
+    expect(hint.textContent).toBe("nessuno in vista");
+    panel.setPresenceTracks([
+      { kind: "persona", id: 1, size: 0.42, atStand: true, greeted: false },
+      { kind: "volto", id: 2, size: 0.06, atStand: false, greeted: false },
+    ]);
+    expect(hint.textContent).toBe("ora: persona 42% ● · volto 6%");
+  });
+
+  it("hides Distanza persone without a presence gate", () => {
+    setup();
+    const legends = Array.from(document.querySelectorAll("legend")).map((node) => node.textContent);
+    expect(legends).toContain("Distanza persone");
+    const group = Array.from(document.querySelectorAll<HTMLElement>("fieldset")).find(
+      (node) => node.textContent?.includes("Distanza persone"),
+    ) as HTMLElement;
+    expect(group.hidden).toBe(true);
   });
 });

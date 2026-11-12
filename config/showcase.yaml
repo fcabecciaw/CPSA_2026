@@ -33,6 +33,8 @@ tracker:                      # detector boxes, stabilized so they stand still o
 
 model:                        # YOLOX-nano from the Vitis AI model zoo, COCO-80
   path: models/yolox_nano.xmodel  # compiled KV260 xmodel (deploy.sh --model)
+  kind: yolox                 # yolox | yolov5: object detector at start (Calibrazione card switches live)
+  yolov5_path: models/yolov5_nano.xmodel  # YOLOv5-nano 640x640 (deploy.sh --yolov5-model); zoom ignored
   conf_thr: 0.35              # class-independent default of objectness * class score
   class_conf:                 # per-class overrides, by COCO name (0..1)
     person: 0.40              # a person is only reported above this score

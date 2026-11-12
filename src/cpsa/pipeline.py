@@ -60,14 +60,20 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol, cast
 
 import numpy as np
 from numpy.typing import NDArray
 
 from cpsa import protocol
-from cpsa.calibration import Calibration, CalibrationStore, LatestWorker, parse_update
+from cpsa.calibration import (
+    Calibration,
+    CalibrationStore,
+    LatestWorker,
+    available_detectors,
+    parse_update,
+)
 from cpsa.camera import CameraError, CameraNotFound, UvcCamera, VideoFrame
 from cpsa.channel import CommandChannel, FrameChannel, MessageChannel
 from cpsa.config import CameraConfig, ModelConfig, MovenetConfig, ShowcaseConfig
@@ -76,6 +82,7 @@ from cpsa.motion import StillGate
 from cpsa.movenet import DpuMovenet, MovenetPose
 from cpsa.overlay import draw_overlay, draw_skeleton
 from cpsa.tracker import Tracker
+from cpsa.yolov5 import Yolov5Detector
 from cpsa.yolox import (
     OBJECT_CLASSES,
     PERSON_CLASSES,
@@ -287,6 +294,17 @@ class Pipeline:
         if overrides and calibration_store is not None:
             logger.info("calibration overrides from %s: %s", calibration_store.path, overrides)
         self._calibration = self._base_calibration.updated(overrides)
+        self._detectors = available_detectors(config)
+        """The object detectors ``calibration.set detector`` may pick."""
+        if self._calibration.detector not in self._detectors:
+            logger.warning(
+                "%s is not installed (%s); the objects view uses yolox",
+                self._calibration.detector,
+                config.model.yolov5_path,
+            )
+            self._calibration = replace(self._calibration, detector="yolox")
+        self._loaded_detector = self._calibration.detector
+        """The kind of the object detector last built (``status.model`` names it)."""
         self._calibration_store = calibration_store
         self._calibration_worker: LatestWorker[tuple[Calibration, bool]] = LatestWorker(
             self._apply_calibration_io, name="cpsa-calibration"
@@ -368,7 +386,7 @@ class Pipeline:
 
         active = protocol.ACTIVE_MODELS[0]
         try:
-            runner = self._build_runner(active)
+            runner = self._build_start_runner(active)
         except FileNotFoundError as exc:
             raise StartError("model_missing", str(exc)) from exc
         except RuntimeError as exc:
@@ -466,8 +484,13 @@ class Pipeline:
             ``(None, 0)`` when the loop does not alternate.
         """
 
-        # A live calibration can bring the zoom back to 1.0: nothing to alternate.
-        if not self._alternate or self._zoom_pass.zoom <= 1.0:
+        # A live calibration can bring the zoom back to 1.0, and YOLOv5 always
+        # sees the whole frame: nothing to alternate in either case.
+        if (
+            not self._alternate
+            or self._zoom_pass.zoom <= 1.0
+            or self._calibration.detector != "yolox"
+        ):
             return None, 0
         index = self._schedule
         self._schedule += 1
@@ -508,7 +531,7 @@ class Pipeline:
             active_model=active_model,
             switching=switching,
             swap_ms=swap_ms,
-            calibration=calibration.to_json(),
+            calibration={**calibration.to_json(), "detectors": list(self._detectors)},
         )
 
     def publish(self, state: str, errors: Sequence[str], camera: str) -> None:
@@ -540,7 +563,7 @@ class Pipeline:
                 active_model=self._active_model,
                 switching=self._switching,
                 swap_ms=self._swap_ms,
-                calibration=self._calibration.to_json(),
+                calibration={**self._calibration.to_json(), "detectors": list(self._detectors)},
             ),
         )
 
@@ -951,6 +974,8 @@ class Pipeline:
 
         try:
             values = parse_update(update)
+            if values.get("detector", "yolox") not in self._detectors:
+                raise ValueError(f"{values['detector']} is not installed on this board")
         except ValueError as exc:
             logger.warning("ignoring calibration.set %r: %s", dict(update), exc)
             return False
@@ -1015,7 +1040,12 @@ class Pipeline:
             requested = self._requested_model
             self._requested_model = None
             active = self._active_model
-        if requested is None or requested == active:
+            # ``calibration.set detector`` picked the other object detector:
+            # the same exclusive swap rebuilds the ``yolox`` view with it.
+            stale = active == "yolox" and self._loaded_detector != self._calibration.detector
+        if requested is None and stale:
+            requested = "yolox"
+        if requested is None or (requested == active and not stale):
             return pending
         if pending is not None:
             # The job in flight belongs to the runner about to be released:
@@ -1035,7 +1065,11 @@ class Pipeline:
 
         with self._lock:
             previous = self._active_model
-        logger.info("model swap: %s -> %s", previous, target)
+            previous_detector = self._loaded_detector
+            wanted_detector = self._calibration.detector
+        logger.info(
+            "model swap: %s (%s) -> %s (%s)", previous, previous_detector, target, wanted_detector
+        )
         with self._lock:
             self._switching = True
         self._publish_status(force=True)
@@ -1055,7 +1089,7 @@ class Pipeline:
             failed = True
             loaded = previous
             try:
-                runner = self._build_runner(previous)
+                runner = self._build_runner(previous, detector=previous_detector)
             except Exception:
                 logger.exception("the %s runner could not be restored", previous)
                 runner = None
@@ -1074,6 +1108,14 @@ class Pipeline:
                 self._tracker.reset()
                 self._reset_still()
             self._stabilizer.reset()
+            if loaded == "yolox":
+                self._loaded_detector = previous_detector if failed else wanted_detector
+        if failed and target == "yolox" and wanted_detector != previous_detector:
+            # The other detector did not load: the calibration goes back to the
+            # one that runs, so the card and the file never claim otherwise.
+            with self._lock:
+                reverted = replace(self._calibration, detector=previous_detector)
+            self._commit_calibration(reverted, persist=True)
         if failed:
             # Stays in ``status.errors`` until a swap succeeds: frames keep
             # coming from the restored model, so they must not clear it.
@@ -1081,15 +1123,43 @@ class Pipeline:
         self._publish_status(force=True)
         logger.info("model swap to %s done in %.1f ms", loaded, swap_ms)
 
-    def _build_runner(self, model: str) -> Detector | PoseDetector:
-        """Build the runner of ``model`` from the configuration."""
+    def _build_runner(self, model: str, *, detector: str | None = None) -> Detector | PoseDetector:
+        """Build the runner of ``model``; the ``yolox`` view uses the calibrated detector.
+
+        ``detector`` overrides the object detector kind (a rollback rebuilds
+        the one that was loaded before).
+        """
 
         if model == "movenet":
             config = self._config.movenet
             if not config.enabled:
                 raise ValueError("movenet is disabled in the configuration")
             return self._movenet_factory(config)
-        return self._detector_factory(self._config.model)
+        settings = self._config.model
+        if detector is not None and detector != settings.kind:
+            settings = replace(settings, kind=detector)
+        return self._detector_factory(settings)
+
+    def _build_start_runner(self, model: str) -> Detector | PoseDetector:
+        """The first runner; a YOLOv5 that cannot load falls back to YOLOX.
+
+        A stored ``detector: yolov5`` must never keep the showcase from
+        starting: systemd would restart it in a loop on the open day.
+        """
+
+        if self._calibration.detector == "yolox":
+            return self._build_runner(model)
+        try:
+            return self._build_runner(model)
+        except Exception:
+            logger.exception("YOLOv5 could not be loaded; starting with YOLOX")
+        fallback = replace(self._calibration, detector="yolox")
+        with self._lock:
+            self._calibration = fallback
+            self._config = fallback.applied_to(self._config)
+            self._loaded_detector = "yolox"
+        self._calibration_worker.submit((fallback, True))
+        return self._build_runner(model)
 
     def _release_runner(self, runner: Detector | PoseDetector | None) -> None:
         """Release a runner's graph and buffers without masking a failure."""
@@ -1109,7 +1179,7 @@ class Pipeline:
 
         if model == "movenet":
             return self._config.movenet.name
-        return self._config.model.name
+        return replace(self._config.model, kind=self._loaded_detector).name
 
     # -- camera recovery ---------------------------------------------------
 
@@ -1273,7 +1343,22 @@ def _pose_period(publish_hz: float) -> float:
 
 
 def _default_detector(model: ModelConfig) -> Detector:
-    """Build the DPU detector of F-S1 (imported here: it binds the VART runtime)."""
+    """Build the object detector ``model.kind`` names: YOLOX-nano or YOLOv5-nano.
+
+    Both take the same thresholds; YOLOv5 runs the whole frame at 640x640 and
+    has no zoom.
+    """
+    if model.kind == "yolov5":
+        return Yolov5Detector(
+            model.yolov5_path,
+            conf_thr=model.conf_thr,
+            iou_thr=model.iou_thr,
+            class_thr=class_thresholds(
+                model.conf_thr,
+                class_conf=model.class_conf,
+                object_conf=model.object_conf,
+            ),
+        )
     return YoloxDetector(
         model.path,
         conf_thr=model.conf_thr,

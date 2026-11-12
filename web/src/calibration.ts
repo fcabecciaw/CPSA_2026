@@ -8,7 +8,7 @@
  * the dashed rectangle that shows what the network analyses.
  */
 
-import type { CalibrationValues } from "./protocol";
+import { DETECTORS, type CalibrationStatus, type CalibrationValues, type DetectorName } from "./protocol";
 
 export interface SliderRange {
   min: number;
@@ -46,6 +46,22 @@ export const EXPOSURES = [
   { value: 100, label: "1/100" },
   { value: 200, label: "1/50" },
 ] as const;
+
+/** The object detectors of the "Modello oggetti" control. */
+export const DETECTOR_CHOICES: ReadonlyArray<{ value: DetectorName; label: string }> = [
+  { value: "yolox", label: "YOLOX-nano" },
+  { value: "yolov5", label: "YOLOv5-nano" },
+];
+
+/** `presence.min_box_height`: a person counts at the stand from this box height. */
+export const PERSON_HEIGHT_RANGE: SliderRange = { min: 0.1, max: 0.8, step: 0.01 };
+/** `presence.min_face_width`: a face counts at the stand from this width. */
+export const FACE_WIDTH_RANGE: SliderRange = { min: 0.03, max: 0.25, step: 0.005 };
+
+/** Snap a presence threshold onto its slider (laptop-side, no server command). */
+export function snapPresence(value: number, range: SliderRange): number {
+  return snap(value, range, 3);
+}
 
 /** One `calibration.set` at most this often while a slider moves. */
 export const DEBOUNCE_MS = 150;
@@ -135,6 +151,9 @@ export function containRect(
  */
 export function normalizePatch(patch: Partial<CalibrationValues>): Partial<CalibrationValues> {
   const normalized: Partial<CalibrationValues> = {};
+  if (patch.detector !== undefined && (DETECTORS as readonly string[]).includes(patch.detector)) {
+    normalized.detector = patch.detector;
+  }
   if (patch.zoom !== undefined) {
     normalized.zoom = snap(patch.zoom, ZOOM_RANGE, 2);
   }
@@ -160,7 +179,14 @@ export function normalizePatch(patch: Partial<CalibrationValues>): Partial<Calib
 }
 
 function copyValues(values: CalibrationValues): CalibrationValues {
-  return { ...values, zoom_center: [values.zoom_center[0], values.zoom_center[1]] };
+  return {
+    detector: values.detector,
+    zoom: values.zoom,
+    zoom_center: [values.zoom_center[0], values.zoom_center[1]],
+    gain: values.gain,
+    exposure: values.exposure,
+    saturation: values.saturation,
+  };
 }
 
 export function sameCalibration(a: CalibrationValues | null, b: CalibrationValues | null): boolean {
@@ -168,6 +194,7 @@ export function sameCalibration(a: CalibrationValues | null, b: CalibrationValue
     return a === b;
   }
   return (
+    a.detector === b.detector &&
     a.zoom === b.zoom &&
     a.zoom_center[0] === b.zoom_center[0] &&
     a.zoom_center[1] === b.zoom_center[1] &&
@@ -184,6 +211,7 @@ export function sameCalibration(a: CalibrationValues | null, b: CalibrationValue
  */
 export function calibrationCommand(values: CalibrationValues): Partial<CalibrationValues> {
   const command: Partial<CalibrationValues> = {
+    detector: values.detector,
     zoom: values.zoom,
     zoom_center: [values.zoom_center[0], values.zoom_center[1]],
     gain: values.gain,
@@ -217,6 +245,7 @@ export class CalibrationController {
   private readonly holdMs: number;
   private readonly now: () => number;
   private current: CalibrationValues | null = null;
+  private installed: DetectorName[] = ["yolox"];
   private timer: ReturnType<typeof setTimeout> | null = null;
   private holdUntil = 0;
 
@@ -232,15 +261,27 @@ export class CalibrationController {
     return this.current;
   }
 
+  /** The detectors the board has installed (`status.calibration.detectors`). */
+  get detectors(): readonly DetectorName[] {
+    return this.installed;
+  }
+
   /** True while an edit waits for its debounce. */
   get pending(): boolean {
     return this.timer !== null;
   }
 
   /** A `status.calibration` arrived: show it unless the operator is mid-edit. */
-  sync(remote: CalibrationValues | null | undefined): void {
+  sync(remote: CalibrationStatus | CalibrationValues | null | undefined): void {
     if (remote == null) {
       return;
+    }
+    if ("detectors" in remote) {
+      const installed = [...remote.detectors];
+      if (installed.join() !== this.installed.join()) {
+        this.installed = installed;
+        this.options.onChange(this.current);
+      }
     }
     if (this.timer !== null || this.now() < this.holdUntil) {
       return;
@@ -256,6 +297,9 @@ export class CalibrationController {
   /** The operator moved a control: show it at once, send it after the debounce. */
   change(patch: Partial<CalibrationValues>): void {
     if (this.current === null) {
+      return;
+    }
+    if (patch.detector !== undefined && !this.installed.includes(patch.detector)) {
       return;
     }
     const next = { ...copyValues(this.current), ...normalizePatch(patch) };

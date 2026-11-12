@@ -2,9 +2,11 @@
  * The "Calibrazione" popover of the debug mode, and the dashed outline of the
  * region YOLOX analyses.
  *
- * A round button in the top bar (or `c`) opens a small card under it: zoom and
- * centre of the YOLOX crop, then gain, exposure and saturation of the camera,
- * and "Ripristina" to go back to `config/showcase.yaml`. Every change is shown
+ * A round button in the top bar (or `c`) opens a small card under it: the
+ * object detector (YOLOX-nano or YOLOv5-nano), zoom and centre of the YOLOX
+ * crop, gain, exposure and saturation of the camera, the laptop-side
+ * "Distanza persone" thresholds, and "Ripristina" to go back to
+ * `config/showcase.yaml`. Every change is shown
  * at once and sent to the board after a short debounce; the board stores it,
  * so the calibration survives a restart. While the card is open the video
  * shows the crop as a thin dashed rectangle. Presentation mode hides all of it
@@ -16,7 +18,10 @@ import "./calibration.css";
 import {
   CENTRE_RANGE,
   CalibrationController,
+  DETECTOR_CHOICES,
   EXPOSURES,
+  FACE_WIDTH_RANGE,
+  PERSON_HEIGHT_RANGE,
   GAIN_SLIDER,
   SATURATION_RANGE,
   ZOOM_RANGE,
@@ -24,10 +29,12 @@ import {
   containRect,
   gainToSlider,
   sliderToGain,
+  snapPresence,
   type SliderRange,
 } from "./calibration";
+import type { PresenceThresholds, TrackedPerson } from "./cognitive/presence";
 import { el } from "./dom";
-import type { CalibrationValues } from "./protocol";
+import type { CalibrationStatus, CalibrationValues } from "./protocol";
 import { isBareKey } from "./uimode";
 
 export interface CalibrationPanelOptions {
@@ -41,10 +48,28 @@ export interface CalibrationPanelOptions {
   reset: () => void;
   /** Whether the debug mode is on: `c` only opens the panel there. */
   isDebug?: () => boolean;
+  /**
+   * The laptop-side presence gate ("Distanza persone"): read and set live,
+   * persisted by the presence module, never sent to the board.
+   */
+  presence?: {
+    get: () => Readonly<PresenceThresholds>;
+    set: (next: Partial<PresenceThresholds>) => void;
+  };
   delayMs?: number;
 }
 
-type SliderKey = "zoom" | "centre_x" | "centre_y" | "gain" | "saturation";
+type SliderKey =
+  | "zoom"
+  | "centre_x"
+  | "centre_y"
+  | "gain"
+  | "saturation"
+  | "person_height"
+  | "face_width";
+
+const ZOOM_KEYS: readonly SliderKey[] = ["zoom", "centre_x", "centre_y"];
+const PRESENCE_KEYS: readonly SliderKey[] = ["person_height", "face_width"];
 
 interface Slider {
   input: HTMLInputElement;
@@ -70,6 +95,10 @@ export class CalibrationPanel {
   private readonly resetButton: HTMLButtonElement;
   private readonly sliders = new Map<SliderKey, Slider>();
   private readonly exposureButtons: HTMLButtonElement[] = [];
+  private readonly detectorButtons: HTMLButtonElement[] = [];
+  private readonly zoomNote: HTMLElement;
+  private readonly presenceHint: HTMLElement;
+  private readonly presence: NonNullable<CalibrationPanelOptions["presence"]> | null;
   private readonly isDebug: () => boolean;
   private open = false;
   private connected = false;
@@ -81,6 +110,7 @@ export class CalibrationPanel {
     this.rect = options.rect;
     this.frame = options.frame;
     this.isDebug = options.isDebug ?? (() => true);
+    this.presence = options.presence ?? null;
     this.controller = new CalibrationController({
       send: options.send,
       reset: options.reset,
@@ -109,11 +139,19 @@ export class CalibrationPanel {
     this.note = el("p", "calibration-note");
     header.append(this.note);
 
-    const analysis = group("Analisi YOLOX");
+    const analysis = group("Analisi");
+    this.zoomNote = el(
+      "p",
+      "calibration-hint calibration-zoom-note",
+      "YOLOv5 vede tutto il fotogramma a 640 px: lo zoom non si usa.",
+    );
+    this.zoomNote.hidden = true;
     analysis.append(
+      this.detectorRow(),
       this.slider("zoom", "Zoom", ZOOM_RANGE, (value) => `${value.toFixed(2)}×`),
       this.slider("centre_x", "Centro X", CENTRE_RANGE, percent),
       this.slider("centre_y", "Centro Y", CENTRE_RANGE, percent),
+      this.zoomNote,
     );
 
     const image = group("Immagine");
@@ -125,6 +163,17 @@ export class CalibrationPanel {
       ),
     );
 
+    const people = group("Distanza persone");
+    this.presenceHint = el("p", "calibration-hint calibration-presence-hint", "nessuno in vista");
+    people.append(
+      this.slider("person_height", "Persona alta ≥", PERSON_HEIGHT_RANGE, percent),
+      this.slider("face_width", "Volto largo ≥", FACE_WIDTH_RANGE, (value) =>
+        `${(value * 100).toFixed(1)}%`,
+      ),
+      this.presenceHint,
+    );
+    people.hidden = this.presence === null;
+
     const footer = el("footer", "calibration-footer");
     this.resetButton = el("button", "calibration-reset", "Ripristina");
     this.resetButton.type = "button";
@@ -132,7 +181,7 @@ export class CalibrationPanel {
     this.resetButton.addEventListener("click", () => this.controller.reset());
     footer.append(this.resetButton, el("span", "calibration-hint", "torna a showcase.yaml"));
 
-    this.card.append(header, analysis, image, footer);
+    this.card.append(header, analysis, image, people, footer);
     this.root.replaceChildren(this.toggleButton, this.card);
 
     window.addEventListener("keydown", (event) => {
@@ -170,7 +219,7 @@ export class CalibrationPanel {
   }
 
   /** `status.calibration`, as the board applies it. */
-  setStatus(values: CalibrationValues | null | undefined): void {
+  setStatus(values: CalibrationStatus | CalibrationValues | null | undefined): void {
     this.controller.sync(values);
   }
 
@@ -213,6 +262,43 @@ export class CalibrationPanel {
     return row;
   }
 
+  /** "Distanza persone" hint: the sizes the presence trackers see right now. */
+  setPresenceTracks(tracks: readonly TrackedPerson[]): void {
+    const text =
+      tracks.length === 0
+        ? "nessuno in vista"
+        : "ora: " +
+          tracks
+            .map(
+              (track) =>
+                `${track.kind === "persona" ? "persona" : "volto"} ${percent(track.size)}` +
+                (track.atStand ? " ●" : ""),
+            )
+            .join(" · ");
+    if (this.presenceHint.textContent !== text) {
+      this.presenceHint.textContent = text;
+    }
+  }
+
+  private detectorRow(): HTMLElement {
+    const row = el("div", "calibration-row calibration-row-stacked");
+    const name = el("span", "calibration-label", "Modello oggetti");
+    const segmented = el("div", "calibration-segmented calibration-segmented-wide");
+    segmented.setAttribute("role", "group");
+    segmented.setAttribute("aria-label", "Modello oggetti");
+    for (const choice of DETECTOR_CHOICES) {
+      const button = el("button", "calibration-segment", choice.label);
+      button.type = "button";
+      button.dataset.detector = choice.value;
+      button.setAttribute("aria-pressed", "false");
+      button.addEventListener("click", () => this.controller.change({ detector: choice.value }));
+      this.detectorButtons.push(button);
+      segmented.append(button);
+    }
+    row.append(name, segmented);
+    return row;
+  }
+
   private exposureRow(): HTMLElement {
     const row = el("div", "calibration-row");
     const name = el("span", "calibration-label", "Esposizione");
@@ -233,6 +319,16 @@ export class CalibrationPanel {
   }
 
   private onSlider(key: SliderKey, value: number): void {
+    if (key === "person_height" || key === "face_width") {
+      // Laptop-side: applied at once, no board, no debounce.
+      this.presence?.set(
+        key === "person_height"
+          ? { minBoxHeight: snapPresence(value, PERSON_HEIGHT_RANGE) }
+          : { minFaceWidth: snapPresence(value, FACE_WIDTH_RANGE) },
+      );
+      this.renderPresence();
+      return;
+    }
     const current = this.controller.values;
     if (current === null) {
       return;
@@ -257,8 +353,21 @@ export class CalibrationPanel {
       : values === null
         ? "in attesa della scheda…"
         : "salvata sulla scheda";
-    for (const slider of this.sliders.values()) {
-      slider.input.disabled = !ready;
+    const yolov5 = values?.detector === "yolov5";
+    for (const [key, slider] of this.sliders) {
+      if (!PRESENCE_KEYS.includes(key)) {
+        slider.input.disabled = !ready || (yolov5 && ZOOM_KEYS.includes(key));
+      }
+    }
+    this.zoomNote.hidden = !yolov5;
+    this.card.dataset.detector = values?.detector ?? "";
+    const installed = this.controller.detectors;
+    for (const button of this.detectorButtons) {
+      const detector = button.dataset.detector as (typeof installed)[number];
+      const available = installed.includes(detector);
+      button.disabled = !ready || !available;
+      button.title = available ? "" : "Modello non installato sulla scheda";
+      button.setAttribute("aria-pressed", String(values?.detector === detector));
     }
     for (const button of this.exposureButtons) {
       button.disabled = !ready;
@@ -272,7 +381,17 @@ export class CalibrationPanel {
       this.show("gain", values.gain);
       this.show("saturation", values.saturation);
     }
+    this.renderPresence();
     this.renderRect();
+  }
+
+  private renderPresence(): void {
+    if (this.presence === null) {
+      return;
+    }
+    const thresholds = this.presence.get();
+    this.show("person_height", thresholds.minBoxHeight);
+    this.show("face_width", thresholds.minFaceWidth);
   }
 
   private show(key: SliderKey, value: number): void {
@@ -289,7 +408,8 @@ export class CalibrationPanel {
 
   private renderRect(): void {
     const values = this.controller.values;
-    const visible = this.open && values !== null;
+    // YOLOv5 analyses the whole frame: no crop to outline.
+    const visible = this.open && values !== null && values.detector !== "yolov5";
     this.rect.hidden = !visible;
     if (!visible) {
       return;

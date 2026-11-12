@@ -80,6 +80,23 @@
         "null"
       ],
       "properties": {
+        "detector": {
+          "enum": [
+            "yolox",
+            "yolov5"
+          ],
+          "description": "Object detector of the objects view: YOLOX-nano (416x416, zoomable) or YOLOv5-nano (640x640, whole frame, zoom ignored)."
+        },
+        "detectors": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "yolox",
+              "yolov5"
+            ]
+          },
+          "description": "Detectors installed on this board; yolov5 is missing when its .xmodel was not deployed."
+        },
         "zoom": {
           "type": "number",
           "minimum": 1.0,
@@ -123,7 +140,7 @@
         "saturation"
       ],
       "additionalProperties": true,
-      "description": "Live calibration applied now (debug panel): YOLOX zoom/centre and the camera gain, exposure and saturation; null before the pipeline knows it."
+      "description": "Live calibration applied now (debug panel): object detector, YOLOX zoom/centre and the camera gain, exposure and saturation; null before the pipeline knows it."
     }
   },
   "required": [

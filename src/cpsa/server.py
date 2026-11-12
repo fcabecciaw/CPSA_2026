@@ -99,6 +99,8 @@ class WebServer:
             rejects the command with ``bad_command``.
         models: The models this process accepts in ``model.set``; a disabled
             MoveNet is not in the list and the client gets ``bad_command``.
+        detectors: The object detectors ``calibration.set detector`` accepts;
+            YOLOv5 is left out when its ``.xmodel`` is not installed.
         server_version: Value of ``hello.server_version``.
         url: Optional host name the dashboard is served from; unused.
     """
@@ -111,9 +113,11 @@ class WebServer:
         messages: MessageChannel,
         commands: CommandChannel | None = None,
         models: Sequence[str] = protocol.ACTIVE_MODELS,
+        detectors: Sequence[str] = ("yolox", "yolov5"),
         server_version: str = "0.1.0",
     ) -> None:
         self._config = config
+        self._detectors = tuple(detectors)
         self._frames = frames
         self._messages = messages
         self._commands = commands
@@ -577,6 +581,9 @@ class WebServer:
         except ValueError as exc:
             self._bad_command(client, ref_seq, str(exc))
             return
+        if values.get("detector", "yolox") not in self._detectors:
+            self._bad_command(client, ref_seq, f"detector {values['detector']!r} is not installed")
+            return
         payload = {
             key: list(value) if isinstance(value, tuple) else value for key, value in values.items()
         }
@@ -686,6 +693,7 @@ def serve(
     stop: threading.Event,
     ready: threading.Event | None = None,
     models: Sequence[str] = protocol.ACTIVE_MODELS,
+    detectors: Sequence[str] = ("yolox", "yolov5"),
     server_version: str = "0.1.0",
 ) -> int:
     """Run process B until ``stop`` is set; the target of the child process.
@@ -696,6 +704,7 @@ def serve(
         messages: The snapshot channel the pipeline publishes into.
         commands: The control channel ``model.set`` goes to (process A drains it).
         models: The models ``model.set`` accepts; a disabled MoveNet is left out.
+        detectors: The object detectors ``calibration.set`` accepts.
         stop: Set by process A (or a signal) to end the run.
         ready: Set once the server listens, so A can start the pipeline.
         server_version: Value of ``hello.server_version``.
@@ -710,6 +719,7 @@ def serve(
         messages=messages,
         commands=commands,
         models=models,
+        detectors=detectors,
         server_version=server_version,
     )
     try:

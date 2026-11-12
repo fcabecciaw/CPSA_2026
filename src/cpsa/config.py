@@ -79,6 +79,12 @@ SATURATION_RANGE = (0, 255)
 ZOOM_RANGE = (1.0, 2.0)
 """``model.zoom`` range: 1.0 is the whole frame, 2.0 the central quarter."""
 
+DETECTOR_KINDS = ("yolox", "yolov5")
+"""Values of ``model.kind``: the object detector the showcase loads at start."""
+
+DEFAULT_YOLOV5_PATH = Path("models/yolov5_nano.xmodel")
+"""Where ``deploy.sh --yolov5-model`` installs YOLOv5-nano on the board."""
+
 
 DEFAULT_CAMERA_MATCH = "RealSense"
 """Card-name fragment ``device: auto`` looks for when ``camera.match`` is absent.
@@ -233,6 +239,11 @@ class ModelConfig:
     extra DPU work, and each class group is only aged on its own passes.
     ``alternate: true`` with ``zoom: 1.0`` is refused: both passes would be the
     same frame and the split would only halve each group's update rate.
+
+    ``kind`` picks the object detector: ``yolox`` (``path``, the default) or
+    ``yolov5`` (``yolov5_path``, YOLOv5-nano at 640x640). YOLOv5 shares the
+    thresholds and ignores the zoom: it sees the whole frame at full size. The
+    dashboard's Calibrazione card switches between them at run time.
     """
 
     path: Path
@@ -243,11 +254,18 @@ class ModelConfig:
     zoom: float = 1.0
     zoom_center: tuple[float, float] = (0.5, 0.5)
     alternate: bool = False
+    kind: str = DETECTOR_KINDS[0]
+    yolov5_path: Path = DEFAULT_YOLOV5_PATH
+
+    @property
+    def detector_path(self) -> Path:
+        """The ``.xmodel`` of the selected ``kind``."""
+        return self.yolov5_path if self.kind == "yolov5" else self.path
 
     @property
     def name(self) -> str:
-        """The model name on the wire: the file's stem (``yolox_nano``)."""
-        return self.path.stem
+        """The model name on the wire: the stem of the selected file (``yolox_nano``)."""
+        return self.detector_path.stem
 
 
 @dataclass(frozen=True)
@@ -402,6 +420,8 @@ def _model_config(model: _Section) -> ModelConfig:
         zoom=zoom,
         zoom_center=model.fraction_pair("zoom_center", (0.5, 0.5)),
         alternate=alternate,
+        kind=model.optional_choice("kind", DETECTOR_KINDS, DETECTOR_KINDS[0]),
+        yolov5_path=Path(model.optional_text("yolov5_path", str(DEFAULT_YOLOV5_PATH))).expanduser(),
     )
     model.reject_unknown()
     return config
@@ -484,6 +504,12 @@ class _Section:
         if name not in self._data:
             return default
         return self.text(name)
+
+    def optional_choice(self, name: str, options: tuple[str, ...], default: str) -> str:
+        """Return the option at ``name``, or ``default`` when absent."""
+        if name not in self._data:
+            return default
+        return self.choice(name, options)
 
     def choice(self, name: str, options: tuple[str, ...]) -> str:
         value = self.text(name)

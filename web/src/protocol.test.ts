@@ -117,7 +117,15 @@ describe("status.calibration (debug panel)", () => {
 
   it("parses the five values", () => {
     const values = { zoom: 1.5, zoom_center: [0.5, 0.45], gain: 320, exposure: 200, saturation: 110 };
-    expect(calibrationOf(status(values))).toEqual(values);
+    // A board without the YOLOv5 switch: YOLOX, the only detector.
+    expect(calibrationOf(status(values))).toEqual({
+      ...values,
+      detector: "yolox",
+      detectors: ["yolox"],
+    });
+    const switched = { ...values, detector: "yolov5", detectors: ["yolox", "yolov5", "yolov9"] };
+    expect(calibrationOf(status(switched))).toEqual({ ...switched, detectors: ["yolox", "yolov5"] });
+    expect(calibrationOf(status({ ...values, detector: "yolov9" }))).toBeNull();
   });
 
   it("is null when absent, null or malformed, and the status still parses", () => {

@@ -12,6 +12,7 @@ import {
 import type { CalibrationValues } from "./protocol";
 
 const YAML: CalibrationValues = {
+  detector: "yolox",
   zoom: 1.3,
   zoom_center: [0.5, 0.5],
   gain: 200,
@@ -190,5 +191,46 @@ describe("CalibrationController", () => {
     expect(sent).toEqual([{ ...YAML, exposure: 200 }]);
     vi.advanceTimersByTime(500);
     expect(sent).toHaveLength(1);
+  });
+});
+
+describe("the object detector switch", () => {
+  let sent: Array<Partial<CalibrationValues>>;
+  let controller: CalibrationController;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    sent = [];
+    controller = new CalibrationController({
+      send: (values) => sent.push(values),
+      reset: () => undefined,
+      onChange: () => undefined,
+    });
+  });
+
+  afterEach(() => {
+    controller.dispose();
+    vi.useRealTimers();
+  });
+
+  it("refuses YOLOv5 until the board reports it installed", () => {
+    controller.sync({ ...YAML, detectors: ["yolox"] });
+    controller.change({ detector: "yolov5" });
+    vi.advanceTimersByTime(500);
+    expect(sent).toEqual([]);
+    expect(controller.detectors).toEqual(["yolox"]);
+
+    controller.sync({ ...YAML, detectors: ["yolox", "yolov5"] });
+    controller.change({ detector: "yolov5" });
+    vi.advanceTimersByTime(150);
+    expect(sent).toEqual([{ ...YAML, detector: "yolov5" }]);
+  });
+
+  it("takes a rolled-back detector from the board", () => {
+    controller.sync({ ...YAML, detector: "yolov5", detectors: ["yolox", "yolov5"] });
+    expect(controller.values?.detector).toBe("yolov5");
+    controller.sync({ ...YAML, detectors: ["yolox", "yolov5"] });
+    expect(controller.values?.detector).toBe("yolox");
+    expect(controller.values).not.toHaveProperty("detectors");
   });
 });

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from cpsa import __version__, protocol
-from cpsa.calibration import DEFAULT_CALIBRATION_PATH, CalibrationStore
+from cpsa.calibration import DEFAULT_CALIBRATION_PATH, CalibrationStore, available_detectors
 from cpsa.channel import CommandChannel, FrameChannel, MessageChannel
 from cpsa.config import ConfigError, ShowcaseConfig, load
 from cpsa.pipeline import Pipeline, StartError
@@ -134,6 +134,7 @@ def run(
                 config.log.level,
                 __version__,
                 config.movenet.enabled,
+                available_detectors(config),
             ),
             name="cpsa-web",
         )
@@ -191,6 +192,7 @@ def _server_process(
     log_level: str,
     version: str,
     movenet_enabled: bool,
+    detectors: tuple[str, ...] = ("yolox",),
 ) -> None:
     """Entry point of process B: attach the shared state and serve until stopped."""
     _configure_logging(log_level)
@@ -206,6 +208,7 @@ def _server_process(
             stop=stop,
             ready=ready,
             models=_models(bool(movenet_enabled)),
+            detectors=tuple(detectors),
             server_version=version,
         )
     finally:

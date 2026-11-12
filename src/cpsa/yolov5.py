@@ -76,6 +76,7 @@ from cpsa.yolox import (
     MAX_CLASSES_PER_CELL,
     MAX_DETECTIONS,
     Detection,
+    Pass,
     _cell_candidates,
     _class_thresholds,
     _finalize,
@@ -866,8 +867,13 @@ class Yolov5Detector:
         """Candidates that survived the int8 prefilter in the last :meth:`wait`."""
         return self._decoder.last_candidate_count
 
-    def submit(self, rgb: NDArray[np.uint8]) -> int:
+    def submit(self, rgb: NDArray[np.uint8], pass_: Pass | None = None) -> int:
         """Preprocess ``rgb`` and start the DPU without waiting for it.
+
+        ``pass_`` is accepted for the pipeline's detector interface and ignored:
+        YOLOv5 always sees the whole frame at 640x640 and reports every class,
+        so the YOLOX zoom/alternation schedule does not apply (the pipeline does
+        not alternate while YOLOv5 is active).
 
         Returns a token for :meth:`wait`. Submitting frame N and then waiting
         for frame N-1 overlaps the DPU with the CPU decode and the draw. Two

@@ -163,3 +163,34 @@ def test_a_failing_application_does_not_stop_the_worker() -> None:
     worker.close()
 
     assert applied == [2]
+
+
+def test_the_detector_is_validated_persisted_and_applied(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    assert parse_update({"detector": "yolov5"}) == {"detector": "yolov5"}
+    for bad in ("yolov8", 5, None, ["yolox"]):
+        with pytest.raises(ValueError, match="detector"):
+            parse_update({"detector": bad})
+
+    store = CalibrationStore(tmp_path / "calibration.json")
+    tuned = replace(Calibration.from_config(SHIPPED), detector="yolov5")
+    store.save(tuned)
+
+    assert store.load()["detector"] == "yolov5"
+    assert Calibration.from_config(SHIPPED).updated(store.load()) == tuned
+    assert tuned.applied_to(SHIPPED).model.kind == "yolov5"
+
+
+def test_yolov5_is_available_only_when_its_model_is_installed(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from cpsa.calibration import available_detectors
+
+    missing = replace(SHIPPED, model=replace(SHIPPED.model, yolov5_path=tmp_path / "none.xmodel"))
+    installed_path = tmp_path / "yolov5_nano.xmodel"
+    installed_path.write_bytes(b"x")
+    installed = replace(SHIPPED, model=replace(SHIPPED.model, yolov5_path=installed_path))
+
+    assert available_detectors(missing) == ("yolox",)
+    assert available_detectors(installed) == ("yolox", "yolov5")

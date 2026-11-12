@@ -12,7 +12,9 @@ deploy/deploy.sh --model build/vitis/yolox_nano/compiled/yolox_nano.xmodel
 
 `--movenet-model PATH` defaults to
 `build/vitis/movenet/compiled/movenet.xmodel` (from `tools/vitis/zoo_movenet.sh`).
-Options (`deploy/deploy.sh --help`): `--host` (default `10.42.0.83`), `--user`
+Options (`deploy/deploy.sh --help`): `--yolov5-model PATH` (default
+`build/vitis/yolov5_nano/compiled/yolov5_nano.xmodel`, optional: a missing file
+is a warning and the dashboard offers YOLOX only), `--host` (default `10.42.0.83`), `--user`
 (default `kria`), `--wheels DIR` for an offline install, `--no-restart`,
 `--dry-run` (prints every command and touches nothing).
 

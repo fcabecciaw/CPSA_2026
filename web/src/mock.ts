@@ -225,6 +225,7 @@ export function createMockSocket(_url: string): SocketLike {
   const startedAt = STARTED_AT;
   /** The debug panel's calibration, as `config/showcase.yaml` ships it. */
   const yamlCalibration: CalibrationValues = {
+    detector: "yolox",
     zoom: 1.3,
     zoom_center: [0.5, 0.5],
     gain: 200,
@@ -289,12 +290,16 @@ export function createMockSocket(_url: string): SocketLike {
     return {
       state: switchingModel === null ? "running" : "switching",
       camera: "ok",
-      model: movenet ? "movenet" : "yolox_nano",
+      model: movenet ? "movenet" : calibration.detector === "yolov5" ? "yolov5_nano" : "yolox_nano",
       fps: round((movenet ? 29.8 : 59.6) + drift * 0.5, 1),
       dpu_ms: round((movenet ? 7.4 : 4.1) + drift * 0.2, 1),
       errors: [],
       uptime_s: round(125.4 + (Date.now() - startedAt) / 1000, 1),
-      calibration: { ...calibration, zoom_center: [...calibration.zoom_center] },
+      calibration: {
+        ...calibration,
+        zoom_center: [...calibration.zoom_center],
+        detectors: ["yolox", "yolov5"],
+      },
     };
   }
 

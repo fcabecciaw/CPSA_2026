@@ -543,3 +543,41 @@ def test_the_model_name_is_the_file_stem(tmp_path: Path) -> None:
     data["model"]["path"] = str(tmp_path / "other_detector.xmodel")  # type: ignore[index]
 
     assert parse(data).model.name == "other_detector"
+
+
+def test_the_object_detector_defaults_to_yolox_with_the_yolov5_path() -> None:
+    model = parse(document()).model
+
+    assert model.kind == "yolox"
+    assert model.yolov5_path == Path("models/yolov5_nano.xmodel")
+    assert model.detector_path == model.path
+    assert model.name == model.path.stem
+
+
+def test_the_shipped_configuration_names_both_detectors() -> None:
+    model = load(Path(__file__).resolve().parents[1] / "config" / "showcase.yaml").model
+
+    assert model.kind == "yolox"
+    assert model.yolov5_path == Path("models/yolov5_nano.xmodel")
+
+
+def test_yolov5_can_be_the_object_detector() -> None:
+    data = document()
+    data["model"]["kind"] = "yolov5"  # type: ignore[index]
+    data["model"]["yolov5_path"] = "models/other_v5.xmodel"  # type: ignore[index]
+
+    model = parse(data).model
+
+    assert model.kind == "yolov5"
+    assert model.detector_path == Path("models/other_v5.xmodel")
+    assert model.name == "other_v5"
+
+
+@pytest.mark.parametrize(("key", "value"), [("kind", "yolov8"), ("kind", 5), ("yolov5_path", "")])
+def test_an_invalid_detector_setting_is_named(key: str, value: object) -> None:
+    data = document()
+    data["model"][key] = value  # type: ignore[index]
+
+    with pytest.raises(ConfigError) as excinfo:
+        parse(data)
+    assert excinfo.value.key == f"model.{key}"

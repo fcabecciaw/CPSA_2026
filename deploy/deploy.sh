@@ -16,6 +16,7 @@ set -euo pipefail
 readonly DEFAULT_HOST="10.42.0.83"
 readonly DEFAULT_USER="kria"
 readonly DEFAULT_MOVENET_MODEL="build/vitis/movenet/compiled/movenet.xmodel"
+readonly DEFAULT_YOLOV5_MODEL="build/vitis/yolov5_nano/compiled/yolov5_nano.xmodel"
 readonly REMOTE_HOME="/home/kria"
 readonly REMOTE_DIR="cpsa"
 readonly MODELS_DIR="models"
@@ -27,6 +28,7 @@ host="$DEFAULT_HOST"
 user="$DEFAULT_USER"
 model=""
 movenet_model=""
+yolov5_model=""
 wheels=""
 dry_run=0
 restart=1
@@ -49,6 +51,14 @@ Options:
                      ~/cpsa/models/<basename>, so the basename must be
                      models/movenet.xmodel. Default:
                      build/vitis/movenet/compiled/movenet.xmodel
+  --yolov5-model PATH
+                     Compiled YOLOv5-nano model (.xmodel), the alternative
+                     object detector of the Calibrazione card. Installed as
+                     ~/cpsa/models/<basename>, so the basename must be
+                     models/yolov5_nano.xmodel (model.yolov5_path). Optional:
+                     a missing file is a warning and the board offers YOLOX
+                     only. Default:
+                     build/vitis/yolov5_nano/compiled/yolov5_nano.xmodel
   --host HOST        Board host or SSH alias (default: 10.42.0.83).
   --user USER        SSH user on the board (default: kria).
   --wheels DIR       Directory of linux-aarch64 / cp310 wheels prepared on this
@@ -124,6 +134,11 @@ while (($# > 0)); do
       model="$2"
       shift 2
       ;;
+    --yolov5-model)
+      [[ $# -ge 2 && -n "${2:-}" ]] || die "--yolov5-model needs a value"
+      yolov5_model="$2"
+      shift 2
+      ;;
     --movenet-model)
       [[ $# -ge 2 && -n "${2:-}" ]] || die "--movenet-model needs a value"
       movenet_model="$2"
@@ -164,12 +179,16 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)" ||
 if [[ -z "$movenet_model" ]]; then
   movenet_model="${repo_root}/${DEFAULT_MOVENET_MODEL}"
 fi
+if [[ -z "$yolov5_model" ]]; then
+  yolov5_model="${repo_root}/${DEFAULT_YOLOV5_MODEL}"
+fi
 ssh_target="${user}@${host}"
 ssh_opts=(-o BatchMode=yes -o ConnectTimeout=10)
 rsync_opts=(-e "ssh -o BatchMode=yes -o ConnectTimeout=10")
 healthy_url="http://${host}:${SHOWCASE_PORT}/health"
 model_name="$(basename -- "$model")"
 movenet_name="$(basename -- "$movenet_model")"
+yolov5_name="$(basename -- "$yolov5_model")"
 
 preflight_failed=0
 for tool in ssh rsync curl python3; do
@@ -191,6 +210,13 @@ if [[ ! -f "$movenet_model" ]]; then
   warn "MoveNet model file not found: $movenet_model"
   warn "  build it with tools/vitis/zoo_movenet.sh, or pass --movenet-model"
   preflight_failed=1
+fi
+# YOLOv5-nano is optional: without it the Calibrazione card offers YOLOX only.
+yolov5_available=1
+if [[ ! -f "$yolov5_model" ]]; then
+  warn "YOLOv5-nano model file not found: $yolov5_model"
+  warn "  the YOLOv5 option stays disabled; build it with tools/vitis/zoo_yolov5_nano.sh"
+  yolov5_available=0
 fi
 if ((preflight_failed)); then
   if ((dry_run)); then
@@ -245,6 +271,10 @@ run rsync -az "${rsync_opts[@]}" \
   "$model" "${ssh_target}:${REMOTE_HOME}/${REMOTE_DIR}/${MODELS_DIR}/${model_name}"
 run rsync -az "${rsync_opts[@]}" \
   "$movenet_model" "${ssh_target}:${REMOTE_HOME}/${REMOTE_DIR}/${MODELS_DIR}/${movenet_name}"
+if ((yolov5_available)); then
+  run rsync -az "${rsync_opts[@]}" \
+    "$yolov5_model" "${ssh_target}:${REMOTE_HOME}/${REMOTE_DIR}/${MODELS_DIR}/${yolov5_name}"
+fi
 
 if [[ -n "$wheels" ]]; then
   note "step 3: syncing offline wheels"

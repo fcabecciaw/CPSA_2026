@@ -40,6 +40,10 @@
   font-family: var(--mono);
   font-size: 0.8rem;
   white-space: normal;
+  /* Four groups: on a short screen the card scrolls instead of leaving it. */
+  max-height: calc(100vh - 7rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .calibration-header {
@@ -157,6 +161,32 @@
 .calibration-segment[aria-pressed="true"] {
   background: rgba(79, 214, 255, 0.16);
   color: var(--beam);
+}
+
+.calibration-row-stacked {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.calibration-segmented-wide {
+  display: grid;
+}
+
+/* YOLOv5 sees the whole frame: the zoom controls stay visible but quiet. */
+.calibration-card[data-detector="yolov5"] .calibration-slider[data-key="zoom"],
+.calibration-card[data-detector="yolov5"] .calibration-slider[data-key="centre_x"],
+.calibration-card[data-detector="yolov5"] .calibration-slider[data-key="centre_y"] {
+  filter: grayscale(1);
+}
+
+.calibration-zoom-note,
+.calibration-presence-hint {
+  margin: 0;
+  white-space: normal;
+  line-height: 1.35;
+}
+
+.calibration-presence-hint {
+  font-variant-numeric: tabular-nums;
 }
 
 .calibration-footer {

@@ -16,6 +16,11 @@
     "errors": [],
     "uptime_s": 12.5,
     "calibration": {
+      "detector": "yolox",
+      "detectors": [
+        "yolox",
+        "yolov5"
+      ],
       "zoom": 1.5,
       "zoom_center": [
         0.5,

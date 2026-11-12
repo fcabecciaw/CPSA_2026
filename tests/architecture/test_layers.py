@@ -48,6 +48,7 @@ RULES: dict[str, tuple[frozenset[str], frozenset[str] | None]] = {
                 "movenet",
                 "overlay",
                 "tracker",
+                "yolov5",
                 "yolox",
             }
         ),
