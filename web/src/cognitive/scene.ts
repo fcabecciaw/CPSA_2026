@@ -106,19 +106,14 @@ const GREETINGS = {
     "Finalmente qualcuno! Ciao.",
     "Oh, compagnia! Ciao!",
     "Ciao! Cominciavo ad annoiarmi.",
-    "Ciao! Qui era tutto troppo tranquillo.",
   ],
   pair: [
     "Ciao a tutti e due!",
-    "Ehi, siete in due! Ciao.",
     "Ciao a voi due! Venite pure avanti.",
-    "Doppia visita! Ciao a voi due.",
   ],
   group: [
     "Ciao a tutti! Siete in {n}.",
     "Che bel gruppetto! Ciao a tutti.",
-    "Ciao a voi {n}! Venite pure avanti.",
-    "Ehi, siete in {n}! Benvenuti.",
   ],
   crowd: [
     "Ciao a tutti! Quanta gente!",
@@ -131,13 +126,11 @@ const GREETINGS = {
 const INTRO = [
   "Piacere, sono ARI! Riconosco oggetti, gesti e sorrisi.",
   "Mi chiamo ARI: so riconoscere oggetti, movimenti e sorrisi.",
-  "Io sono ARI, e con questa telecamera vedo oggetti, gesti e sorrisi.",
 ] as const;
 
 const PROMPTS = {
   yolox: [
     "Mostrami un oggetto e provo a indovinare cos'è.",
-    "Hai qualcosa in tasca? Fammelo vedere!",
     "Prova con un oggetto: una tazza, un libro, un telefono.",
     "Metti un oggetto davanti alla telecamera, vediamo se indovino.",
   ],
@@ -151,12 +144,10 @@ const PROMPTS = {
 
 /** Attract nudges, every fourth idle line. */
 const INVITATIONS = [
-  "Avvicinati, ti mostro cosa vedo.",
   "Vieni più vicino, non mordo!",
-  "C'è qualcuno? Passa a salutarmi!",
-  "Hai un oggetto in tasca? Vieni a mostrarmelo.",
-  "Fermati un attimo, ti racconto cosa vedo.",
-  "Psst! Sì, dico proprio a te. Vieni a giocare?",
+  "C'è qualcuno?",
+  "Fermati un attimo, sono simpatica eh!",
+  "Psst! Sì, dico proprio a te. Vieni a dare un'occhiata!",
 ] as const;
 
 const GOODBYES = [
@@ -170,10 +161,10 @@ const GOODBYES = [
 const WAVE_FIRST = [
   "Ciao! Ti saluto anch'io.",
   "Ciao ciao! Ricambio il saluto.",
-  "Ehi, ciao! Che bel saluto.",
 ] as const;
 
 const WAVE_AGAIN = [
+  "Di nuovo? Ciao!",
   "Un altro saluto? Ciao ciao!",
   "Ciao ancora! Non mi stanco mai.",
   "Ricambio, sempre volentieri!",
@@ -187,20 +178,17 @@ const SMILES = [
 
 const SMILES_AGAIN = [
   "Un altro sorriso! È contagioso.",
-  "Ancora un sorriso? Così mi vizi.",
   "Sorrisi a raffica: che giornata!",
 ] as const;
 
 const MOUTH_OPEN = [
   "Oh! Che sorpresa!",
-  "Bocca aperta? Ho detto qualcosa di strano?",
-  "Uno sbadiglio? Spero di non annoiarti!",
+  "Ho detto qualcosa di strano?",
+  "Spero di non annoiarti!",
 ] as const;
 
 const LOOKING = [
-  "Mi stai guardando? Io guardo te.",
   "Gara di sguardi? Chi ride perde!",
-  "Guardi proprio nella telecamera. Ciao!",
 ] as const;
 
 const NODS = [
