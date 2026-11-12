@@ -8,7 +8,7 @@ Documentation=file:///home/kria/cpsa/deploy/README.md
 # (dpu_controller.cpp: Check failed: !get_factory_methods().empty()).
 After=dfx-mgr.service
 Wants=dfx-mgr.service
-Before=cpsa-supervisor.service
+Before=cpsa-showcase.service
 
 [Service]
 Type=oneshot

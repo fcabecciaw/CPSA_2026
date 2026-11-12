@@ -8,7 +8,7 @@ real images.  It has three modes, because the reference model needs PyTorch and
 the host:
 
 1. ``prepare`` (host, ``uv run``): letterbox every input image exactly as
-   :func:`cpsa.adapters.detect.yolox_dpu.prepare_input` does (BGR, pad 114) and
+   :func:`cpsa.yolox.prepare_input` does (BGR, pad 114) and
    save the model inputs plus the geometry (``scale``, ``pad``, source size).
 2. ``dump`` (Vitis AI container, ``tools/vitis/run_vitis.sh``): run the package
    model on those saved inputs, apply the package's own post-processing
@@ -18,7 +18,7 @@ the host:
    inputs pixel for pixel, round-trip the reference heads through int8 with
    ``fix_point 3`` (the DPU output precision from
    ``inspect_xmodel.py``), decode them with
-   :func:`cpsa.adapters.detect.yolox_dpu.detections_from_heads` and compare the
+   :func:`cpsa.yolox.detections_from_heads` and compare the
    boxes against the package's detections: same class, IoU >= 0.9, no extra or
    missing boxes.  Writes ``build/vitis/report/yolox_reference.json`` and exits
    non-zero on any mismatch.
@@ -119,7 +119,7 @@ def prepare(images: Path, work: Path, limit: int | None) -> dict[str, Any]:
 
     import cv2
 
-    from cpsa.adapters.detect.yolox_dpu import YOLOX_INPUT_SIZE, prepare_input
+    from cpsa.yolox import YOLOX_INPUT_SIZE, prepare_input
 
     inputs = work / "inputs"
     inputs.mkdir(parents=True, exist_ok=True)
@@ -314,7 +314,7 @@ def check(
 ) -> dict[str, Any]:
     """Compare the runtime decode with the package detections and write the report."""
 
-    from cpsa.adapters.detect.yolox_dpu import (
+    from cpsa.yolox import (
         YOLOX_INPUT_SIZE,
         boxes_to_source,
         detections_from_heads,

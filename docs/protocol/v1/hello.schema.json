@@ -9,52 +9,11 @@
     },
     "protocol_version": {
       "const": 1
-    },
-    "capabilities": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "modes": {
-      "type": "array",
-      "items": {
-        "enum": [
-          "idle",
-          "lab",
-          "hologram",
-          "medical",
-          "rps",
-          "showcase"
-        ]
-      }
-    },
-    "models": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "name"
-        ],
-        "additionalProperties": true
-      }
     }
   },
   "required": [
     "server_version",
-    "protocol_version",
-    "capabilities",
-    "modes",
-    "models"
+    "protocol_version"
   ],
   "additionalProperties": true
 }

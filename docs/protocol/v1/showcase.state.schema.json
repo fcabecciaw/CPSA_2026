@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "showcase.state.schema.json",
-  "title": "showcase.state data (server to client)",
+  "title": "showcase.state data (server to client), at most 10 Hz",
   "type": "object",
   "properties": {
     "model": {
       "type": "string",
-      "description": "Name of the detector that produced the objects (showcase.default_model)."
+      "description": "Name of the detector that produced the objects."
     },
     "width": {
       "type": "integer",
@@ -23,7 +23,7 @@
         "null"
       ],
       "minimum": 0,
-      "description": "Processed frames per second, or null before the first measurement."
+      "description": "Processed frames per second, or null."
     },
     "dpu_ms": {
       "type": [

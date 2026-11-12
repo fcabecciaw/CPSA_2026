@@ -18,22 +18,44 @@ any training.
 
 ## Target architecture
 
-One process, no supervisor, no modes. It starts at boot and runs until stopped.
+No supervisor, no modes. `cpsa-showcase` starts at boot and runs until stopped, as **two processes**:
 
 ```
-cpsa-showcase (systemd, after cpsa-dpu)
-  camera thread : V4L2 YUYV 640x480@60 (manual exposure/gain) -> cv2 YUYV->RGB -> latest-frame slot (drop old)
-  pipeline      : frame N preprocess -> DPU execute_async ; meanwhile decode+draw frame N-1 ; wait
-                  -> overlay frame -> video slot ; showcase.state (<= 10 Hz) -> server
-  server (aiohttp, own thread/loop): GET / (web/dist), GET /health, GET /video.mjpeg (shared encoder, up to 60 fps),
-                  GET /ws (hello, status 1 Hz, showcase.state, error, pong)
+cpsa-showcase (systemd, after cpsa-dpu)                 <- the parent process is A
+  process A  pipeline / camera / DPU / overlay   (no aiohttp, no JPEG)
+    camera thread : V4L2 YUYV 640x480@60 (manual exposure/gain) -> cv2 YUYV->RGB -> latest-frame slot
+    loop          : frame N preprocess -> DPU execute_async ; meanwhile decode+draw frame N-1 ; wait
+                    -> overlay -> shared frame buffer ; showcase.state (<= 10 Hz), status (1 Hz) -> queue
+    sys.setswitchinterval(0.001): the camera thread and the loop yield often, so neither starves the other
+  process B  server (child of A, own process and asyncio loop)
+    GET / (web/dist), static, GET /health, GET /video.mjpeg (JPEG only while a client is connected,
+    at web.video_fps), GET /ws (hello, status, showcase.state, error, pong)
 ```
+
+The split exists because the single process lost ~18 fps to GIL contention between the camera thread, the
+MJPEG encoder, the aiohttp loop and the detection loop (board measurements, 2026-11-12: 48 fps idle, 40 fps
+with one video client, `submit->wait` 28 ms against 8.1 ms pipelined in `scripts/profile_showcase.py`).
+A is the only process that touches the camera and the DPU; B is the only one that touches HTTP, WebSocket and
+JPEG, so neither can steal the other's CPU time.
+
+Inter-process state (`cpsa/channel.py`):
+
+| Channel | Transport | Contract |
+|---|---|---|
+| `FrameChannel` | one `multiprocessing.shared_memory.SharedMemory`: a 64-byte header (magic, published sequence, geometry) plus two RGB frame buffers | A copies the overlay into buffer `seq % 2` and then publishes `seq`; B copies the buffer of the newest published sequence and re-checks the sequence, so a frame is complete or skipped, never torn. A never waits for B; B drops stale frames. |
+| `MessageChannel` | bounded `multiprocessing.Queue` of `(topic, payload)` | `showcase.state` and `status`. When full it discards the oldest message: every message is a snapshot, only the newest matters, so the pipeline never blocks on a stalled server. |
+
+B encodes JPEG only when at least one `/video.mjpeg` client is connected, in an executor, and shares the
+encoded frame with every client; with no client the pipeline pays nothing for the video. Shutdown on
+SIGTERM/SIGINT reaches A, which sets the stop event, joins B, releases the camera and the DPU and unlinks
+the shared memory; both processes exit and systemd's cgroup kill catches a stuck child.
 
 Package layout after the change (hard break; old modules are deleted, code is moved where useful):
 
 | Module | Content | From |
 |---|---|---|
-| `cpsa/__main__.py` | `main()`: config, signals, wiring, exit codes | new (small) |
+| `cpsa/__main__.py` | `main()`: config, signals, wiring, the two processes, exit codes | new |
+| `cpsa/channel.py` | `FrameChannel` (shared-memory seqlock) and `MessageChannel` (bounded, drop-oldest) | new |
 | `cpsa/config.py` | `ShowcaseConfig` (camera, model, labels, web, log) from one YAML | rewrite of `application/config.py` |
 | `cpsa/camera.py` | V4L2 capture, node auto-select by card name, controls, cv2 YUYV→RGB | `adapters/camera/uvc.py`, `devices.py` |
 | `cpsa/dpu.py` | VART runner, fix-point LUT quantize/dequantize | `adapters/pose/dpu.py` helpers, `adapters/detect/yolox_dpu.py` |

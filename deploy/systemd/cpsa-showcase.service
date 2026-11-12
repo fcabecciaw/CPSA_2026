@@ -1,0 +1,29 @@
+[Unit]
+Description=CPSA showcase: YOLOX-nano "Cosa vede l'IA"
+Documentation=file:///home/kria/cpsa/deploy/README.md
+# The DPU application must be loaded before VART can be used, and the network is
+# needed only for the dashboard clients.
+After=network-online.target cpsa-dpu.service
+Wants=network-online.target
+Requires=cpsa-dpu.service
+# A crash loop is restarted every 3 s instead of being given up on: the showcase
+# runs unattended for a whole day.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=kria
+Group=kria
+WorkingDirectory=/home/kria/cpsa
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/kria/cpsa/.venv/bin/cpsa-showcase --config config/showcase.yaml
+# The pipeline is process A and the web server is process B. SIGTERM goes to A
+# (KillMode=mixed), which stops B, releases the camera and the DPU and unlinks
+# the shared memory; the watchdog kills whatever is left after TimeoutStopSec.
+KillMode=mixed
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

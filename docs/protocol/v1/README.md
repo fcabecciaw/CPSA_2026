@@ -1,31 +1,79 @@
-# Protocol v1 schemas
+# Protocol v1: the showcase dashboard
 
-These schemas are the machine-readable form of `docs/specs/interface-rasd.md` (D3). The server validates its outgoing messages against them in tests (`tests/contract/protocol_schemas.py`).
+The dashboard talks to `cpsa-showcase` over one WebSocket at `/ws` (F-K1).
+There is exactly one server-to-client channel and one client command.
 
-- `envelope.schema.json`: every server-to-client message (IF-102). `data` is validated by `<type>.schema.json`.
-- `client-envelope.schema.json`: client commands (`ping`, `mode.set`) carry `v`, `type`, `data` and an optional `seq` (a per-connection client counter starting at 1). The server echoes it as `error.ref_seq` when an error answers that command.
-- `examples/<type>.json`: one valid full message per type. The frontend mock and the server's fake mode replay them.
+## Envelope
 
-Conventions:
-- Enum values are the domain enum *names* for `Tag` (`"DANGEROUS"`) and the enum *values* for every other enum (`"CONFIRMED"`, `"left"`, `"mouth"`, `"fist"`).
-- A missing or not-applicable value is `null`, never an absent required key.
-- `medical.hands.keypoints` holds `[x, y, conf]` in camera-frame pixels (`w` × `h`), in `layout` order. A keypoint that was not seen has `conf` 0.
-- `subject_box` is `[x1, y1, x2, y2]` in the same pixels.
-- `medical.hands.seq` (protocol addition, v1 compatible) is the analyzed frame sequence number, the same value the video stream stamps as `X-Frame-Seq` (F14). Clients that do not know it ignore it.
-- `status.perception.timing` (protocol addition, v1 compatible) is `null` or the rolling 5 s performance snapshot (F12/F13): exactly `analyzed_fps`, `camera_fps`, `decode_ms`, `preprocess_ms`, `dpu_ms`, `postprocess_ms`, `pose_ms`, `track_ms`, `latency_ms`, each a number or `null`, plus `dropped` (cumulative analysis-queue drops, integer ≥ 0). Numbers are rounded to one decimal. The server sends the key in medical mode; clients must also accept it missing.
-- `t` and `t_start` are Kria `CLOCK_MONOTONIC` seconds.
-- Clients ignore unknown types and unknown fields (IF-103). Payload objects allow extra fields.
-- `log` (event, protocol addition, v1 compatible): device and connection log lines for the operator panel (BlueCoin, MetaMotion, camera, supervisor). Rate-limited by the server; clients keep only the latest lines.
+Every server message is a JSON object with `v`, `type`, `seq`, `t`, `wall` and
+`data` (`envelope.schema.json`):
 
-Live video (protocol addition, v1 compatible; F14):
-- `GET /video.mjpeg` streams the analyzed camera frames as `multipart/x-mixed-replace; boundary=cpsaframe` with `Cache-Control: no-store`. Each part is `--cpsaframe`, then `Content-Type: image/jpeg`, `Content-Length`, `X-Frame-Seq` and the JPEG bytes.
-- Frames are the decoded, unmirrored camera images at camera size (the `w` × `h` of `medical.hands`), JPEG quality 70, at most 10 frames/s per client; each frame is encoded once and shared.
-- With no analyzed frames (idle or another mode) the response stays open and sends nothing. When `server.video` is false the endpoint answers `404` with `{"error": "video_disabled"}`.
-- Frames are only displayed live; this path never writes them to disk.
+| Field | Meaning |
+|---|---|
+| `v` | Protocol version, always `1`. |
+| `type` | Message type; the payload is validated by `<type>.schema.json`. |
+| `seq` | Server-wide counter, `1`, `2`, `3`, …: a client detects a missed or reordered message. |
+| `t` | Monotonic seconds, for latency measurement. |
+| `wall` | UTC wall clock, ISO-8601 with milliseconds. |
+| `data` | The payload, an object. |
 
-Hand demos (protocol additions, v1 compatible; F-E):
-- `hologram.hands` (state, at most 30 Hz): one analyzed IR frame. `width` × `height` are the IR frame size; each hand carries `score`, `box` in IR pixels, `kpts2d` as `[u, v, conf]` × 21 and `kpts3d` as `[x, y, z]` in metres in the IR camera frame, or `null` for a keypoint without a valid depth measurement. `timing.dpu_ms` is the last inference and `timing.total_ms` the whole chain.
-- `rps.state` (state, on change and at 10 Hz during the countdown): the rock/paper/scissors round. `phase` is `waiting`, `ready`, `countdown`, `shoot` or `result`; `count` is 3, 2, 1 or `null`; `player` is a gesture or `none`; `player_p` is the vote share; `board` is the move the board played; `outcome` is `win`, `lose`, `draw` or `unclear`; `score` counts rounds; `hand.kpts2d` is the live hand, or `hand` is `null`.
+A client command is `{"v": 1, "type": <command>, "data": {...}}` with an
+optional `seq` (`client-envelope.schema.json`): the server echoes it as
+`error.ref_seq` when the command is rejected. The only command is `ping`.
 
-AI showcase (protocol addition, v1 compatible; F-S2):
-- `showcase.state` (state, at most 10 Hz): what the pre-trained detector sees on the live RGB camera of the `showcase` mode. `model` is the configured model name (`showcase.default_model`); `width` × `height` are the analyzed frame size; `fps`, `dpu_ms` and `total_ms` are the processed rate and the last inference and whole-chain times, each `null` before the first measurement. `objects` is the best 20 detections by descending `score`, each with its Italian (or English with `showcase.labels: en`) `label`, the COCO-80 `class_id` and `box` as `[x1, y1, x2, y2]` in source-image pixels clipped to the frame; `counts` is one `{label, count}` entry per label of the frame, by descending count and then label. The same boxes and labels are drawn on the `/video.mjpeg` frames by the board, so the two panes always agree.
+## Messages
+
+| Type | Direction | Payload |
+|---|---|---|
+| `hello` | server → client | `server_version`, `protocol_version` (`1`). Sent first, on every connection. |
+| `status` | server | `state` (`starting`, `running`, `error`), `camera` (`ok`, `missing`, `error`), `model`, `fps`, `dpu_ms`, `errors`, `uptime_s`. 1 Hz and on change. |
+| `showcase.state` | server | `model`, `width`, `height`, `fps`, `dpu_ms`, `total_ms`, `objects`, `counts`. At most 10 Hz. |
+| `error` | server | `code`, `message`, optional `ref_seq`. |
+| `pong` | server | `id`, the value of the `ping` it answers. |
+| `ping` | client → server | `id`, echoed back unchanged. |
+
+`errors` lists the conditions the process reports, once each:
+`model_missing`, `dpu_error`, `camera_missing`, `camera_error`, `internal`.
+`error.code` accepts the same codes plus `bad_command`.
+
+`showcase.state.objects` holds the best 20 detections by descending `score`:
+`label` (Italian, or English with `labels: en`), the COCO-80 `class_id` and
+`box` as `[x1, y1, x2, y2]` in source-image pixels clipped to the frame.
+`counts` holds one `{label, count}` entry per label of the frame, by descending
+count and then label. The boxes are drawn on the same frame the stream carries,
+so the two panes of the dashboard always agree.
+
+A measurement that does not exist yet is `null`, never an absent key. `t` is
+monotonic seconds on the board; `wall` is the UTC wall clock.
+
+## Errors
+
+An unknown command, a malformed envelope (`v` different from `1`, missing
+`data`, a `seq` that is not a positive integer) or a `ping` without `id` is
+answered with one `error` whose code is `bad_command`:
+
+```json
+{"v": 1, "type": "error", "seq": 4, "t": 1001.0,
+ "wall": "2026-11-12T15:00:00.000Z",
+ "data": {"code": "bad_command", "message": "unknown command 'mode.set'", "ref_seq": 2}}
+```
+
+The connection stays open: the client may send more commands. The server never
+closes a WebSocket on a bad command.
+
+## Frames
+
+`GET /video.mjpeg` streams the overlaid frames as
+`multipart/x-mixed-replace; boundary=cpsa-frame` with `Cache-Control: no-store`.
+Each part is the boundary line, `Content-Type: image/jpeg`, `Content-Length`,
+the frame sequence as `X-Frame-Seq` and the JPEG bytes. Frames are only encoded
+while at least one client is watching, at `web.video_fps`.
+
+`GET /` serves `web.static_dir/index.html`, `/assets/...` the built bundle, and
+`GET /health` returns `{"state", "fps", "uptime_s"}` from the latest `status`.
+
+## Files
+
+- `*.schema.json`: one schema per payload, plus the two envelopes.
+- `examples/*.json`: one valid full message per type; the frontend mock and
+  `tests/contract/test_protocol_schemas.py` use them.

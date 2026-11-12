@@ -2,11 +2,11 @@
   "v": 1,
   "type": "error",
   "seq": 4,
-  "t": 1004.0,
-  "wall": "2026-11-12T08:00:00Z",
+  "t": 1001.0,
+  "wall": "2026-11-12T15:00:00.000Z",
   "data": {
-    "code": "busy",
-    "message": "a mode switch is already in progress",
-    "ref_seq": 3
+    "code": "bad_command",
+    "message": "unknown command 'mode.set'",
+    "ref_seq": 2
   }
 }

@@ -5,11 +5,11 @@ Runs on the KV260 with the services stopped (so the DPU is free) and needs no
 camera and no model: by default every stage is measured on a synthetic 640x480
 frame, which is what the coordinator re-runs after a deploy::
 
-    sudo systemctl stop cpsa-supervisor
+    sudo systemctl stop cpsa-showcase
     cd ~/cpsa && PYTHONPATH=src python3 scripts/profile_showcase.py
 
 With ``--model models/yolox_nano.xmodel`` the real graph runs on the DPU through
-:class:`~cpsa.adapters.detect.yolox_dpu.DpuYoloxDetector`: preprocess, DPU and
+:class:`~cpsa.yolox.YoloxDetector`: preprocess, DPU and
 decode are timed by ``submit``/``wait``, exactly as the showcase loop drives
 them.  Without it the DPU stage reports ``--dpu-ms`` (a wired-in stand-in, 4.7 ms
 by default) and the CPU stages are measured for real.
@@ -180,19 +180,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     import cv2
 
-    from cpsa.adapters.camera.f200 import yuyv_to_rgb
-    from cpsa.adapters.camera.uvc import opencv_yuyv_to_rgb
-    from cpsa.adapters.detect.yolox_dpu import (
+    from cpsa.camera import yuyv_to_rgb
+    from cpsa.dpu import input_quantization_lut_scaled
+    from cpsa.overlay import draw_overlay
+    from cpsa.protocol import ShowcaseObject
+    from cpsa.yolox import (
         YOLOX_INPUT_SIZE,
         YOLOX_PAD_VALUE,
         YOLOX_STRIDES,
-        DpuYoloxDetector,
+        QuantizedYoloxDecoder,
+        YoloxDetector,
         prepare_input_into,
     )
-    from cpsa.adapters.pose.dpu import input_quantization_lut_scaled
-    from cpsa.board.showcase_mode import draw_overlay
-    from cpsa.protocol.showcase import ShowcaseObject
-    from cpsa.vision.yolox_decode import QuantizedYoloxDecoder
 
     frame = synthetic_frame(args.width, args.height)
     raw = synthetic_yuyv(args.width, args.height)
@@ -202,17 +201,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"target={args.target_ms:.1f} ms ({1000.0 / args.target_ms:.0f} fps)"
     )
 
-    report(
-        "yuyv->rgb",
-        timed(args.runs, lambda: yuyv_to_rgb(raw, args.width, args.height)),
-        args.target_ms,
-        note="numpy BT.601 (F200/medical converter)",
-    )
     camera_cv2 = report(
         "yuyv->rgb cv2",
-        timed(args.runs, lambda: opencv_yuyv_to_rgb(raw, args.width, args.height)),
+        timed(args.runs, lambda: yuyv_to_rgb(raw, args.width, args.height)),
         args.target_ms,
-        note="showcase converter",
+        note="camera converter",
     )
 
     lut = input_quantization_lut_scaled(-2, 1.0)
@@ -259,7 +252,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     decode_ms = 0.0
     dpu_ms = args.dpu_ms
     if args.model:
-        detector = DpuYoloxDetector(args.model)
+        detector = YoloxDetector(args.model)
         tokens: list[int] = []
 
         def dpu_cycle() -> None:

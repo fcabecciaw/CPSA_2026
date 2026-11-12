@@ -1,0 +1,32 @@
+# The one configuration file of the showcase (F-K3).
+#
+# `cpsa-showcase` reads this file and nothing else; every key below is required
+# and an unknown key is rejected, so a stale section can never be ignored.
+# Paths are relative to the repository root, which the systemd unit sets as the
+# working directory.
+camera:                       # Intel RealSense F200 RGB node over V4L2
+  device: auto                # auto: resolve by card name at every start (survives a re-plug)
+  match: RealSense            # card-name fragment the kernel reports for the F200
+  width: 640                  # YUYV frame size; the overlay and the stream use it
+  height: 480
+  fps: 60                     # 60 fps demo target
+  exposure: 150               # manual exposure_time_absolute, 100 us units = 15 ms
+  gain: 320                   # manual V4L2 gain: keeps the booth as bright at half the exposure
+  power_line_hz: 50           # anti-flicker: 0 (off), 50 or 60
+
+model:                        # YOLOX-nano from the Vitis AI model zoo, COCO-80
+  path: models/yolox_nano.xmodel  # compiled KV260 xmodel (deploy.sh --model)
+  conf_thr: 0.35              # minimum objectness * class score of a kept box
+  iou_thr: 0.45               # class-aware NMS IoU threshold
+
+labels: it                    # it | en: language of the boxes and of the panel
+
+web:                          # HTTP and WebSocket endpoints (F-K2)
+  host: 0.0.0.0
+  port: 8080
+  video_fps: 60               # /video.mjpeg frames per second, encoded only while a client watches
+  jpeg_quality: 70            # cv2.imencode quality of the stream
+  static_dir: web/dist        # `npm run build` output
+
+log:
+  level: INFO                 # DEBUG, INFO, WARNING, ERROR or CRITICAL; systemd's journal keeps the lines
