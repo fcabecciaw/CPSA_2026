@@ -352,9 +352,7 @@ SHOWCASE_STATE = {
     "fps": 29.7,
     "dpu_ms": 4.1,
     "total_ms": 21.0,
-    "objects": [
-        {"label": "persona", "class_id": 0, "score": 0.91, "box": [1.0, 2.0, 30.0, 40.0]}
-    ],
+    "objects": [{"label": "persona", "class_id": 0, "score": 0.91, "box": [1.0, 2.0, 30.0, 40.0]}],
     "counts": [{"label": "persona", "count": 1}],
 }
 
