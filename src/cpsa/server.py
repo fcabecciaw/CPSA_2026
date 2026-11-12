@@ -174,6 +174,9 @@ class WebServer:
         app.router.add_get("/video.mjpeg", self._video)
         app.router.add_get("/ws", self._websocket)
         app.router.add_get("/assets/{path:.*}", self._asset)
+        # Everything else the dashboard ships (vendored MediaPipe runtime and
+        # model, notices) is served from web/dist, after the named routes.
+        app.router.add_get("/{path:.+}", self._static)
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
         site = web.TCPSite(runner, self._config.host, self._config.port)
@@ -262,9 +265,15 @@ class WebServer:
         return await self._file(self._config.static_dir / "index.html")
 
     async def _asset(self, request: web.Request) -> web.StreamResponse:
-        assets = self._config.static_dir / "assets"
-        root = assets.resolve()
-        candidate = (root / request.match_info["path"]).resolve()
+        return await self._contained(self._config.static_dir / "assets", request.match_info["path"])
+
+    async def _static(self, request: web.Request) -> web.StreamResponse:
+        return await self._contained(self._config.static_dir, request.match_info["path"])
+
+    async def _contained(self, base: Path, relative: str) -> web.StreamResponse:
+        """Serve ``base/relative`` only when it resolves inside ``base``."""
+        root = base.resolve()
+        candidate = (root / relative).resolve()
         try:
             candidate.relative_to(root)
         except ValueError:
@@ -274,7 +283,11 @@ class WebServer:
     async def _file(self, path: Path) -> web.StreamResponse:
         if not path.is_file():
             return web.Response(status=404, text="not found")
-        return web.FileResponse(path)
+        response = web.FileResponse(path)
+        # WebAssembly.instantiateStreaming needs the exact wasm MIME type.
+        if path.suffix == ".wasm":
+            response.content_type = "application/wasm"
+        return response
 
     async def _health(self, request: web.Request) -> web.Response:
         status = self._latest.get("status", {})

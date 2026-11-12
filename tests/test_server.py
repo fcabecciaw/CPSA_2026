@@ -182,6 +182,50 @@ def test_the_index_and_the_assets_are_served(tmp_path: Path) -> None:
     assert asset_status == 200 and script == "console.log('cpsa')"
 
 
+def test_vendored_files_are_served_with_the_wasm_mime_type(tmp_path: Path) -> None:
+    with Running(tmp_path) as running:
+        static = tmp_path / "dist"
+        (static / "vendor" / "mp" / "wasm").mkdir(parents=True)
+        (static / "vendor" / "mp" / "bundle.mjs").write_text("export {}", encoding="utf-8")
+        (static / "vendor" / "mp" / "wasm" / "runtime.wasm").write_bytes(b"\0asm\x01\0\0\0")
+        (static / "models").mkdir()
+        (static / "models" / "face.task").write_bytes(b"model")
+
+        async def scenario() -> list[tuple[int, str]]:
+            results = []
+            async with ClientSession() as session:
+                for path in (
+                    "/vendor/mp/bundle.mjs",
+                    "/vendor/mp/wasm/runtime.wasm",
+                    "/models/face.task",
+                ):
+                    async with session.get(running.url(path)) as response:
+                        await response.read()
+                        results.append((response.status, response.content_type))
+            return results
+
+        results = run(scenario)
+
+    assert [status for status, _ in results] == [200, 200, 200]
+    assert results[1][1] == "application/wasm"
+
+
+def test_a_static_path_outside_the_root_is_not_served(tmp_path: Path) -> None:
+    (tmp_path / "secret.txt").write_text("do not serve", encoding="utf-8")
+    with Running(tmp_path) as running:
+
+        async def scenario() -> int:
+            async with (
+                ClientSession() as session,
+                session.get(running.url("/../secret.txt")) as response,
+            ):
+                return response.status
+
+        status = run(scenario)
+
+    assert status in (403, 404)
+
+
 def test_an_asset_outside_the_static_root_is_not_served(tmp_path: Path) -> None:
     (tmp_path / "secret.txt").write_text("do not serve", encoding="utf-8")
     with Running(tmp_path) as running:
