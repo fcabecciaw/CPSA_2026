@@ -66,16 +66,21 @@ UvcVideoSource (RGB 640x480@30, vision.camera settings)
 ```python
 @dataclass(frozen=True)
 class Detection:
-    box: tuple[float, float, float, float]   # x1, y1, x2, y2 in source-image pixels, clipped to the image
-    score: float                             # 0..1
-    class_id: int                            # COCO-80 index (0 = person)
+    box: tuple[
+        float, float, float, float
+    ]  # x1, y1, x2, y2 in source-image pixels, clipped to the image
+    score: float  # 0..1
+    class_id: int  # COCO-80 index (0 = person)
+
 
 class ObjectDetector(Protocol):
     @property
-    def input_size(self) -> tuple[int, int]: ...      # (height, width) of the model input
+    def input_size(self) -> tuple[int, int]: ...  # (height, width) of the model input
     @property
-    def stage_ms(self) -> dict[str, float]: ...       # keys: preprocess, dpu, decode (last call)
-    def detect(self, rgb: NDArray[np.uint8]) -> list[Detection]: ...   # (H, W, 3) RGB uint8; score-desc order
+    def stage_ms(self) -> dict[str, float]: ...  # keys: preprocess, dpu, decode (last call)
+    def detect(
+        self, rgb: NDArray[np.uint8]
+    ) -> list[Detection]: ...  # (H, W, 3) RGB uint8; score-desc order
 ```
 
 `src/cpsa/vision/coco.py`: `COCO80_EN: tuple[str, ...]` (80, standard order) and `COCO80_IT: tuple[str, ...]`
