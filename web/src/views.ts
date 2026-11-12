@@ -3,6 +3,7 @@
 import type { ConnectionInfo } from "./client";
 import { byId, clear, el } from "./dom";
 import {
+  CAMERA_LABELS,
   CONNECTION_LABEL,
   ERROR_LABEL,
   MODE_LABEL,
@@ -21,6 +22,9 @@ export interface DashboardElements {
   conn: HTMLElement;
   modeButtons: HTMLButtonElement[];
   modeStatus: HTMLElement;
+  cameraTitle: HTMLElement;
+  cameraBadge: HTMLElement;
+  video: HTMLImageElement;
   notice: HTMLElement;
   fps: HTMLElement;
   latency: HTMLElement;
@@ -35,8 +39,12 @@ export function collectElements(): DashboardElements {
     modeButtons: [
       byId<HTMLButtonElement>("mode-hologram"),
       byId<HTMLButtonElement>("mode-rps"),
+      byId<HTMLButtonElement>("mode-showcase"),
     ],
     modeStatus: byId("mode-status"),
+    cameraTitle: byId("camera-title"),
+    cameraBadge: byId("camera-badge"),
+    video: byId<HTMLImageElement>("video"),
     notice: byId("notice"),
     fps: byId("fps"),
     latency: byId("latency"),
@@ -96,7 +104,19 @@ export function renderMode(elements: DashboardElements, input: RenderInput): voi
   }
 
   renderScore(elements, mode, state);
+  renderCamera(elements, mode);
   elements.modeStatus.textContent = modeAnnouncement(mode, modeState, connection);
+}
+
+/**
+ * The showcase runs on the RGB camera; the hand demos run on the IR one, so the
+ * pane title and badge follow the mode.
+ */
+function renderCamera(elements: DashboardElements, mode: Mode | null): void {
+  const rgb = mode === "showcase";
+  elements.cameraTitle.textContent = rgb ? CAMERA_LABELS.rgbTitle : CAMERA_LABELS.title;
+  elements.cameraBadge.textContent = rgb ? CAMERA_LABELS.rgbBadge : CAMERA_LABELS.badge;
+  elements.video.alt = rgb ? CAMERA_LABELS.rgbAlt : CAMERA_LABELS.alt;
 }
 
 function modeAnnouncement(

@@ -15,6 +15,7 @@ export const MODE_LABEL: Record<Mode, string> = {
   medical: "Medicale",
   hologram: "Ologramma",
   rps: "Sasso-carta-forbice",
+  showcase: "Cosa vede l'IA",
 };
 
 export const MODE_STATE_LABEL: Record<ModeState, string> = {
@@ -34,6 +35,11 @@ export const CONNECTION_LABEL = {
 
 export const CAMERA_LABELS = {
   title: "Telecamera infrarossa",
+  rgbTitle: "Telecamera RGB",
+  alt: "Video della telecamera infrarossa",
+  rgbAlt: "Video della telecamera RGB",
+  badge: "IR",
+  rgbBadge: "RGB",
   waiting: "In attesa della telecamera…",
   unavailable: "Video non disponibile",
 } as const;
@@ -43,8 +49,16 @@ export const VIEW_LABELS = {
   hologramEmpty: "In attesa della mano…",
   rpsTitle: "Sasso, carta, forbice",
   rpsEmpty: "Mano non visibile",
+  showcaseTitle: "Cosa vede l'IA",
+  showcaseEmpty: "Mostra un oggetto alla telecamera",
   idleTitle: "Nessuna demo attiva",
-  idleBody: "Scegli Ologramma o Sasso-carta-forbice nella barra in alto.",
+  idleBody: "Scegli una demo nella barra in alto.",
+} as const;
+
+/** Copy of the "Cosa vede l'IA" panel: the counts and the detection list. */
+export const SHOWCASE_LABELS = {
+  countsLabel: "Oggetti nell'inquadratura",
+  objectsLabel: "Rilevamenti più sicuri",
 } as const;
 
 /** T5: copy of the Sasso-carta-forbice panel. */

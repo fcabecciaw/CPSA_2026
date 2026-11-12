@@ -1,10 +1,11 @@
 /*
  * The booth surface: one instrument, two panes.
  *
- * The left pane is the IR camera, the right pane is what the board makes of it
- * (the 3D hologram, or the keypoints of a round). A single surface split by a
- * hairline keeps the layout slim at 1280×720 and 1920×1080; the cyan is the
- * hologram's own light and the warm amber belongs to the board's move.
+ * The left pane is the camera, the right pane is what the board makes of it
+ * (the 3D hologram, the keypoints of a round, or what the AI model sees). A
+ * single surface split by a hairline keeps the layout slim at 1280×720 and
+ * 1920×1080; the cyan is the hologram's own light and the warm amber belongs to
+ * the board's move.
  *
  * System fonts only, no external assets (NFR-07): Ubuntu + Ubuntu Mono where
  * available, the platform's UI and mono stacks elsewhere.
@@ -410,6 +411,145 @@ body {
   color: var(--dim);
   font-size: 0.8em;
   letter-spacing: 0.16em;
+}
+
+/* --- the AI showcase pane ----------------------------------------------- */
+
+.showcase {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: clamp(12px, 2vh, 26px);
+  padding: clamp(16px, 2vw, 40px);
+  padding-bottom: clamp(34px, 4.5vh, 56px);
+  overflow: hidden;
+}
+
+.showcase-group {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(4px, 0.8vh, 10px);
+  /* The counts never shrink: on a short pane the detection list clips first. */
+  flex: 0 0 auto;
+}
+
+.showcase-group:last-child {
+  flex: 0 1 auto;
+  min-height: 0;
+}
+
+.showcase-heading {
+  margin: 0;
+  font-size: 0.7em;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.showcase-counts,
+.showcase-objects {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* "2 × persona": the counts are the loudest thing in the pane. */
+.showcase-counts {
+  flex: 0 1 auto;
+  gap: clamp(2px, 0.5vh, 8px);
+}
+
+.showcase-count {
+  display: flex;
+  align-items: baseline;
+  gap: 0.3em;
+  min-width: 0;
+  color: var(--text);
+  font-size: clamp(1.6rem, 2.6vw, 2.9rem);
+  font-weight: 300;
+  letter-spacing: -0.015em;
+  line-height: 1.2;
+}
+
+.showcase-count-n {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--beam);
+}
+
+.showcase-count-x {
+  color: var(--dim);
+  font-size: 0.6em;
+}
+
+.showcase-count-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The detections sit under the counts, separated by a hairline. */
+.showcase-objects {
+  flex: 0 1 auto;
+  gap: clamp(7px, 1.1vh, 14px);
+  padding-top: clamp(10px, 1.4vh, 18px);
+  border-top: 1px solid var(--hairline);
+}
+
+.showcase-object {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 0.3em 0.8em;
+  font-size: clamp(0.9rem, 1.05vw, 1.15rem);
+}
+
+/* The head is a grid wrapper only: label left, score right. */
+.showcase-object-head {
+  display: contents;
+}
+
+.showcase-object-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.showcase-object-score {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.92em;
+  color: var(--muted);
+}
+
+.showcase-bar {
+  grid-column: 1 / -1;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(122, 190, 230, 0.13);
+  overflow: hidden;
+}
+
+.showcase-bar-fill {
+  display: block;
+  height: 100%;
+  width: calc(var(--score, 0) * 100%);
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgba(79, 214, 255, 0.4), var(--beam));
+}
+
+.showcase-more {
+  color: var(--dim);
+  font-size: 0.85em;
 }
 
 /* --- the calm empty state ----------------------------------------------- */

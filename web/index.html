@@ -6,9 +6,9 @@
     <meta name="color-scheme" content="dark" />
     <meta
       name="description"
-      content="CPSA: ologramma 3D della mano e sasso-carta-forbice rilevati sulla Kria KV260."
+      content="CPSA: ologramma 3D della mano, sasso-carta-forbice e cosa vede l'IA sulla Kria KV260."
     />
-    <title>CPSA · Ologramma e sasso-carta-forbice</title>
+    <title>CPSA · Ologramma, sasso-carta-forbice e IA</title>
   </head>
   <body>
     <div class="app">
@@ -21,6 +21,9 @@
           </button>
           <button type="button" id="mode-rps" data-mode="rps" aria-pressed="false">
             Sasso-carta-forbice
+          </button>
+          <button type="button" id="mode-showcase" data-mode="showcase" aria-pressed="false">
+            Cosa vede l'IA
           </button>
         </div>
 
@@ -46,7 +49,7 @@
           <div class="frame">
             <img id="video" class="video" alt="Video della telecamera infrarossa" hidden />
             <p id="video-note" class="frame-note">In attesa della telecamera…</p>
-            <span class="frame-badge" aria-hidden="true">IR</span>
+            <span class="frame-badge" id="camera-badge" aria-hidden="true">IR</span>
           </div>
         </section>
 
@@ -77,10 +80,31 @@
           </div>
         </section>
 
+        <section
+          class="pane pane-view pane-showcase"
+          id="view-showcase"
+          aria-labelledby="showcase-title"
+          hidden
+        >
+          <h2 id="showcase-title" class="sr-only">Cosa vede l'IA</h2>
+          <div class="showcase">
+            <section class="showcase-group" id="showcase-counts-group">
+              <h3 class="showcase-heading">Oggetti nell'inquadratura</h3>
+              <ul class="showcase-counts" id="showcase-counts"></ul>
+            </section>
+            <section class="showcase-group" id="showcase-objects-group">
+              <h3 class="showcase-heading">Rilevamenti più sicuri</h3>
+              <ul class="showcase-objects" id="showcase-objects"></ul>
+            </section>
+          </div>
+          <p class="view-note" id="showcase-empty">Mostra un oggetto alla telecamera</p>
+          <p class="view-meta" id="showcase-meta"></p>
+        </section>
+
         <section class="pane pane-view pane-idle" id="view-idle" aria-labelledby="idle-title" hidden>
           <div class="idle-copy">
             <h2 id="idle-title">Nessuna demo attiva</h2>
-            <p>Scegli Ologramma o Sasso-carta-forbice nella barra in alto.</p>
+            <p>Scegli una demo nella barra in alto.</p>
           </div>
         </section>
       </main>

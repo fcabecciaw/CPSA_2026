@@ -1,16 +1,15 @@
 # Hands dashboard (`web/`)
 
-The booth dashboard of the hands demos: a Vite + TypeScript static app that the
+The booth dashboard of the demos: a Vite + TypeScript static app that the
 Kria KV260 serves at `/`. It connects to the same origin at `/ws`, renders the
-protocol v1 snapshot and the two hand streams, and works with no network access
-and no CDN (NFR-07, FR-501). The UI copy is Italian, as required by
-`PRODUCT.md`.
+protocol v1 snapshot and the live streams, and works with no network access and
+no CDN (NFR-07, FR-501). The UI copy is Italian, as required by `PRODUCT.md`.
 
 The medical views, their labels and their mock data are gone: this dashboard
-shows only the two hand demos. The server may still publish `medical.*` and
-`log` topics (medical mode still exists on the board); `protocol.ts` keeps
-their types and the store ignores them, so an unexpected topic is never an
-error.
+shows the two hand demos and the AI showcase. The server may still publish
+`medical.*` and `log` topics (medical mode still exists on the board);
+`protocol.ts` keeps their types and the store ignores them, so an unexpected
+topic is never an error.
 
 ## Commands
 
@@ -37,46 +36,59 @@ are no font files, images or scripts fetched from the network.
 A slim top bar and one instrument surface split in two panes:
 
 1. **Top bar** — the `CPSA` wordmark, the segmented mode switch
-   (`Ologramma` | `Sasso-carta-forbice`), the connection dot, and the analysed
-   frames per second and their processing time. While Sasso-carta-forbice runs
-   the score rests in the bar (`Tu 2 · Tavolo 1`, plus the draws once there is
-   one).
-2. **Left pane** — `/video.mjpeg` (F14 the IR camera), always in the page,
-   letterboxed 4:3 with `object-fit: contain`. With no frames it shows
-   “In attesa della telecamera…”; a broken stream shows “Video non
-   disponibile” and retries after 1 s, doubling up to 10 s. The pane follows
-   the mode: while no hand mode runs, no frames exist, so the placeholder is
-   back instead of a frozen last frame.
+   (`Ologramma` | `Sasso-carta-forbice` | `Cosa vede l'IA`), the connection
+   dot, and the analysed frames per second and their processing time. While
+   Sasso-carta-forbice runs the score rests in the bar (`Tu 2 · Tavolo 1`,
+   plus the draws once there is one).
+2. **Left pane** — `/video.mjpeg` (F14), always in the page, letterboxed 4:3
+   with `object-fit: contain`; the badge and the title say `IR` for the hand
+   demos and `RGB` for the showcase. With no frames it shows “In attesa della
+   telecamera…”; a broken stream shows “Video non disponibile” and retries
+   after 1 s, doubling up to 10 s. The pane follows the mode: while no camera
+   mode runs, no frames exist, so the placeholder is back instead of a frozen
+   last frame.
 3. **Right pane** — `hologram` mode draws `hologram.hands` as the existing
    glowing 3D hand on canvas 2D, with the hand count and the frame size in a
    small footer. `rps` mode draws `rps.state.hand.kpts2d` as a 2D skeleton,
    zoomed to fill the pane, with the countdown (“Sasso… carta… forbice!”) and
    the result banner over it and the player's gesture next to the board's move
-   at the bottom. Any other mode shows a calm empty state.
+   at the bottom. `showcase` mode lists what the detector sees: the counts as
+   large rows (`2 × persona`), then the most confident detections with their
+   score bars, and “Mostra un oggetto alla telecamera” while the frame is
+   empty. Any other mode shows a calm empty state.
 
 The top-bar numbers come from the streams themselves: in `hologram` mode the
 frame rate is measured over the last 2 s of `hologram.hands` arrivals and the
 latency is its `timing.total_ms`; in `rps` mode they come from
 `status.perception` (`timing.analyzed_fps`/`latency_ms` when present,
-`fps`/`dpu_ms` otherwise), because `rps.state` carries no timing.
+`fps`/`dpu_ms` otherwise), because `rps.state` carries no timing; in `showcase`
+mode they are the `fps` and `total_ms` of `showcase.state` (falling back to
+`dpu_ms`).
 
 ## Mock
 
 `?mock=1` runs the dev-only stand-in (`src/mock.ts`, removed from the
 production bundle by the `import.meta.env.DEV` guard). It replays the `hello`
-and `status` fixtures, and synthesises both hand streams and a fake IR picture
-for the camera pane; the notice line says the data is fake.
+and `status` fixtures, and synthesises the two hand streams, the showcase
+detections and the matching fake picture (an IR hand, or the RGB room with the
+same boxes and labels the board would draw); the notice line says the data is
+fake.
 
 ```sh
 # hologram, Sasso-carta-forbice; `phase` freezes a round for a screenshot
 http://localhost:5173/?mock=1&mode=hologram
 http://localhost:5173/?mock=1&mode=rps&phase=countdown&count=2
 http://localhost:5173/?mock=1&mode=rps&phase=result&outcome=win
+# showcase: the room with two people and four objects on the table
+http://localhost:5173/?mock=1&mode=showcase
+# showcase with nothing detected: the invitation only
+http://localhost:5173/?mock=1&mode=showcase&objects=0
 http://localhost:5173/?mock=1&mode=idle
 ```
 
-`count=3|2|1`, `outcome=win|lose|draw|unclear` refine a frozen round; `video=0`
-leaves the camera pane on its placeholder.
+`count=3|2|1`, `outcome=win|lose|draw|unclear` refine a frozen round;
+`objects=0` empties the showcase frame; `video=0` leaves the camera pane on its
+placeholder.
 
 ## Files
 
@@ -84,8 +96,10 @@ leaves the camera pane on its placeholder.
 - `src/views.ts` — top bar, notice line, score;
 - `src/metrics.ts` — the fps and latency readout;
 - `src/video.ts` — the MJPEG pane with its retry;
-- `src/hologram.ts`, `src/rps.ts` — the two right-hand views;
+- `src/hologram.ts`, `src/rps.ts`, `src/showcase.ts` — the three right-hand
+  views;
 - `src/state.ts` — the last snapshot of each stream;
-- `src/protocol.ts` — protocol v1 types and validation (unchanged interfaces);
+- `src/protocol.ts` — protocol v1 types and validation, including the additive
+  `showcase.state` (F-S2);
 - `src/labels.ts` — Italian copy and number formatting;
 - `src/mock.ts` — the dev-only stand-in.

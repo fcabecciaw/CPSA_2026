@@ -14,6 +14,7 @@ import type {
   ModeProgressPayload,
   RpsStatePayload,
   ServerMessage,
+  ShowcaseStatePayload,
   StatusPayload,
 } from "./protocol";
 
@@ -29,6 +30,8 @@ export interface DashboardState {
   hologram: HologramHandsPayload | null;
   /** T5: the last `rps.state` of the Sasso-carta-forbice mode. */
   rps: RpsStatePayload | null;
+  /** S3: the last `showcase.state` of the "Cosa vede l'IA" mode. */
+  showcase: ShowcaseStatePayload | null;
   lastError: ErrorEntry | null;
   /** `seq` of a sent `mode.set` still waiting for its answer (IF-304). */
   pendingModeSeq: number | null;
@@ -37,7 +40,7 @@ export interface DashboardState {
 }
 
 /** The parts of `index.html` a message can change. */
-export type StateRegion = "mode" | "hologram" | "rps";
+export type StateRegion = "mode" | "hologram" | "rps" | "showcase";
 
 export class DashboardStore {
   readonly state: DashboardState = {
@@ -45,6 +48,7 @@ export class DashboardStore {
     modeProgress: null,
     hologram: null,
     rps: null,
+    showcase: null,
     lastError: null,
     pendingModeSeq: null,
     modeError: null,
@@ -109,6 +113,10 @@ export class DashboardStore {
         this.state.rps = message.data;
         return ["rps"];
 
+      case "showcase.state":
+        this.state.showcase = message.data;
+        return ["showcase"];
+
       // `hello` only marks the connection; `pong` keeps the transport alive.
       // `log` and the `medical.*` topics are not shown by this dashboard.
       case "hello":
@@ -123,8 +131,8 @@ export class DashboardStore {
   }
 
   /**
-   * T5: forgets the hand stream of a mode the server has left (hologram,
-   * Sasso-carta-forbice), so a view never shows a frozen hand.
+   * T5: forgets the stream of a mode the server has left (hologram,
+   * Sasso-carta-forbice, showcase), so a view never shows a frozen snapshot.
    */
   private dropModeStreams(mode: Mode): StateRegion[] {
     const regions: StateRegion[] = [];
@@ -135,6 +143,10 @@ export class DashboardStore {
     if (mode !== "rps" && this.state.rps !== null) {
       this.state.rps = null;
       regions.push("rps");
+    }
+    if (mode !== "showcase" && this.state.showcase !== null) {
+      this.state.showcase = null;
+      regions.push("showcase");
     }
     return regions;
   }

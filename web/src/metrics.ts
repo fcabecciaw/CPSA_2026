@@ -5,10 +5,11 @@
  * The hologram mode publishes a `timing` block with every frame, so its rate
  * and its total time come from the frame arrivals themselves; the
  * Sasso-carta-forbice mode publishes no timing, so it reads the `status`
- * snapshot, exactly as the medical dashboard did.
+ * snapshot, exactly as the medical dashboard did; the showcase mode reports
+ * its own rate and frame time in `showcase.state`.
  */
 
-import type { Mode, StatusPayload } from "./protocol";
+import type { Mode, ShowcaseStatePayload, StatusPayload } from "./protocol";
 
 export interface Readout {
   fps: number | null;
@@ -24,6 +25,8 @@ export class MetricsTracker {
   private hologramLatency: number | null = null;
   private statusFps: number | null = null;
   private statusLatency: number | null = null;
+  private showcaseFps: number | null = null;
+  private showcaseLatency: number | null = null;
 
   /** One `hologram.hands` frame: when it arrived and its total processing time. */
   frame(receivedAt: number, totalMs: number): void {
@@ -47,10 +50,18 @@ export class MetricsTracker {
     this.statusLatency = perception.timing?.latency_ms ?? perception.dpu_ms;
   }
 
-  /** Forgets every sample; used when the server leaves a hand mode. */
+  /** One `showcase.state`: the detector reports its own rate and frame time. */
+  showcase(state: ShowcaseStatePayload): void {
+    this.showcaseFps = state.fps;
+    this.showcaseLatency = state.total_ms ?? state.dpu_ms;
+  }
+
+  /** Forgets every sample; used when the server leaves a streamed mode. */
   reset(): void {
     this.arrivals = [];
     this.hologramLatency = null;
+    this.showcaseFps = null;
+    this.showcaseLatency = null;
   }
 
   read(mode: Mode | null): Readout {
@@ -59,6 +70,9 @@ export class MetricsTracker {
     }
     if (mode === "rps") {
       return { fps: this.statusFps, latencyMs: this.statusLatency };
+    }
+    if (mode === "showcase") {
+      return { fps: this.showcaseFps, latencyMs: this.showcaseLatency };
     }
     return EMPTY;
   }

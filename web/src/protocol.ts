@@ -11,7 +11,7 @@
 
 export const PROTOCOL_VERSION = 1 as const;
 
-export const MODES = ["idle", "lab", "medical", "hologram", "rps"] as const;
+export const MODES = ["idle", "lab", "medical", "hologram", "rps", "showcase"] as const;
 export type Mode = (typeof MODES)[number];
 
 export const MODE_STATES = ["stopped", "starting", "running", "stopping", "failed"] as const;
@@ -295,6 +295,37 @@ export interface RpsStatePayload {
   hand: { kpts2d: Keypoint[] } | null;
 }
 
+/** One object of `showcase.state`: a COCO-80 label and its box in camera pixels. */
+export interface ShowcaseObject {
+  label: string;
+  class_id: number;
+  score: number;
+  box: [number, number, number, number];
+}
+
+/** How many objects of one label the detector sees in the current frame. */
+export interface ShowcaseCount {
+  label: string;
+  count: number;
+}
+
+/**
+ * F-S2 `showcase.state`: what the AI model sees on the RGB camera, at most
+ * 10 Hz. `fps` is the processing rate, `dpu_ms` the last inference and
+ * `total_ms` the whole chain; `objects` is score-descending (at most 20) and
+ * `counts` is count-descending, then by label.
+ */
+export interface ShowcaseStatePayload {
+  model: string;
+  width: number;
+  height: number;
+  fps: number | null;
+  dpu_ms: number | null;
+  total_ms: number | null;
+  objects: ShowcaseObject[];
+  counts: ShowcaseCount[];
+}
+
 interface Envelope<T extends string, P> {
   v: typeof PROTOCOL_VERSION;
   type: T;
@@ -316,7 +347,8 @@ export type ServerMessage =
   | Envelope<"medical.episode", EpisodePayload>
   | Envelope<"medical.hands", HandsPayload>
   | Envelope<"hologram.hands", HologramHandsPayload>
-  | Envelope<"rps.state", RpsStatePayload>;
+  | Envelope<"rps.state", RpsStatePayload>
+  | Envelope<"showcase.state", ShowcaseStatePayload>;
 
 export type ServerMessageType = ServerMessage["type"];
 
@@ -363,6 +395,7 @@ const KNOWN_TYPES: readonly ServerMessageType[] = [
   "medical.hands",
   "hologram.hands",
   "rps.state",
+  "showcase.state",
 ];
 
 export function isServerMessageType(type: string): type is ServerMessageType {
@@ -426,6 +459,8 @@ export function parseServerMessage(raw: string): ParseResult {
         return message({ v: PROTOCOL_VERSION, type, seq, t, wall, data: parseHologramHands(data) });
       case "rps.state":
         return message({ v: PROTOCOL_VERSION, type, seq, t, wall, data: parseRpsState(data) });
+      case "showcase.state":
+        return message({ v: PROTOCOL_VERSION, type, seq, t, wall, data: parseShowcaseState(data) });
     }
   } catch (error) {
     return { kind: "invalid", reason: `${type}: ${reasonOf(error)}` };
@@ -710,6 +745,38 @@ function parseRpsCount(value: unknown): number | null {
     return value;
   }
   throw new PayloadError(`count: atteso 1, 2, 3 o null, ricevuto ${String(value)}`);
+}
+
+/**
+ * F-S2 `showcase.state`. The model name, the frame size and the two lists are
+ * load-bearing (the panel is built from them); the three timings are nullable,
+ * because a frame that failed to time still describes what was seen.
+ */
+function parseShowcaseState(data: JsonObject): ShowcaseStatePayload {
+  return {
+    model: reqString(data, "model"),
+    width: reqInteger(data, "width", 1),
+    height: reqInteger(data, "height", 1),
+    fps: nullableNumberField(data, "fps"),
+    dpu_ms: nullableNumberField(data, "dpu_ms"),
+    total_ms: nullableNumberField(data, "total_ms"),
+    objects: reqArray(data, "objects", (value) => {
+      const object = asObject(value, "objects[]");
+      return {
+        label: reqString(object, "label"),
+        class_id: reqInteger(object, "class_id", 0),
+        score: reqNumber(object, "score"),
+        box: parseBox(object.box, "objects[].box"),
+      };
+    }),
+    counts: reqArray(data, "counts", (value) => {
+      const count = asObject(value, "counts[]");
+      return {
+        label: reqString(count, "label"),
+        count: reqInteger(count, "count", 0),
+      };
+    }),
+  };
 }
 
 function parseKeypoints(value: unknown, what: string): Keypoint[] {

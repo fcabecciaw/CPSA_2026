@@ -12,6 +12,7 @@ import { HologramView } from "./hologram";
 import { MetricsTracker } from "./metrics";
 import { MODES, type Mode } from "./protocol";
 import { RpsView } from "./rps";
+import { ShowcaseView } from "./showcase";
 import { DashboardStore, type StateRegion } from "./state";
 import {
   collectElements,
@@ -45,11 +46,20 @@ const rps = new RpsView({
   canvas: byId<HTMLCanvasElement>("rps-canvas"),
   empty: byId("rps-empty"),
 });
+const showcase = new ShowcaseView({
+  countsGroup: byId("showcase-counts-group"),
+  counts: byId("showcase-counts"),
+  objectsGroup: byId("showcase-objects-group"),
+  objects: byId("showcase-objects"),
+  empty: byId("showcase-empty"),
+  meta: byId("showcase-meta"),
+});
 
-/** The three right-hand panes; exactly one is visible at a time (T5). */
+/** The four right-hand panes; exactly one is visible at a time (T5). */
 const panes = {
   hologram: byId("view-hologram"),
   rps: byId("view-rps"),
+  showcase: byId("view-showcase"),
   idle: byId("view-idle"),
 };
 
@@ -86,20 +96,22 @@ function refreshView(): void {
   const hologramVisible = mode === "hologram";
   panes.hologram.hidden = !hologramVisible;
   panes.rps.hidden = mode !== "rps";
-  panes.idle.hidden = hologramVisible || mode === "rps";
+  panes.showcase.hidden = mode !== "showcase";
+  panes.idle.hidden = hologramVisible || mode === "rps" || mode === "showcase";
   hologram.setActive(hologramVisible);
   rps.setActive(mode === "rps");
 }
 
 /**
  * F14: the camera pane follows the mode, not the connection alone. While no
- * hand mode runs, no frames are produced, so the pane shows its placeholder
+ * camera mode runs, no frames are produced, so the pane shows its placeholder
  * instead of a frozen last frame.
  */
 function refreshVideo(): void {
   const mode = store.mode;
   const wanted =
-    connection.phase === "open" && (mode === "hologram" || mode === "rps");
+    connection.phase === "open" &&
+    (mode === "hologram" || mode === "rps" || mode === "showcase");
   if (wanted === streaming) {
     return;
   }
@@ -160,6 +172,10 @@ function renderRegions(regions: StateRegion[]): void {
         renderMode(elements, input());
         renderMetrics(elements, input().readout);
         break;
+      case "showcase":
+        showcase.setState(store.state.showcase);
+        renderMetrics(elements, input().readout);
+        break;
     }
   }
 }
@@ -188,6 +204,9 @@ async function boot(): Promise<void> {
         }
         if (message.type === "hologram.hands") {
           metrics.frame(now, message.data.timing.total_ms);
+        }
+        if (message.type === "showcase.state") {
+          metrics.showcase(message.data);
         }
         renderRegions(store.apply(message, now));
       },
