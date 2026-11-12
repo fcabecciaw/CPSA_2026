@@ -476,3 +476,43 @@ def test_the_detector_rejects_a_zoom_below_one(
 ) -> None:
     with pytest.raises(ValueError, match="zoom"):
         _detector(monkeypatch, tmp_path, zoom=zoom)
+
+
+def test_a_live_zoom_changes_the_next_frame_and_spares_the_job_in_flight(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    outputs = {
+        8: _head(3, [(0, 0, {"tx": 2.5, "ty": 10.0, "log_w": math.log(2.0)})], 8),
+        16: _head(3, [], 16),
+        32: _head(3, [], 32),
+    }
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    whole = _detector(monkeypatch, tmp_path, payloads=outputs).detect(frame)
+    zoomed = _detector(
+        monkeypatch, tmp_path, payloads=outputs, zoom=1.5, zoom_center=(0.4, 0.6)
+    ).detect(frame)
+    assert whole != zoomed
+
+    detector = _detector(monkeypatch, tmp_path, payloads=outputs)
+    token = detector.submit(frame)
+    detector.set_zoom(1.5, (0.4, 0.6))
+
+    assert detector.wait(token) == whole
+    assert detector.zoom == (1.5, (0.4, 0.6))
+    assert detector.detect(frame) == zoomed
+
+    detector.set_zoom(1.0)
+    assert detector.detect(frame) == whole
+
+
+@pytest.mark.parametrize(
+    ("zoom", "centre"), [(0.9, (0.5, 0.5)), (1.2, (1.1, 0.5)), (1.2, (0.5, float("nan")))]
+)
+def test_a_live_zoom_out_of_range_is_rejected_and_keeps_the_crop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, zoom: float, centre: tuple[float, float]
+) -> None:
+    detector = _detector(monkeypatch, tmp_path, zoom=1.3)
+
+    with pytest.raises(ValueError, match="zoom"):
+        detector.set_zoom(zoom, centre)
+    assert detector.zoom == (1.3, (0.5, 0.5))

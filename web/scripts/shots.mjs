@@ -14,8 +14,8 @@
  * The URL parameters are the dev-only hooks of `main.ts` and `avatar/view.ts`:
  * `?mock=1`, `expression`, `mouth`, `gaze=left|right|up`, `presence`,
  * `view=skeleton`, `attract=0` (skip "Come funziona"), `scene=N` (pin one of its
- * scenes), `debug=1|0` (presentation or debug mode for that load) and
- * `bench=1`. `--suffix` appends the viewport (`-1280x720`) to the file names.
+ * scenes), `debug=1|0` (presentation or debug mode for that load),
+ * `calibration=1` (the debug "Calibrazione" card open) and `bench=1`. `--suffix` appends the viewport (`-1280x720`) to the file names.
  */
 
 import { spawn } from "node:child_process";
@@ -51,6 +51,7 @@ const SHOTS = [
   { name: "demo-present-skeleton", query: "mock=1&attract=0&debug=0&view=skeleton", settleMs: 7000 },
   { name: "demo-debug-objects", query: "mock=1&attract=0&debug=1", settleMs: 7000 },
   { name: "demo-debug-skeleton", query: "mock=1&attract=0&debug=1&view=skeleton", settleMs: 7000 },
+  { name: "demo-debug-calibration", query: "mock=1&attract=0&debug=1&calibration=1", settleMs: 4000 },
   // The seven moods of the sphere, each pinned through the dev-only hook.
   { name: "mood-neutral", query: "mock=1&attract=0&expression=neutral&presence=1", settleMs: 2000 },
   { name: "mood-happy", query: "mock=1&attract=0&expression=happy&presence=1", settleMs: 2000 },

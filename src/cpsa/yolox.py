@@ -1155,12 +1155,9 @@ class YoloxDetector:
         self._conf_thr = float(conf_thr)
         self._iou_thr = float(iou_thr)
         self._class_thr = dict(class_thr or {})
-        if not math.isfinite(zoom) or zoom < 1.0:
-            raise ValueError(f"zoom must be at least 1.0, got {zoom}")
-        if not all(0.0 <= float(value) <= 1.0 for value in zoom_center):
-            raise ValueError(f"zoom_center must be fractions in [0, 1], got {zoom_center}")
-        self._zoom = float(zoom)
-        self._zoom_center = (float(zoom_center[0]), float(zoom_center[1]))
+        self._zoom = 1.0
+        self._zoom_center = (0.5, 0.5)
+        self.set_zoom(zoom, zoom_center)
 
         self._runner = DpuRunner(xmodel_path)
         self._outputs: tuple[OutputTensor, ...] = self._runner.outputs
@@ -1226,6 +1223,33 @@ class YoloxDetector:
     def last_candidate_count(self) -> int:
         """Candidates that survived the int8 prefilter in the last :meth:`wait`."""
         return self._decoder.last_candidate_count
+
+    @property
+    def zoom(self) -> tuple[float, tuple[float, float]]:
+        """The centre crop ``(zoom, (x, y))`` the next :meth:`submit` uses."""
+        return self._zoom, self._zoom_center
+
+    def set_zoom(self, zoom: float, zoom_center: tuple[float, float] = (0.5, 0.5)) -> None:
+        """Change the centre crop from the next :meth:`submit` on (live calibration).
+
+        Only two numbers change: the crop is computed per frame and a slot
+        whose letterbox geometry differs repaints its padding, so there is no
+        restart and no model reload. A job already in flight keeps the crop it
+        was submitted with, so its boxes still map back to the right pixels.
+
+        Raises:
+            ValueError: If ``zoom`` is below 1.0 or the centre is not a pair of
+                fractions.
+        """
+
+        if not math.isfinite(zoom) or zoom < 1.0:
+            raise ValueError(f"zoom must be at least 1.0, got {zoom}")
+        if len(zoom_center) != 2 or not all(
+            math.isfinite(float(value)) and 0.0 <= float(value) <= 1.0 for value in zoom_center
+        ):
+            raise ValueError(f"zoom_center must be fractions in [0, 1], got {zoom_center}")
+        self._zoom = float(zoom)
+        self._zoom_center = (float(zoom_center[0]), float(zoom_center[1]))
 
     def submit(self, rgb: NDArray[np.uint8]) -> int:
         """Preprocess ``rgb`` and start the DPU without waiting for it.

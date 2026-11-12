@@ -13,6 +13,7 @@ import { RULEBOOK } from "./cognitive/rulebook";
 import { CognitiveEngine, type Expression } from "./cognitive/rules";
 import { AttractView, type LiveNumbers } from "./attract";
 import { AvatarView } from "./avatar";
+import { CalibrationPanel } from "./calibrationpanel";
 import { byId } from "./dom";
 import { FaceCueTracker } from "./facepipeline";
 import { formatNumber } from "./labels";
@@ -93,6 +94,23 @@ new UiModeController({
   button: byId<HTMLButtonElement>("debug-toggle"),
   params,
 });
+/**
+ * Debug "Calibrazione" (button or `c`): YOLOX zoom/centre and the camera image,
+ * applied live on the board and stored there; the dashed outline on the video
+ * shows the crop while the card is open.
+ */
+const calibration = new CalibrationPanel({
+  root: byId("calibration"),
+  rect: byId("analysis-rect"),
+  frame: videoImage.parentElement ?? videoImage,
+  send: (values) => client.setCalibration(values),
+  reset: () => client.resetCalibration(),
+  isDebug: () => document.documentElement.dataset.ui === "debug",
+});
+if (params.get("calibration") === "1") {
+  // `?debug=1&calibration=1`: open the card at load (screenshots, calibration day).
+  calibration.setOpen(true);
+}
 // `?voice=1` marks this tab as the speaking one; the click gate still applies.
 const voice = new VoiceEngine({
   enabled: params.get("voice") === "1",
@@ -450,6 +468,7 @@ async function boot(): Promise<void> {
         const now = Date.now();
         if (message.type === "status") {
           metrics.status(message.data);
+          calibration.setStatus(message.data.calibration);
           mind.onStatus(message.data, now);
           if (message.data.state === "switching") {
             if (switching === null) {
@@ -462,6 +481,7 @@ async function boot(): Promise<void> {
         }
         if (message.type === "showcase.state") {
           metrics.showcase(message.data);
+          calibration.setFrameSize(message.data.width, message.data.height);
           frameWidth = message.data.width;
           frameHeight = message.data.height;
           if (message.data.objects.length > 0) {
@@ -506,6 +526,7 @@ async function boot(): Promise<void> {
       },
       onConnection: (info) => {
         connection = info;
+        calibration.setConnected(info.phase === "open");
         if (info.phase === "open" && !modelSynced) {
           // A deep link to the skeleton view still has to tell the board (and
           // the mock) which model to run; `seq` restarts at 1 per connection.

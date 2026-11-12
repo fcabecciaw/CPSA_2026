@@ -85,3 +85,47 @@ describe("status.state", () => {
     expect(parseServerMessage(status("rebooting")).kind).toBe("invalid");
   });
 });
+
+describe("status.calibration (debug panel)", () => {
+  function status(calibration: unknown): string {
+    return JSON.stringify({
+      v: 1,
+      type: "status",
+      seq: 3,
+      t: 1.0,
+      wall: "2026-11-12T10:00:00Z",
+      data: {
+        state: "running",
+        camera: "ok",
+        model: "yolox_nano",
+        fps: 59.4,
+        dpu_ms: 4.7,
+        errors: [],
+        uptime_s: 12.5,
+        ...(calibration === undefined ? {} : { calibration }),
+      },
+    });
+  }
+
+  function calibrationOf(raw: string): unknown {
+    const result = parseServerMessage(raw);
+    expect(result.kind).toBe("message");
+    return result.kind === "message" && result.message.type === "status"
+      ? result.message.data.calibration
+      : "not a status";
+  }
+
+  it("parses the five values", () => {
+    const values = { zoom: 1.5, zoom_center: [0.5, 0.45], gain: 320, exposure: 200, saturation: 110 };
+    expect(calibrationOf(status(values))).toEqual(values);
+  });
+
+  it("is null when absent, null or malformed, and the status still parses", () => {
+    expect(calibrationOf(status(undefined))).toBeNull();
+    expect(calibrationOf(status(null))).toBeNull();
+    expect(calibrationOf(status({ zoom: "big" }))).toBeNull();
+    expect(
+      calibrationOf(status({ zoom: 1, zoom_center: [0.5], gain: 1, exposure: 1, saturation: 1 })),
+    ).toBeNull();
+  });
+});

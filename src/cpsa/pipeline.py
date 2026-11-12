@@ -57,6 +57,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from cpsa import protocol
+from cpsa.calibration import Calibration, CalibrationStore, LatestWorker, parse_update
 from cpsa.camera import CameraError, CameraNotFound, UvcCamera, VideoFrame
 from cpsa.channel import CommandChannel, FrameChannel, MessageChannel
 from cpsa.config import CameraConfig, ModelConfig, MovenetConfig, ShowcaseConfig
@@ -103,6 +104,9 @@ _RATE_WINDOW = 30
 """Frames the rolling ``fps`` is measured over."""
 
 _SLOT_TIMEOUT_S = 0.1
+
+_CALIBRATION_FLUSH_S = 1.0
+"""How long :meth:`Pipeline.stop` waits for the last calibration to be written."""
 
 _CAP_SLACK_S = 0.002
 """A frame up to this early on the frame cadence is still processed."""
@@ -233,9 +237,12 @@ class Pipeline:
             defaults to :class:`~cpsa.movenet.DpuMovenet`.
         camera_factory: Builds the camera from the camera config; defaults to
             :class:`~cpsa.camera.UvcCamera`.
-        commands: The control channel the server writes ``model.set`` into; the
-            loop drains it every frame. ``None`` means the model never switches.
+        commands: The control channel the server writes ``model.set`` and the
+            ``calibration.*`` commands into; the loop drains it every frame.
+            ``None`` means the model never switches and nothing is calibrated.
         labels: Label table; defaults to the configured language.
+        calibration_store: The file the live calibration is kept in; its values
+            override ``config`` from the start. ``None`` keeps it in memory only.
 
     The pipeline does not create or release the channel: the process owns it.
     """
@@ -251,7 +258,19 @@ class Pipeline:
         camera_factory: Callable[[CameraConfig], Camera] | None = None,
         commands: CommandChannel | None = None,
         labels: Sequence[str] | None = None,
+        calibration_store: CalibrationStore | None = None,
     ) -> None:
+        self._base_calibration = Calibration.from_config(config)
+        """The ``config/showcase.yaml`` values ``calibration.reset`` restores."""
+        overrides = calibration_store.load() if calibration_store is not None else {}
+        if overrides and calibration_store is not None:
+            logger.info("calibration overrides from %s: %s", calibration_store.path, overrides)
+        self._calibration = self._base_calibration.updated(overrides)
+        self._calibration_store = calibration_store
+        self._calibration_worker: LatestWorker[tuple[Calibration, bool]] = LatestWorker(
+            self._apply_calibration_io, name="cpsa-calibration"
+        )
+        config = self._calibration.applied_to(config)
         self._config = config
         self._channel = channel
         self._messages = messages
@@ -294,7 +313,7 @@ class Pipeline:
         self._switching = False
         self._swap_ms: float | None = None
         self._last_status = 0.0
-        self._status_key: tuple[str, str, str, bool, tuple[str, ...]] | None = None
+        self._status_key: tuple[Any, ...] | None = None
         self._started_at = 0.0
         self._next_camera_attempt = 0.0
         self._camera_retry_s = CAMERA_RETRY_S
@@ -381,6 +400,8 @@ class Pipeline:
 
     def stop(self) -> None:
         """Stop the loop, then release the camera and the DPU runner."""
+        # The last calibration is written before the process exits.
+        self._calibration_worker.wait_idle(_CALIBRATION_FLUSH_S)
         with self._lock:
             self._running = False
             self._stop.set()
@@ -416,6 +437,7 @@ class Pipeline:
             active_model = self._active_model
             switching = self._switching
             swap_ms = self._swap_ms
+            calibration = self._calibration
         if not running:
             camera = "missing"
         elif camera_error is not None:
@@ -435,6 +457,7 @@ class Pipeline:
             active_model=active_model,
             switching=switching,
             swap_ms=swap_ms,
+            calibration=calibration.to_json(),
         )
 
     def publish(self, state: str, errors: Sequence[str], camera: str) -> None:
@@ -444,7 +467,14 @@ class Pipeline:
         running pipeline publishes from :meth:`run`.
         """
 
-        self._status_key = (state, camera, self._active_model, self._switching, tuple(errors))
+        self._status_key = (
+            state,
+            camera,
+            self._active_model,
+            self._switching,
+            tuple(errors),
+            self._calibration,
+        )
         self._last_status = time.monotonic()
         self._messages.put(
             "status",
@@ -459,6 +489,7 @@ class Pipeline:
                 active_model=self._active_model,
                 switching=self._switching,
                 swap_ms=self._swap_ms,
+                calibration=self._calibration.to_json(),
             ),
         )
 
@@ -814,17 +845,98 @@ class Pipeline:
     # -- commands ----------------------------------------------------------
 
     def _drain_commands(self) -> None:
-        """Apply the ``model.set`` commands the server queued (R2-G)."""
+        """Apply the ``model.set`` and ``calibration.*`` commands the server queued."""
         channel = self._commands
         if channel is None:
             return
         for topic, data in channel.drain():
+            if topic == "calibration.set":
+                self.set_calibration(data)
+                continue
+            if topic == "calibration.reset":
+                self.reset_calibration()
+                continue
             if topic != "model.set":
                 logger.warning("ignoring unknown pipeline command %r", topic)
                 continue
             model = data.get("model")
             if not isinstance(model, str) or not self.set_model(model):
                 logger.warning("ignoring model.set with model %r", model)
+
+    # -- live calibration --------------------------------------------------
+
+    @property
+    def calibration(self) -> Calibration:
+        """The calibration applied now (``status.calibration``)."""
+        with self._lock:
+            return self._calibration
+
+    def set_calibration(self, update: Mapping[str, Any]) -> bool:
+        """Apply a ``calibration.set`` subset from the next frame on, and keep it.
+
+        The YOLOX crop changes in place on the loaded runner (two numbers, no
+        reload); the camera controls and the file are written by the
+        calibration worker, so the frame loop never waits for a V4L2 control
+        transfer or an fsync.
+
+        Returns:
+            ``False`` (and nothing changes) when ``update`` is not valid.
+        """
+
+        try:
+            values = parse_update(update)
+        except ValueError as exc:
+            logger.warning("ignoring calibration.set %r: %s", dict(update), exc)
+            return False
+        with self._lock:
+            target = self._calibration.updated(values)
+        self._commit_calibration(target, persist=True)
+        return True
+
+    def reset_calibration(self) -> None:
+        """Restore the ``config/showcase.yaml`` values and forget the stored ones."""
+        self._commit_calibration(self._base_calibration, persist=False)
+
+    def _commit_calibration(self, target: Calibration, *, persist: bool) -> None:
+        with self._lock:
+            previous = self._calibration
+            self._calibration = target
+            self._config = target.applied_to(self._config)
+            runner = self._runner
+            active = self._active_model
+        if (target.zoom, target.zoom_center) != (previous.zoom, previous.zoom_center):
+            set_zoom = getattr(runner, "set_zoom", None)
+            if active == "yolox" and callable(set_zoom):
+                set_zoom(target.zoom, target.zoom_center)
+            with self._lock:
+                # A still scene would keep the boxes of the old crop for up to
+                # ``force_every_s``: the next frame is a full detection.
+                self._reset_still()
+        logger.info("calibration %s (%s)", target.to_json(), "saved" if persist else "reset")
+        self._calibration_worker.submit((target, persist))
+        self._publish_status(force=True)
+
+    def _apply_calibration_io(self, job: tuple[Calibration, bool]) -> None:
+        """The worker's half: camera controls, then the file (save or remove)."""
+        target, persist = job
+        with self._lock:
+            camera = self._camera
+        set_controls = getattr(camera, "set_controls", None)
+        if callable(set_controls):
+            try:
+                set_controls(**target.camera_controls())
+            except Exception:
+                logger.exception("the camera rejected the calibration %s", target.camera_controls())
+        store = self._calibration_store
+        if store is None:
+            return
+        try:
+            if persist:
+                store.save(target)
+            else:
+                store.remove()
+        except OSError:
+            logger.exception("cannot update the calibration file %s", store.path)
 
     # -- model swap --------------------------------------------------------
 
@@ -984,12 +1096,15 @@ class Pipeline:
     def _publish_status(self, *, force: bool = False) -> None:
         """Publish ``status`` at 1 Hz and whenever the situation changes."""
         payload = self.status()
-        key: tuple[str, str, str, bool, tuple[str, ...]] = (
+        with self._lock:
+            calibration = self._calibration
+        key: tuple[Any, ...] = (
             str(payload["state"]),
             str(payload["camera"]),
             str(payload["active_model"]),
             bool(payload["switching"]),
             tuple(str(code) for code in payload["errors"]),
+            calibration,
         )
         now = time.monotonic()
         with self._lock:

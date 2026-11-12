@@ -403,3 +403,40 @@ def test_yuyv_to_rgb_can_mirror_the_frame_left_to_right() -> None:
 def test_yuyv_to_rgb_rejects_a_truncated_buffer() -> None:
     with pytest.raises(ValueError):
         yuyv_to_rgb(b"\x80\x80", 8, 4)
+
+
+def test_live_controls_reach_the_open_stream_and_survive_a_restart() -> None:
+    stream = FakeStream([])
+    camera, _ = make_camera(stream)
+    camera.start(lambda frame: None)
+    try:
+        stream.controls.clear()
+        camera.set_controls(gain=640, exposure=200, saturation=110)
+
+        # Saturation did not change, so only two control transfers are made.
+        assert stream.controls == {"gain": 640, "exposure_time_absolute": 200}
+        assert (camera.config.gain, camera.config.exposure, camera.config.saturation) == (
+            640,
+            200,
+            110,
+        )
+    finally:
+        camera.stop()
+
+    stream.controls.clear()
+    camera.start(lambda frame: None)
+    try:
+        assert stream.controls["gain"] == 640
+        assert stream.controls["exposure_time_absolute"] == 200
+    finally:
+        camera.stop()
+
+
+def test_live_controls_on_a_stopped_camera_only_update_its_settings() -> None:
+    stream = FakeStream([])
+    camera, _ = make_camera(stream)
+
+    camera.set_controls(saturation=90)
+
+    assert stream.controls == {}
+    assert camera.config.saturation == 90

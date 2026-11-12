@@ -11,7 +11,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 
 SCHEMA_DIR = Path(__file__).resolve().parents[2] / "docs" / "protocol" / "v1"
-CLIENT_TYPES = frozenset({"ping", "model.set"})
+CLIENT_TYPES = frozenset({"ping", "model.set", "calibration.set", "calibration.reset"})
 
 
 @cache

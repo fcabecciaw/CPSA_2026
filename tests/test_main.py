@@ -460,3 +460,21 @@ def test_the_shared_memory_of_a_run_is_unlinked(tmp_path: Path) -> None:
     assert result["code"] == entry.EXIT_OK
     leaked = list(Path("/dev/shm").glob("cpsa-*"))
     assert leaked == []
+
+
+def test_main_hands_the_calibration_file_to_the_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_run(config: Any, **kwargs: Any) -> int:
+        seen.update(kwargs)
+        return entry.EXIT_OK
+
+    monkeypatch.setattr(entry, "run", fake_run)
+    shipped = Path(__file__).resolve().parents[1] / "config" / "showcase.yaml"
+
+    code = entry.main(["--config", str(shipped), "--calibration", str(tmp_path / "cal.json")])
+
+    assert code == entry.EXIT_OK
+    assert seen["calibration_store"].path == tmp_path / "cal.json"

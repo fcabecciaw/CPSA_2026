@@ -41,6 +41,24 @@ export interface StatusPayload {
   dpu_ms: number | null;
   errors: string[];
   uptime_s: number;
+  /**
+   * The live calibration of the debug panel, as the board applies it now;
+   * `null` (or absent, on a board that predates the panel) when unknown.
+   */
+  calibration?: CalibrationValues | null;
+}
+
+/**
+ * The five values of the "Calibrazione" panel: the YOLOX centre crop
+ * (`zoom` 1.0–2.0, `zoom_center` [x, y] in 0–1 of the mirrored frame) and the
+ * camera's gain, exposure (100 = 1/100 s, 200 = 1/50 s) and saturation.
+ */
+export interface CalibrationValues {
+  zoom: number;
+  zoom_center: [number, number];
+  gain: number;
+  exposure: number;
+  saturation: number;
 }
 
 export interface ErrorPayload {
@@ -139,10 +157,15 @@ export interface ModelSetPayload {
   model: ModelName;
 }
 
-/** F-K1 `ping` keeps the transport alive; F-E1 `model.set` picks the model. */
+/**
+ * F-K1 `ping` keeps the transport alive; F-E1 `model.set` picks the model;
+ * the debug panel's `calibration.set` / `calibration.reset` tune the board live.
+ */
 export type ClientCommand =
   | ClientEnvelope<"ping", { id: number }>
-  | ClientEnvelope<"model.set", ModelSetPayload>;
+  | ClientEnvelope<"model.set", ModelSetPayload>
+  | ClientEnvelope<"calibration.set", Partial<CalibrationValues>>
+  | ClientEnvelope<"calibration.reset", Record<string, never>>;
 
 export type ClientMessage = ClientCommand;
 
@@ -263,7 +286,37 @@ function parseStatus(data: JsonObject): StatusPayload {
     dpu_ms: nullableNumberField(data, "dpu_ms"),
     errors: reqArray(data, "errors", (value) => stringValue(value, "errors[]")),
     uptime_s: reqNumber(data, "uptime_s"),
+    calibration: parseCalibration(data.calibration),
   };
+}
+
+/**
+ * `status.calibration` only feeds the debug panel: a missing or malformed
+ * object is `null`, never a reason to drop the whole `status` (IF-103).
+ */
+function parseCalibration(value: unknown): CalibrationValues | null {
+  if (value == null) {
+    return null;
+  }
+  try {
+    const data = asObject(value, "calibration");
+    const centre = data.zoom_center;
+    if (!Array.isArray(centre) || centre.length !== 2) {
+      return null;
+    }
+    return {
+      zoom: reqNumber(data, "zoom"),
+      zoom_center: [numberValue(centre[0], "zoom_center[0]"), numberValue(centre[1], "zoom_center[1]")],
+      gain: reqNumber(data, "gain"),
+      exposure: reqNumber(data, "exposure"),
+      saturation: reqNumber(data, "saturation"),
+    };
+  } catch (error) {
+    if (error instanceof PayloadError) {
+      return null;
+    }
+    throw error;
+  }
 }
 
 function parseError(data: JsonObject): ErrorPayload {

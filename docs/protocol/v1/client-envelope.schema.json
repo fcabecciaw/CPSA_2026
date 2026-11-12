@@ -9,7 +9,7 @@
     },
     "type": {
       "type": "string",
-      "description": "A client command: 'ping' or 'model.set'."
+      "description": "A client command: 'ping', 'model.set', 'calibration.set' or 'calibration.reset'."
     },
     "data": {
       "type": "object"

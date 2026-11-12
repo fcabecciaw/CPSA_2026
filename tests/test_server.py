@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 from aiohttp import ClientSession
 
 from cpsa import protocol
@@ -662,3 +663,86 @@ def test_the_envelope_of_every_sent_message_is_json_safe(tmp_path: Path) -> None
         version = run(scenario)
 
     assert version == 1
+
+
+# --------------------------------------------------------------------------- #
+# Live calibration (debug panel)
+# --------------------------------------------------------------------------- #
+
+
+async def _send_and_collect(
+    running: Running, command: dict[str, Any], *, expect_error: bool
+) -> tuple[dict[str, Any] | None, list[tuple[str, dict[str, Any]]]]:
+    async with ClientSession() as session:
+        ws = await session.ws_connect(running.url("/ws"))
+        try:
+            await receive(ws, "hello")
+            await ws.send_json(command)
+            error = dict((await receive(ws, "error"))["data"]) if expect_error else None
+            forwarded: list[tuple[str, dict[str, Any]]] = []
+            for _ in range(200 if not expect_error else 5):
+                item = running.commands.get_nowait()
+                if item is not None:
+                    forwarded.append(item)
+                    break
+                await asyncio.sleep(0.01)
+            return error, forwarded
+        finally:
+            await ws.close()
+
+
+def test_calibration_set_is_validated_and_routed_to_the_pipeline(tmp_path: Path) -> None:
+    command = {
+        "v": 1,
+        "type": "calibration.set",
+        "seq": 3,
+        "data": {"zoom": 1.5, "zoom_center": [0.5, 0.45], "gain": 320, "exposure": 200},
+    }
+    with Running(tmp_path) as running:
+        error, forwarded = run(lambda: _send_and_collect(running, command, expect_error=False))
+
+    assert error is None
+    assert forwarded == [
+        (
+            "calibration.set",
+            {"zoom": 1.5, "zoom_center": [0.5, 0.45], "gain": 320, "exposure": 200},
+        )
+    ]
+
+
+def test_calibration_reset_is_routed_to_the_pipeline(tmp_path: Path) -> None:
+    command = {"v": 1, "type": "calibration.reset", "seq": 4, "data": {}}
+    with Running(tmp_path) as running:
+        error, forwarded = run(lambda: _send_and_collect(running, command, expect_error=False))
+
+    assert error is None
+    assert forwarded == [("calibration.reset", {})]
+
+
+@pytest.mark.parametrize(
+    ("data", "reason"),
+    [
+        ({}, "at least one"),
+        ({"zoom": 2.5}, "zoom"),
+        ({"zoom": "1.5"}, "zoom"),
+        ({"zoom_center": [0.5]}, "zoom_center"),
+        ({"zoom_center": [0.5, 1.2]}, "zoom_center"),
+        ({"gain": 10}, "gain"),
+        ({"gain": 100.5}, "gain"),
+        ({"exposure": 150}, "exposure"),
+        ({"saturation": 256}, "saturation"),
+        ({"brightness": 10}, "brightness"),
+    ],
+)
+def test_a_bad_calibration_is_a_bad_command_and_is_not_forwarded(
+    tmp_path: Path, data: dict[str, Any], reason: str
+) -> None:
+    command = {"v": 1, "type": "calibration.set", "seq": 7, "data": data}
+    with Running(tmp_path) as running:
+        error, forwarded = run(lambda: _send_and_collect(running, command, expect_error=True))
+
+    assert error is not None
+    assert error["code"] == "bad_command"
+    assert error["ref_seq"] == 7
+    assert reason in error["message"]
+    assert forwarded == []

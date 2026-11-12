@@ -142,3 +142,37 @@ def test_unknown_status_state_is_rejected() -> None:
     data["state"] = "idle"
     with pytest.raises(ValidationError):
         validate_server_message(_server("status", data))
+
+
+def test_a_calibrated_status_validates_and_needs_the_calibration_key() -> None:
+    data = protocol.status(
+        state="running",
+        camera="ok",
+        model="m",
+        fps=None,
+        dpu_ms=None,
+        errors=[],
+        uptime_s=1.0,
+        calibration={
+            "zoom": 1.5,
+            "zoom_center": [0.5, 0.45],
+            "gain": 320,
+            "exposure": 200,
+            "saturation": 110,
+        },
+    )
+    validate_server_message(_server("status", data))
+    validate_server_message(_server("status", {**data, "calibration": None}))
+
+    del data["calibration"]
+    with pytest.raises(ValidationError):
+        validate_server_message(_server("status", data))
+
+
+@pytest.mark.parametrize(
+    "data",
+    [{}, {"zoom": 2.5}, {"exposure": 150}, {"gain": 10}, {"zoom_center": [0.5]}, {"hue": 3}],
+)
+def test_a_bad_calibration_set_is_rejected_by_its_schema(data: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        validate_client_message({"v": 1, "type": "calibration.set", "data": data})

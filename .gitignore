@@ -9,3 +9,6 @@ __pycache__/
 # The Vitis AI and Docker artifacts of tools/vitis; never committed.
 build/
 /data/
+# The live calibration the dashboard's debug panel stores on the board.
+/config/calibration.json
+/config/.calibration.json.*

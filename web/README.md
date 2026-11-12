@@ -110,6 +110,20 @@ and the last face cue. The choice is stored in `localStorage` (`cpsa.dashboard.u
 Errors and transport warnings appear as a toast under the camera in both
 modes; the mock badge only in debug mode.
 
+### Calibrazione (debug mode)
+
+The round button with a viewfinder icon in the top bar (or `c`)
+opens **Calibrazione**, a compact card for the calibration day: the YOLOX crop
+(zoom 1.0–2.0, centre X/Y), the camera gain (logarithmic slider, 64–2540),
+the exposure (1/100 s or 1/50 s, both flicker-safe at 50 Hz), the saturation
+and "Ripristina". Every change is shown at once and sent as one
+`calibration.set` about 150 ms after the last movement; the board applies it on
+the next frame and stores it in `~/cpsa/config/calibration.json`, so it
+survives a restart, and "Ripristina" (`calibration.reset`) goes back to
+`config/showcase.yaml`. While the card is open the video shows the region
+YOLOX analyses as a thin dashed outline. Values come from `status.calibration`;
+`?debug=1&calibration=1` opens the card at load. Presentation mode hides it.
+
 The voice is fixed to XTTS-v2 Ana Florence (`FIXED_VOICE`) unless the debug
 picker stored another one; “Attiva la voce” under the sphere is the click gate
 the browser needs before any audio.
@@ -156,3 +170,5 @@ with `bench=1` for a real frame-rate reading).
 - `src/mock.ts` — the dev-only stand-in;
 - `src/voice.ts` — Italian voice, local TTS client and per-tab selection;
 - `src/voicepicker.ts` — the top-bar voice picker (`v` compares the voices).
+- `src/calibration.ts` — calibration ranges, debounce and crop geometry;
+- `src/calibrationpanel.ts` — the debug "Calibrazione" card and the crop outline.

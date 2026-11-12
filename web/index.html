@@ -65,6 +65,8 @@
             >voce: in pausa</span
           >
           <div id="voice-picker" class="voice-picker debug-only" hidden></div>
+          <!-- "Calibrazione" (debug only): built by src/calibrationpanel.ts. -->
+          <div id="calibration" class="calibration debug-only"></div>
           <button
             class="icon-button mute"
             id="mute-toggle"
@@ -120,6 +122,9 @@
               <img id="video" class="video" alt="Video della telecamera RGB" hidden />
               <p id="video-note" class="frame-note">In attesa della telecamera…</p>
               <span class="frame-badge debug-only" aria-hidden="true">RGB</span>
+              <div id="analysis-rect" class="analysis-rect debug-only" aria-hidden="true" hidden>
+                <span class="analysis-rect-label">analisi YOLOX</span>
+              </div>
             </div>
             <h2 id="camera-title" class="frame-title">
               <span class="live-dot" aria-hidden="true"></span>In diretta dalla telecamera

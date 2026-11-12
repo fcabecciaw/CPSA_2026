@@ -20,7 +20,7 @@ Options (`deploy/deploy.sh --help`): `--host` (default `10.42.0.83`), `--user`
 
 | Step | Effect |
 |---|---|
-| 1 | `rsync --delete` of the repository to `/home/kria/cpsa`, keeping `.venv/`, `models/`, `wheels/`, `runs/` and `web/dist/`. |
+| 1 | `rsync --delete` of the repository to `/home/kria/cpsa`, keeping `.venv/`, `models/`, `wheels/`, `runs/`, `web/dist/` and the debug panel's `config/calibration.json`. |
 | 2 | `web/dist/` (with `--delete`) and both models as `/home/kria/cpsa/models/<basename>`. |
 | 3 | Optional offline wheels. |
 | 4 | `.venv` with `--system-site-packages` (the VART `xir`/`vart` bindings are system packages) and `uv sync --frozen`; fails if `import xir, vart` does not work. |

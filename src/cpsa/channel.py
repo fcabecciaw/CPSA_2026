@@ -347,5 +347,7 @@ class CommandChannel(MessageChannel):
     same ``(topic, payload)`` of :class:`MessageChannel`, but the producer is the
     server and the consumer the pipeline; a command is idempotent (the newest
     ``model.set`` wins), so a full queue drops the oldest one and the pipeline
-    never waits.
+    never waits. ``calibration.set`` and ``calibration.reset`` travel the same
+    way; the dashboard sends every calibration value in each ``calibration.set``,
+    so a dropped one is superseded by the next.
     """

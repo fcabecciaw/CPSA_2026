@@ -4,12 +4,14 @@
  * Connects to the same origin at `/ws` (IF-101), reconnects with exponential
  * backoff, and sends a `ping` every 10 s (IF-203). It does not hold protocol
  * state: every message is handed to the caller, and the server resends a
- * snapshot on reconnect (FR-504). F-K1: `ping` is the only command it sends.
+ * snapshot on reconnect (FR-504). Besides `ping` it sends the commands the
+ * dashboard asks for: `model.set` and the debug panel's `calibration.*`.
  */
 
 import {
   PROTOCOL_VERSION,
   parseServerMessage,
+  type CalibrationValues,
   type ClientCommand,
   type ModelName,
   type ServerMessage,
@@ -206,6 +208,33 @@ export class DashboardClient {
       data: { model },
     });
     return this.commandSeq;
+  }
+
+  /**
+   * Debug panel: apply calibration values on the board (any subset). Returns
+   * the command `seq`, or `null` while there is no connection.
+   */
+  setCalibration(values: Partial<CalibrationValues>): number | null {
+    const seq = this.nextCommandSeq();
+    if (seq !== null) {
+      this.send({ v: PROTOCOL_VERSION, type: "calibration.set", seq, data: { ...values } });
+    }
+    return seq;
+  }
+
+  /** Debug panel: back to `config/showcase.yaml` and forget the stored values. */
+  resetCalibration(): number | null {
+    const seq = this.nextCommandSeq();
+    if (seq !== null) {
+      this.send({ v: PROTOCOL_VERSION, type: "calibration.reset", seq, data: {} });
+    }
+    return seq;
+  }
+
+  /** The `seq` of the next command, or `null` (still counted) without a socket. */
+  private nextCommandSeq(): number | null {
+    this.commandSeq += 1;
+    return this.socket === null ? null : this.commandSeq;
   }
 
   private send(command: ClientCommand): void {

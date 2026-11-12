@@ -73,6 +73,57 @@
     "uptime_s": {
       "type": "number",
       "minimum": 0
+    },
+    "calibration": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "zoom": {
+          "type": "number",
+          "minimum": 1.0,
+          "maximum": 2.0,
+          "description": "YOLOX centre-crop magnification before the letterbox (1.0 = whole frame)."
+        },
+        "zoom_center": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "minItems": 2,
+          "maxItems": 2,
+          "description": "Crop centre [x, y] as fractions of the (mirrored) frame."
+        },
+        "gain": {
+          "type": "integer",
+          "minimum": 64,
+          "maximum": 2540,
+          "description": "Manual V4L2 gain of the RGB camera."
+        },
+        "exposure": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "exposure_time_absolute in 100 us units; calibration.set accepts 100 (1/100 s) or 200 (1/50 s)."
+        },
+        "saturation": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255,
+          "description": "V4L2 saturation of the RGB camera."
+        }
+      },
+      "required": [
+        "zoom",
+        "zoom_center",
+        "gain",
+        "exposure",
+        "saturation"
+      ],
+      "additionalProperties": true,
+      "description": "Live calibration applied now (debug panel): YOLOX zoom/centre and the camera gain, exposure and saturation; null before the pipeline knows it."
     }
   },
   "required": [
@@ -85,7 +136,8 @@
     "fps",
     "dpu_ms",
     "errors",
-    "uptime_s"
+    "uptime_s",
+    "calibration"
   ],
   "additionalProperties": true
 }

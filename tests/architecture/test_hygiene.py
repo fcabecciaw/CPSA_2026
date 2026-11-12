@@ -57,6 +57,7 @@ def test_the_package_is_the_one_flat_tree() -> None:
     assert modules == [
         "__init__",
         "__main__",
+        "calibration",
         "camera",
         "channel",
         "config",

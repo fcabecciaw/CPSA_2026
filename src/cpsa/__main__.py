@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from cpsa import __version__, protocol
+from cpsa.calibration import DEFAULT_CALIBRATION_PATH, CalibrationStore
 from cpsa.channel import CommandChannel, FrameChannel, MessageChannel
 from cpsa.config import ConfigError, ShowcaseConfig, load
 from cpsa.pipeline import Pipeline, StartError
@@ -67,7 +68,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_START
     _configure_logging(config.log.level)
     logger.info("cpsa-showcase %s: config %s", __version__, args.config)
-    return run(config)
+    return run(config, calibration_store=CalibrationStore(args.calibration))
 
 
 def run(
@@ -81,6 +82,7 @@ def run(
     movenet_factory: Callable[[Any], Any] | None = None,
     camera_factory: Callable[[Any], Any] | None = None,
     start_server: bool = True,
+    calibration_store: CalibrationStore | None = None,
 ) -> int:
     """Run pipeline A and server B until ``stop`` is set.
 
@@ -95,6 +97,9 @@ def run(
         camera_factory: Overrides the UVC camera (tests).
         start_server: ``False`` runs process A alone, with an in-process server
             omitted (tests of the pipeline wiring).
+        calibration_store: The live-calibration file, loaded as overrides on top
+            of ``config`` and rewritten by ``calibration.set``; ``None`` keeps
+            the calibration in memory only.
 
     Returns:
         One of :data:`EXIT_OK`, :data:`EXIT_ERROR`, :data:`EXIT_START`.
@@ -147,6 +152,7 @@ def run(
         movenet_factory=movenet_factory,
         camera_factory=camera_factory,
         commands=commands,
+        calibration_store=calibration_store,
     )
     remove_signals = _install_signals(stop_event)
     try:
@@ -282,6 +288,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         type=Path,
         default=DEFAULT_CONFIG,
         help=f"configuration file (default: {DEFAULT_CONFIG})",
+    )
+    parser.add_argument(
+        "--calibration",
+        type=Path,
+        default=DEFAULT_CALIBRATION_PATH,
+        help=f"live-calibration overrides of the debug panel (default: {DEFAULT_CALIBRATION_PATH})",
     )
     parser.add_argument("--version", action="version", version=f"cpsa-showcase {__version__}")
     return parser.parse_args(argv)

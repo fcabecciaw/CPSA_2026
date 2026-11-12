@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "calibration.reset.schema.json",
+  "title": "calibration.reset data (client to server), back to config/showcase.yaml",
+  "type": "object",
+  "description": "Empty object. Removes the stored calibration and applies the values of config/showcase.yaml again.",
+  "additionalProperties": true
+}

@@ -12,9 +12,10 @@ browser that is not watching costs the pipeline nothing. It encodes at
 
 A client that reconnects gets ``hello`` and then the snapshot of the latest
 ``status``, ``showcase.state`` and ``pose.state``; from then on it receives each
-update as it is drained. ``ping`` answers ``pong``; ``model.set`` is validated
-here and queued on the command channel for process A, which owns the DPU
-runners (R2-G). Anything else is ``error bad_command`` (IF-103, IF-304).
+update as it is drained. ``ping`` answers ``pong``; ``model.set`` and the debug
+panel's ``calibration.set`` / ``calibration.reset`` are validated here and
+queued on the command channel for process A, which owns the DPU runners and the
+camera (R2-G). Anything else is ``error bad_command`` (IF-103, IF-304).
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ from aiohttp import WSMsgType, web
 from numpy.typing import NDArray
 
 from cpsa import protocol
+from cpsa.calibration import parse_update
 from cpsa.channel import CommandChannel, MessageChannel
 from cpsa.config import WebConfig
 
@@ -525,6 +527,12 @@ class WebServer:
         if command == "model.set":
             self._handle_model_set(client, ref_seq, data)
             return
+        if command == "calibration.set":
+            self._handle_calibration_set(client, ref_seq, data)
+            return
+        if command == "calibration.reset":
+            self._forward(client, ref_seq, "calibration.reset", {})
+            return
         self._bad_command(client, ref_seq, f"unknown command {command!r}")
 
     def _handle_model_set(
@@ -551,6 +559,38 @@ class WebServer:
             return
         self._commands.put("model.set", {"model": model})
         logger.info("client asked to load %s (seq=%s peer=%s)", model, ref_seq, client.peer)
+
+    def _handle_calibration_set(
+        self,
+        client: _Client,
+        ref_seq: int | None,
+        data: Mapping[str, Any],
+    ) -> None:
+        """Validate ``calibration.set`` and hand the normalized values to process A.
+
+        A value out of range, an unknown key or an empty payload is
+        ``bad_command`` here, so the pipeline only ever drains values it can
+        apply as they are.
+        """
+        try:
+            values = parse_update(data)
+        except ValueError as exc:
+            self._bad_command(client, ref_seq, str(exc))
+            return
+        payload = {
+            key: list(value) if isinstance(value, tuple) else value for key, value in values.items()
+        }
+        self._forward(client, ref_seq, "calibration.set", payload)
+
+    def _forward(
+        self, client: _Client, ref_seq: int | None, command: str, data: dict[str, Any]
+    ) -> None:
+        """Queue a validated command for process A, or refuse it without a channel."""
+        if self._commands is None:
+            self._bad_command(client, ref_seq, f"{command} is not available")
+            return
+        self._commands.put(command, data)
+        logger.info("client %s %s (seq=%s peer=%s)", command, data, ref_seq, client.peer)
 
     def _bad_command(self, client: _Client, ref_seq: int | None, message: str) -> None:
         self._queue(client, "error", protocol.error("bad_command", message, ref_seq))

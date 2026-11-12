@@ -24,7 +24,7 @@ import select
 import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -451,6 +451,51 @@ class UvcCamera:
             stream.set_control("white_balance_temperature", int(config.white_balance))
         stream.set_control("backlight_compensation", config.backlight_compensation)
         stream.set_control("saturation", config.saturation)
+
+    def set_controls(
+        self,
+        *,
+        gain: int | None = None,
+        exposure: int | None = None,
+        saturation: int | None = None,
+    ) -> None:
+        """Change gain, exposure or saturation of the running stream (live calibration).
+
+        The values replace those of :attr:`config`, so a re-open after a
+        re-plug keeps them; on an open stream only the controls whose value
+        changed are written, through the same V4L2 ``set_control`` the start
+        uses. The capture thread is not involved: the caller runs this off the
+        frame loop (the pipeline's calibration worker), as a UVC control
+        transfer can take a few milliseconds.
+
+        Raises:
+            CameraError: If the stream rejects a control.
+        """
+
+        changes: dict[str, int] = {}
+        if gain is not None:
+            changes["gain"] = int(gain)
+        if exposure is not None:
+            changes["exposure"] = int(exposure)
+        if saturation is not None:
+            changes["saturation"] = int(saturation)
+        with self._lifecycle:
+            previous = self._config
+            self._config = replace(
+                previous,
+                gain=changes.get("gain", previous.gain),
+                exposure=changes.get("exposure", previous.exposure),
+                saturation=changes.get("saturation", previous.saturation),
+            )
+            stream = self._stream if self._running else None
+            if stream is None:
+                return
+            if "exposure" in changes and changes["exposure"] != previous.exposure:
+                stream.set_control("exposure_time_absolute", changes["exposure"])
+            if "gain" in changes and changes["gain"] != previous.gain:
+                stream.set_control("gain", changes["gain"])
+            if "saturation" in changes and changes["saturation"] != previous.saturation:
+                stream.set_control("saturation", changes["saturation"])
 
     def stop(self) -> None:
         """Stop delivery, join the thread and close the device."""

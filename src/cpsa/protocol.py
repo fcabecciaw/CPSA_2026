@@ -7,9 +7,9 @@ the wall-clock ``wall``, so nothing here reads a clock or a socket.
 
 The frozen set of server messages is ``hello``, ``status``,
 ``showcase.state``, ``pose.state``, ``error`` and ``pong``; the client commands
-are ``ping`` and ``model.set``. A missing or not-applicable value is ``null``,
-never an absent key, so the dashboard never has to guess whether a field is
-``0`` or unknown.
+are ``ping``, ``model.set``, ``calibration.set`` and ``calibration.reset``. A
+missing or not-applicable value is ``null``, never an absent key, so the
+dashboard never has to guess whether a field is ``0`` or unknown.
 """
 
 from __future__ import annotations
@@ -125,6 +125,7 @@ def status(
     active_model: str = ACTIVE_MODELS[0],
     switching: bool = False,
     swap_ms: float | None = None,
+    calibration: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The process snapshot, published at 1 Hz and on change (F-K1).
 
@@ -135,7 +136,9 @@ def status(
     ``camera_error`` or ``internal``. ``active_model`` is the model that is
     loaded on the DPU (R2-G); ``switching`` is true while ``model.set`` releases
     the old runner and loads the new one, and ``swap_ms`` is how long the last
-    swap took.
+    swap took. ``calibration`` holds the live values of the debug panel
+    (``zoom``, ``zoom_center``, ``gain``, ``exposure``, ``saturation``), or
+    ``None`` before the pipeline knows them.
     """
     return {
         "state": str(state),
@@ -148,6 +151,7 @@ def status(
         "dpu_ms": _number(dpu_ms),
         "errors": [str(code) for code in errors],
         "uptime_s": max(0.0, _finite(uptime_s, 0.0)),
+        "calibration": None if calibration is None else dict(calibration),
     }
 
 

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "calibration.set.schema.json",
+  "title": "calibration.set data (client to server), live YOLOX zoom and camera image (debug panel)",
+  "type": "object",
+  "properties": {
+    "zoom": {
+      "type": "number",
+      "minimum": 1.0,
+      "maximum": 2.0,
+      "description": "YOLOX centre-crop magnification before the letterbox (1.0 = whole frame)."
+    },
+    "zoom_center": {
+      "type": "array",
+      "items": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      },
+      "minItems": 2,
+      "maxItems": 2,
+      "description": "Crop centre [x, y] as fractions of the (mirrored) frame."
+    },
+    "gain": {
+      "type": "integer",
+      "minimum": 64,
+      "maximum": 2540,
+      "description": "Manual V4L2 gain of the RGB camera."
+    },
+    "exposure": {
+      "enum": [
+        100,
+        200
+      ],
+      "description": "exposure_time_absolute: 100 = 1/100 s, 200 = 1/50 s (both flicker-safe at 50 Hz)."
+    },
+    "saturation": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255,
+      "description": "V4L2 saturation of the RGB camera."
+    }
+  },
+  "minProperties": 1,
+  "additionalProperties": false,
+  "description": "Any non-empty subset of the five values. Process A applies the zoom to the next frame and the camera controls to the open stream, and stores the accepted values in ~/cpsa/config/calibration.json as overrides of config/showcase.yaml. A value out of range or an unknown key is error bad_command and nothing changes."
+}

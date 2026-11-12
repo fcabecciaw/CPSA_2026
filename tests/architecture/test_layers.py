@@ -26,6 +26,7 @@ RULES: dict[str, tuple[frozenset[str], frozenset[str] | None]] = {
     "protocol": (frozenset(), frozenset()),
     "channel": (frozenset(), frozenset({"numpy"})),
     "dpu": (frozenset(), frozenset({"numpy", "vart", "xir"})),
+    "calibration": (frozenset({"config"}), frozenset()),
     "camera": (frozenset({"config"}), frozenset({"cv2", "linuxpy", "numpy"})),
     "yolox": (frozenset({"dpu"}), frozenset({"cv2", "numpy"})),
     "motion": (frozenset(), frozenset({"cv2", "numpy"})),
@@ -38,6 +39,7 @@ RULES: dict[str, tuple[frozenset[str], frozenset[str] | None]] = {
         frozenset(
             {
                 "protocol",
+                "calibration",
                 "camera",
                 "channel",
                 "config",
@@ -52,11 +54,11 @@ RULES: dict[str, tuple[frozenset[str], frozenset[str] | None]] = {
         frozenset({"numpy"}),
     ),
     "server": (
-        frozenset({"protocol", "channel", "config"}),
+        frozenset({"protocol", "calibration", "channel", "config"}),
         frozenset({"aiohttp", "cv2", "numpy"}),
     ),
     "__main__": (
-        frozenset({"__init__", "channel", "config", "pipeline", "server"}),
+        frozenset({"__init__", "calibration", "channel", "config", "pipeline", "server"}),
         frozenset(),
     ),
 }

@@ -21,6 +21,7 @@
 import type { SocketLike } from "./client";
 import type { FaceCue } from "./cognitive/facecues";
 import {
+  type CalibrationValues,
   type ModelName,
   type PoseStatePayload,
   type ServerMessage,
@@ -222,6 +223,15 @@ export function createMockSocket(_url: string): SocketLike {
 
   let closed = false;
   const startedAt = STARTED_AT;
+  /** The debug panel's calibration, as `config/showcase.yaml` ships it. */
+  const yamlCalibration: CalibrationValues = {
+    zoom: 1.3,
+    zoom_center: [0.5, 0.5],
+    gain: 200,
+    exposure: 100,
+    saturation: 110,
+  };
+  let calibration: CalibrationValues = { ...yamlCalibration };
 
   const socket: SocketLike = {
     onopen: null,
@@ -284,6 +294,7 @@ export function createMockSocket(_url: string): SocketLike {
       dpu_ms: round((movenet ? 7.4 : 4.1) + drift * 0.2, 1),
       errors: [],
       uptime_s: round(125.4 + (Date.now() - startedAt) / 1000, 1),
+      calibration: { ...calibration, zoom_center: [...calibration.zoom_center] },
     };
   }
 
@@ -320,7 +331,7 @@ export function createMockSocket(_url: string): SocketLike {
     const envelope = command as {
       type?: unknown;
       seq?: unknown;
-      data?: { id?: unknown; model?: unknown };
+      data?: { id?: unknown; model?: unknown } & Partial<CalibrationValues>;
     };
     const refSeq = typeof envelope.seq === "number" ? envelope.seq : null;
 
@@ -354,7 +365,18 @@ export function createMockSocket(_url: string): SocketLike {
       });
       return;
     }
-    // F-K1: `ping` is the only command the protocol accepts.
+    if (envelope.type === "calibration.set") {
+      // Trusts the dashboard's ranges: the board validates for real.
+      calibration = { ...calibration, ...(envelope.data ?? {}) } as CalibrationValues;
+      emit(message("status", status()));
+      return;
+    }
+    if (envelope.type === "calibration.reset") {
+      calibration = { ...yamlCalibration };
+      emit(message("status", status()));
+      return;
+    }
+    // Anything else is answered as the board does.
     emit(
       message("error", {
         code: "bad_command",

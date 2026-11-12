@@ -214,7 +214,8 @@ fi
 note "step 1: syncing the repository to ${ssh_target}:${REMOTE_HOME}/${REMOTE_DIR}"
 # `--delete` keeps the board free of the files this hard break removed, while
 # the excludes protect what the board owns: its venv, its runs, its wheels, its
-# models and the dashboard bundle copied in step 2.
+# models, the dashboard bundle copied in step 2 and the live calibration the
+# debug panel stored (config/calibration.json, overrides of showcase.yaml).
 rsync_excludes=(
   --exclude '.git/'
   --exclude '.venv/'
@@ -225,6 +226,8 @@ rsync_excludes=(
   --exclude 'wheels/'
   --exclude 'models/'
   --exclude 'web/dist/'
+  --exclude '/config/calibration.json'
+  --exclude '/config/.calibration.json.*'
   --exclude '__pycache__/'
   --exclude '*.pyc'
   --exclude '.pytest_cache/'

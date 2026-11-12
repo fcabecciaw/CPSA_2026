@@ -14,6 +14,16 @@
     "fps": 59.4,
     "dpu_ms": 4.7,
     "errors": [],
-    "uptime_s": 12.5
+    "uptime_s": 12.5,
+    "calibration": {
+      "zoom": 1.5,
+      "zoom_center": [
+        0.5,
+        0.5
+      ],
+      "gain": 200,
+      "exposure": 100,
+      "saturation": 110
+    }
   }
 }

@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from cpsa.calibration import Calibration, CalibrationStore
 from cpsa.camera import CameraNotFound, VideoFrame
 from cpsa.channel import CommandChannel, FrameChannel
 from cpsa.config import (
@@ -58,7 +59,11 @@ class FakeCamera:
         self.stops = 0
         self.on_frame: Callable[[VideoFrame], None] | None = None
         self.on_error: Callable[[Exception], None] | None = None
+        self.controls: list[dict[str, int]] = []
         self._seq = 0
+
+    def set_controls(self, **controls: int) -> None:
+        self.controls.append(dict(controls))
 
     def start(
         self,
@@ -96,7 +101,12 @@ class FakeDetector:
         self.stage_ms = {"preprocess": 1.0, "dpu": 2.0, "decode": 0.5}
         self.calls: list[str] = []
         self.closed = False
+        self.zooms: list[tuple[float, tuple[float, float]]] = []
         self._token = 0
+
+    def set_zoom(self, zoom: float, zoom_center: tuple[float, float] = (0.5, 0.5)) -> None:
+        self.zooms.append((zoom, zoom_center))
+        self.calls.append("set_zoom")
 
     def submit(self, rgb: np.ndarray) -> int:
         self.calls.append("submit")
@@ -276,6 +286,7 @@ def build(
     publish_hz: float = 30.0,
     detector_factory: Callable[[ModelConfig], object] | None = None,
     pose_factory: Callable[[MovenetConfig], FakePoseDetector] | None = None,
+    calibration_store: CalibrationStore | None = None,
 ) -> tuple[Pipeline, FakeCamera, Sink, FrameChannel]:
     camera = camera if camera is not None else FakeCamera()
     pose = pose if pose is not None else FakePoseDetector()
@@ -295,6 +306,7 @@ def build(
         movenet_factory=pose_factory or (lambda settings: pose),
         camera_factory=lambda settings: camera,
         commands=commands,
+        calibration_store=calibration_store,
     )
     return pipeline, camera, sink, channel
 
@@ -1288,3 +1300,180 @@ def test_a_movenet_frame_failure_does_not_stop_the_loop(tmp_path: Path) -> None:
     # failed frame is cleared by the next good one.
     assert pose.calls.count("submit") >= 2
     assert "dpu_error" not in pipeline.status()["errors"]
+
+
+# --------------------------------------------------------------------------- #
+# Live calibration (debug panel)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_status_reports_the_yaml_calibration_by_default(tmp_path: Path) -> None:
+    pipeline, _camera, _sink, channel = build(tmp_path)
+    try:
+        assert pipeline.status()["calibration"] == {
+            "zoom": 1.0,
+            "zoom_center": [0.5, 0.5],
+            "gain": 300,
+            "exposure": 100,
+            "saturation": 110,
+        }
+    finally:
+        channel.close()
+        channel.unlink()
+
+
+def test_a_calibration_command_reaches_the_detector_the_camera_and_the_file(
+    tmp_path: Path,
+) -> None:
+    commands = CommandChannel(FakeQueue())
+    detector = FakeDetector([PERSON])
+    store = CalibrationStore(tmp_path / "cal" / "calibration.json")
+    pipeline, camera, sink, channel = build(
+        tmp_path, detector=detector, commands=commands, calibration_store=store
+    )
+    try:
+        with RunningPipeline(pipeline):
+            feed(camera, 2)
+            commands.put(
+                "calibration.set",
+                {"zoom": 1.5, "zoom_center": [0.4, 0.6], "gain": 640, "exposure": 200},
+            )
+            wait_until(lambda: detector.zooms == [(1.5, (0.4, 0.6))])
+            wait_until(lambda: (sink.topics("status")[-1]["calibration"] or {}).get("gain") == 640)
+            wait_until(lambda: store.path.exists() and bool(camera.controls))
+            submits_before = detector.calls.count("submit")
+            feed(camera, 2)
+            wait_until(lambda: detector.calls.count("submit") > submits_before)
+    finally:
+        channel.close()
+        channel.unlink()
+
+    expected = {
+        "zoom": 1.5,
+        "zoom_center": [0.4, 0.6],
+        "gain": 640,
+        "exposure": 200,
+        "saturation": 110,
+    }
+    assert sink.topics("status")[-1]["calibration"] == expected
+    assert camera.controls[-1] == {"gain": 640, "exposure": 200, "saturation": 110}
+    assert store.load() == {
+        "zoom": 1.5,
+        "zoom_center": (0.4, 0.6),
+        "gain": 640,
+        "exposure": 200,
+        "saturation": 110,
+    }
+    # The zoom changed in place: the runner was closed only by the final stop,
+    # and the frames after it went to the same runner.
+    assert detector.calls.count("close") == 1
+    assert "submit" in detector.calls[detector.calls.index("set_zoom") :]
+
+
+def test_a_reset_restores_the_yaml_values_and_removes_the_file(tmp_path: Path) -> None:
+    store = CalibrationStore(tmp_path / "calibration.json")
+    detector = FakeDetector()
+    pipeline, camera, _sink, channel = build(tmp_path, detector=detector, calibration_store=store)
+    try:
+        pipeline.start()
+        assert pipeline.set_calibration({"zoom": 1.8, "saturation": 60})
+        pipeline._calibration_worker.wait_idle()
+        assert store.path.exists()
+
+        pipeline.reset_calibration()
+        pipeline._calibration_worker.wait_idle()
+    finally:
+        pipeline.stop()
+        channel.close()
+        channel.unlink()
+
+    assert not store.path.exists()
+    assert pipeline.calibration == Calibration(
+        zoom=1.0, zoom_center=(0.5, 0.5), gain=300, exposure=100, saturation=110
+    )
+    assert detector.zooms[-1] == (1.0, (0.5, 0.5))
+    assert camera.controls[-1] == {"gain": 300, "exposure": 100, "saturation": 110}
+
+
+def test_a_stored_calibration_overrides_the_yaml_at_start(tmp_path: Path) -> None:
+    store = CalibrationStore(tmp_path / "calibration.json")
+    store.save(Calibration(zoom=1.4, zoom_center=(0.5, 0.3), gain=500, exposure=200, saturation=90))
+    models: list[ModelConfig] = []
+    cameras: list[CameraConfig] = []
+    camera = FakeCamera()
+    channel = FrameChannel.create(WIDTH, HEIGHT)
+
+    def detector_factory(model: ModelConfig) -> FakeDetector:
+        models.append(model)
+        return FakeDetector()
+
+    def camera_factory(settings: CameraConfig) -> FakeCamera:
+        cameras.append(settings)
+        return camera
+
+    pipeline = Pipeline(
+        config(tmp_path),
+        channel=channel,
+        messages=Sink(),  # type: ignore[arg-type]
+        detector_factory=detector_factory,
+        movenet_factory=lambda settings: FakePoseDetector(),
+        camera_factory=camera_factory,
+        calibration_store=store,
+    )
+    try:
+        pipeline.start()
+        status = pipeline.status()
+    finally:
+        pipeline.stop()
+        channel.close()
+        channel.unlink()
+
+    assert (models[0].zoom, models[0].zoom_center) == (1.4, (0.5, 0.3))
+    assert (cameras[0].gain, cameras[0].exposure, cameras[0].saturation) == (500, 200, 90)
+    assert status["calibration"]["gain"] == 500
+
+    # The YAML stays the base: a reset goes back to it, not to the file.
+    pipeline.reset_calibration()
+    assert pipeline.calibration.gain == 300
+
+
+def test_a_model_swap_back_to_yolox_keeps_the_calibrated_zoom(tmp_path: Path) -> None:
+    models: list[ModelConfig] = []
+
+    def detector_factory(model: ModelConfig) -> FakeDetector:
+        models.append(model)
+        return FakeDetector()
+
+    commands = CommandChannel(FakeQueue())
+    pipeline, camera, _sink, channel = build(
+        tmp_path, commands=commands, detector_factory=detector_factory
+    )
+    try:
+        with RunningPipeline(pipeline):
+            wait_until(lambda: camera.on_frame is not None)
+            commands.put("calibration.set", {"zoom": 1.6})
+            commands.put("model.set", {"model": "movenet"})
+            wait_until(lambda: pipeline.status()["active_model"] == "movenet")
+            commands.put("model.set", {"model": "yolox"})
+            wait_until(lambda: len(models) == 2)
+    finally:
+        channel.close()
+        channel.unlink()
+
+    assert models[0].zoom == 1.0
+    assert models[1].zoom == 1.6
+
+
+def test_an_invalid_calibration_from_the_channel_changes_nothing(tmp_path: Path) -> None:
+    pipeline, camera, sink, channel = build(tmp_path)
+    try:
+        before = pipeline.calibration
+        assert not pipeline.set_calibration({"gain": 5})
+        assert not pipeline.set_calibration({"zoom": 1.2, "contrast": 3})
+    finally:
+        channel.close()
+        channel.unlink()
+
+    assert pipeline.calibration == before
+    assert camera.controls == []
+    assert sink.topics("status") == []
