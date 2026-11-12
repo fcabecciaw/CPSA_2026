@@ -210,6 +210,70 @@ Observed on 256 val frames and 50 IR frames (`--threads 1`): 5 subgraphs with
 recall 0.926 vs 0.929; 13 of the 50 IR frames have a detection (15 INT8 / 16
 FP32 hands).
 
+## YOLOX-nano (showcase detector)
+
+The AI showcase mode uses a model-zoo detector instead of a trained pose
+model: YOLOX-nano, COCO-80 classes, `416x416`, anchor free. The zoo's
+*prebuilt* KV260 xmodel targets fingerprint `0x101000056010407` and is rejected
+by our board, so `zoo_yolox_nano.sh` downloads the float+QAT package
+(`pt_yolox-nano_coco_416_416_1G_3.0.zip`, 23.7 MB), compiles the QAT-converted
+`qat/convert_qat_results/YOLOX_0_int.xmodel` with the pinned-fingerprint
+`compile.sh`, and inspects the artifact. No training, no requantization.
+
+```sh
+tools/vitis/zoo_yolox_nano.sh            # download, extract, compile, inspect
+tools/vitis/zoo_yolox_nano.sh --skip-download
+```
+
+Outputs (git-ignored): `build/models/zoo/yolox_nano/` (package),
+`build/vitis/yolox_nano/compiled/yolox_nano.xmodel`,
+`build/vitis/report/inspect_yolox_nano.json`, `build/vitis/logs/zoo_yolox_nano_*.log`.
+The script fails unless the artifact reports one DPU subgraph, fingerprint
+`0x101000016010407`, input `1x416x416x3`, and the three `85`-channel heads.
+
+Observed: 5 subgraphs, 1 DPU (371 ops), input `1x416x416x3` xint8 `fp=-2`,
+outputs `1x{52,26,13}x{52,26,13}x85` xint8 `fp=3`. The heads hold
+`[tx, ty, tw, th, objectness, 80 class logits]`; the package
+(`yolox/models/yolo_head_q.py`) applies `sigmoid` to channels `4:` and then
+`xy = (t_xy + grid) * stride`, `wh = exp(t_wh) * stride`, so
+`cpsa.vision.yolox_decode.decode_yolox` runs with `logits=True`.
+
+### Decoder reference check (AC-S2)
+
+`yolox_reference.py` compares `DpuYoloxDetector`'s CPU half against the
+package's own post-processing on real images. Because the reference model needs
+PyTorch/`pytorch_nndct` (container Python 3.8) while `cpsa` runs on the host,
+it has three modes:
+
+```sh
+# 1. Host: letterbox the images exactly as the runtime does (BGR, pad 114).
+uv run --no-sync python tools/vitis/yolox_reference.py prepare \
+  --images build/vitis/yolox_reference/images --work build/vitis/yolox_reference
+
+# 2. Container: run the package model and its own post-processing.
+tools/vitis/run_vitis.sh python tools/vitis/yolox_reference.py dump \
+  --model build/models/zoo/yolox_nano/pt_yolox-nano_coco_416_416_1G_3.0 \
+  --work build/vitis/yolox_reference
+
+# 3. Host: identical preprocessing, int8 head round-trip, decode and compare.
+uv run --no-sync python tools/vitis/yolox_reference.py check \
+  --work build/vitis/yolox_reference --out build/vitis/report/yolox_reference.json
+```
+
+The reference path is the QAT-converted deployable model
+(`qat/convert_qat_results/deployable.pth`) — the weights the `int` xmodel was
+dumped from. Re-running `pytorch_nndct`'s quantized simulation in the Vitis AI
+3.5 container is not possible: the package's `quant_info.json` was produced by
+3.0 and 3.5 rejects its node names. Both sides decode the same head tensors
+rounded through int8 with the graph's output fix point (`fp=3`), which is what
+the board decodes.
+
+`check` requires pixel-identical preprocessing, the same class, IoU >= 0.9 and
+no extra or missing boxes; boxes that collapse below 1 px^2 against the frame
+edge are excluded on both sides (predictions into the letterbox padding have
+no usable area). Observed on 27 COCO images (plus the package demo and two
+Ultralytics samples): 177 matched boxes, minimum IoU 0.999987, no failures.
+
 ## Board
 
 The board (Kria KV260, Vitis AI 3.5 VART built natively, see

@@ -41,6 +41,7 @@ __all__ = [
     "DpuPoseEstimator",
     "dequantize_fix_point",
     "input_quantization_lut",
+    "input_quantization_lut_scaled",
     "order_outputs_by_stride",
     "quantize_fix_point",
     "quantize_rgb_lut",
@@ -70,6 +71,24 @@ def input_quantization_lut(fix_point: int) -> NDArray[np.int8]:
 
     normalized = np.arange(256, dtype=np.float32) / np.float32(255.0)
     return quantize_fix_point(normalized, fix_point)
+
+
+def input_quantization_lut_scaled(fix_point: int, value_scale: float) -> NDArray[np.int8]:
+    """Precompute the 256-entry xint8 table for samples scaled into the model domain.
+
+    ``lut[value]`` equals ``quantize_fix_point(np.float32(value) * value_scale,
+    fix_point)``.  :func:`input_quantization_lut` is the ``1 / 255`` case used by
+    the pose models, which consume ``[0, 1]`` RGB; models that consume raw
+    ``0..255`` pixels, such as the YOLOX model-zoo detectors, pass ``1.0``.
+
+    Raises:
+        ValueError: If ``value_scale`` is negative or not finite.
+    """
+
+    if not np.isfinite(value_scale) or value_scale < 0.0:
+        raise ValueError(f"value_scale must be finite and non-negative, got {value_scale}")
+    samples = np.arange(256, dtype=np.float32) * np.float32(value_scale)
+    return quantize_fix_point(samples, fix_point)
 
 
 def quantize_rgb_lut(
