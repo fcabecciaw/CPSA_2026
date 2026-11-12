@@ -207,10 +207,12 @@ def _pregenerate(args: argparse.Namespace, settings: Settings) -> int:
     write_phrases(json_path, document)
     counts = document.counts()
     log.info(
-        "phrases.json: %d sentences (%d rulebook, %d facts) -> %s",
+        "phrases.json: %d sentences (%d rulebook, %d facts, %d scene, %d questions) -> %s",
         counts["total"],
         counts["rulebook"],
         counts["fact"],
+        counts["scene"],
+        counts["question"],
         json_path,
     )
     if args.dry_run:

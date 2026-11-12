@@ -1,8 +1,10 @@
 """Extract the dashboard's fixed Italian sentences from the TypeScript sources.
 
 The dashboard is the source of truth: ``web/src/cognitive/rulebook.ts`` (every
-phrase without a ``{oggetto}``/``{n}``/``{ora}`` slot) and ``content/facts.ts``
-(all facts). The files are read as text and
+phrase without a ``{oggetto}``/``{n}``/``{ora}`` slot), ``content/facts.ts``
+(all facts), ``scene.ts`` (every line behind ``SCENE_PHRASES``: greetings,
+prompts, goodbyes, reactions) and ``content/questions.ts`` (the Play questions
+and their yes/no answers). The files are read as text and
 parsed with narrow regular expressions on purpose: this package must not depend
 on Node, Vite or the web toolchain, and it must not import the dashboard code.
 
@@ -28,6 +30,19 @@ PHRASES_ARRAY_RE = re.compile(r"phrases:\s*\[(.*?)\]", re.S)
 FACT_RE = re.compile(
     r'\{\s*id:\s*"(?P<id>[^"]+)",\s*topic:\s*"[^"]+",\s*text:\s*"(?P<text>(?:[^"\\]|\\.)*)"\s*\}'
 )
+#: ``scene.ts``: the line tables sit between the first table and the export.
+SCENE_START = "const GREETINGS"
+SCENE_END = "export const SCENE_PHRASES"
+#: A string literal used as an object key (``"tazza+libro": [...]``) is no line.
+KEY_AFTER_RE = re.compile(r"\s*:")
+BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+LINE_COMMENT_RE = re.compile(r"^\s*//.*$", re.M)
+#: ``questions.ts``: one ``{ id: "q-…", text: "…", yes: [...], no: [...] }`` each.
+QUESTION_RE = re.compile(
+    r'id:\s*"(?P<id>[^"]+)",\s*text:\s*"(?P<text>(?:[^"\\]|\\.)*)",'
+    r"\s*yes:\s*\[(?P<yes>.*?)\],\s*no:\s*\[(?P<no>.*?)\]",
+    re.S,
+)
 
 
 def web_source_dir(repo_root: Path) -> Path:
@@ -40,8 +55,8 @@ class Phrase:
 
     id: str
     text: str
-    source: str  # "rulebook" | "fact"
-    kind: str  # "rule" | "fact"
+    source: str  # "rulebook" | "fact" | "scene" | "question"
+    kind: str  # "rule" | "fact" | "scene" | "question" | "answer"
 
     def to_dict(self) -> dict[str, str]:
         return asdict(self)
@@ -55,7 +70,7 @@ class PhrasesDocument:
     generated_at: str
 
     def counts(self) -> dict[str, int]:
-        counts = {"rulebook": 0, "fact": 0}
+        counts = {"rulebook": 0, "fact": 0, "scene": 0, "question": 0}
         for phrase in self.phrases:
             counts[phrase.source] = counts.get(phrase.source, 0) + 1
         counts["total"] = len(self.phrases)
@@ -105,20 +120,81 @@ def parse_facts(path: Path) -> list[Phrase]:
     return _unique(phrases)
 
 
+def parse_scene(path: Path) -> list[Phrase]:
+    """Every slot-free line of the scene tables in ``scene.ts``, in file order.
+
+    The tables (``GREETINGS`` … ``CONTINUITY``) are the only content between
+    ``const GREETINGS`` and ``export const SCENE_PHRASES``; comments and the
+    ``CONTINUITY`` keys are skipped.
+    """
+    source = Path(path).read_text(encoding="utf-8")
+    start = source.find(SCENE_START)
+    end = source.find(SCENE_END)
+    if start < 0 or end < start:
+        raise ValueError(f"no phrases found: scene tables missing in {path}")
+    body = LINE_COMMENT_RE.sub("", BLOCK_COMMENT_RE.sub("", source[start:end]))
+    phrases: list[Phrase] = []
+    for match in STRING_RE.finditer(body):
+        if KEY_AFTER_RE.match(body, match.end()):
+            continue
+        text = _decode(match.group(1))
+        if SLOT_RE.search(text):
+            continue
+        phrases.append(
+            Phrase(id=f"scene.{len(phrases):03d}", text=text, source="scene", kind="scene")
+        )
+    return _unique(phrases)
+
+
+def parse_questions(path: Path) -> list[Phrase]:
+    """Each Play question of ``content/questions.ts`` and its yes/no answers."""
+    source = Path(path).read_text(encoding="utf-8")
+    phrases: list[Phrase] = []
+    for match in QUESTION_RE.finditer(source):
+        question_id = match.group("id")
+        phrases.append(
+            Phrase(
+                id=f"question.{question_id}",
+                text=_decode(match.group("text")),
+                source="question",
+                kind="question",
+            )
+        )
+        for branch in ("yes", "no"):
+            for index, answer in enumerate(STRING_RE.finditer(match.group(branch))):
+                phrases.append(
+                    Phrase(
+                        id=f"question.{question_id}.{branch}.{index}",
+                        text=_decode(answer.group(1)),
+                        source="question",
+                        kind="answer",
+                    )
+                )
+    return _unique(phrases)
+
+
 def collect(repo_root: Path) -> PhrasesDocument:
     """All fixed phrases of the dashboard, in a stable order."""
     sources = web_source_dir(repo_root)
     paths = (
         sources / "cognitive" / "rulebook.ts",
         sources / "cognitive" / "content" / "facts.ts",
+        sources / "cognitive" / "scene.ts",
+        sources / "cognitive" / "content" / "questions.ts",
     )
     missing = [str(path) for path in paths if not path.is_file()]
     if missing:
         raise ValueError(f"no phrases found: missing {', '.join(missing)}")
-    phrases = [
-        *parse_rulebook(paths[0]),
-        *parse_facts(paths[1]),
-    ]
+    # One sentence is synthesized once: a scene line equal to a rulebook
+    # phrase keeps its first (rulebook) entry.
+    phrases = _unique(
+        [
+            *parse_rulebook(paths[0]),
+            *parse_facts(paths[1]),
+            *parse_scene(paths[2]),
+            *parse_questions(paths[3]),
+        ]
+    )
     if not phrases:
         raise ValueError(f"no phrases found under {sources}")
     generated_at = datetime.now(UTC).isoformat(timespec="seconds")

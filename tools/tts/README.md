@@ -137,13 +137,16 @@ Origini ammesse: `http://10.42.0.83:8080` (dashboard) e
 
 ## Pre-generazione delle frasi fisse
 
-La dashboard parla soprattutto con frasi fisse: 100 frasi del rulebook senza slot
-e 40 fatti. `pregenerate` le estrae dai sorgenti
+La dashboard parla soprattutto con frasi fisse: 100 frasi del rulebook senza slot,
+40 fatti, 57 battute delle scene (`SCENE_PHRASES` in `scene.ts`: saluti, inviti,
+reazioni; quelle uguali a una frase del rulebook contano una volta sola) e 36
+frasi del gioco delle domande (`content/questions.ts`: 7 domande con le risposte
+sì/no), 233 in tutto. `pregenerate` le estrae dai sorgenti
 TypeScript, esporta `build/phrases.json` e riempie la cache:
 
 ```sh
 uv run cpsa-tts pregenerate                        # motore predefinito, ~1 min
-uv run cpsa-tts pregenerate --engine xtts          # XTTS, ~3 min (0.9 s/frase calda)
+uv run cpsa-tts pregenerate --engine xtts --voice ana_florence   # la voce della demo, ~4 min
 uv run cpsa-tts pregenerate --engine edge --voice it-IT-IsabellaNeural
 uv run cpsa-tts pregenerate --dry-run              # solo phrases.json
 ```
@@ -163,8 +166,8 @@ scriverebbero la stessa cache e caricherebbero due volte lo stesso modello. Se i
 motore `edge` è offline il job si ferma alla prima frase e riporta l'errore;
 quello che era già in cache resta.
 
-Il parsing è in `cpsa_tts/phrases.py`: nessuna dipendenza da Node. Se il rulebook
-cambia, `tests/test_phrases.py` fallisce sui conteggi fissati e ricorda di
+Il parsing è in `cpsa_tts/phrases.py`: nessuna dipendenza da Node. Se il rulebook,
+i fatti, le scene o le domande cambiano, `tests/test_phrases.py` fallisce sui conteggi fissati e ricorda di
 rieseguire la pre-generazione. Le frasi con slot (`{oggetto}`, `{n}`, `{ora}`,
 `{dpu}`, …) sono escluse: si sintetizzano alla prima occorrenza e restano in cache.
 
