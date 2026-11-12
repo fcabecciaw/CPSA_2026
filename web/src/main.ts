@@ -19,6 +19,7 @@ import { MetricsTracker } from "./metrics";
 import { ShowcaseView } from "./showcase";
 import { DashboardStore } from "./state";
 import { VoiceEngine } from "./voice";
+import { attachVoicePicker } from "./voicepicker";
 import { collectElements, renderAll, renderConnection, renderMetrics, renderNotice } from "./views";
 import { VideoFeed, type VideoSource } from "./video";
 
@@ -47,6 +48,8 @@ const voice = new VoiceEngine({
   enabled: params.get("voice") === "1",
   onStatusChange: () => renderVoice(),
 });
+// The voice picker keeps its own module: see `voicepicker.ts`.
+attachVoicePicker(byId("voice-picker"), voice);
 
 const voiceBadge = byId("voice-badge");
 const voiceGate = byId<HTMLButtonElement>("voice-gate");

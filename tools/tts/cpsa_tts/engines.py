@@ -1,23 +1,29 @@
-"""Engines of the local TTS service: Kokoro 82M and XTTS-v2.
+"""Engines of the local TTS service: Kokoro 82M, XTTS-v2 and Edge neural voices.
 
-Both engines are imported lazily: ``GET /health`` and ``GET /voices`` must answer
+Every engine is imported lazily: ``GET /health`` and ``GET /voices`` must answer
 in milliseconds even when no model is resident, and a broken XTTS install must
 not prevent Kokoro from working. Every sentence is synthesized as float32 mono
-at the engine's own sample rate (both are 24 kHz), then written as PCM 16 WAV.
+at 24 kHz, then written as PCM 16 WAV, so the browser path and the disk cache
+stay uniform whichever engine spoke.
 
 Licences (checked 2026-11-12):
 - Kokoro-82M: Apache-2.0 (<https://huggingface.co/hexgrad/Kokoro-82M>).
 - XTTS-v2: Coqui Public Model License, non-commercial
   (<https://coqui.ai/cpml>). The R2-V task approved its use for this demo.
+- Microsoft neural voices: no licence, only the read-aloud terms of service,
+  reached through the unofficial ``edge-tts`` client (see README).
 """
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import importlib.util
 import logging
 import os
+import re
 import threading
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any, Protocol
 
@@ -62,8 +68,10 @@ class Engine(Protocol):
     id: str
     label: str
     licence: str
-    voices: tuple[Voice, ...]
     sample_rate: int
+
+    @property
+    def voices(self) -> tuple[Voice, ...]: ...
 
     @property
     def device(self) -> str: ...
@@ -283,6 +291,204 @@ class XttsEngine:
             pass
 
 
+class EdgeEngine:
+    """Microsoft neural voices through ``edge-tts`` (unofficial, online only).
+
+    The client talks to the Edge read-aloud endpoint, so every new sentence needs
+    internet; a sentence already in the disk cache keeps working offline. The
+    service converts the MP3 it returns to the same 24 kHz mono float32 PCM the
+    other engines produce, so the cache and the browser path never see a
+    difference.
+
+    The Italian voice list is queried once and kept in memory: ``/voices`` over
+    the network would make every health probe wait for Microsoft. Until the
+    first query the curated fallback below is advertised.
+    """
+
+    id = "edge"
+    label = "Microsoft Neural (edge-tts)"
+    licence = "Microsoft read-aloud terms, unofficial client, online only"
+    language = "it-IT"
+    sample_rate = SAMPLE_RATE
+    #: Same order as :func:`_voice_order` (women first, then by id), so picking
+    #: the first voice gives Elsa whether or not the list was already queried.
+    fallback_voices: tuple[Voice, ...] = (
+        Voice(id="it-IT-ElsaNeural", name="Elsa", lang="it-IT", gender="female"),
+        Voice(id="it-IT-IsabellaNeural", name="Isabella", lang="it-IT", gender="female"),
+        Voice(id="it-IT-DiegoNeural", name="Diego", lang="it-IT", gender="male"),
+        Voice(
+            id="it-IT-GiuseppeMultilingualNeural",
+            name="Giuseppe Multilingual",
+            lang="it-IT",
+            gender="male",
+        ),
+    )
+
+    def __init__(
+        self,
+        rate: str = "+0%",
+        volume: str = "+0%",
+        timeout_s: int = 15,
+        voices: tuple[Voice, ...] | None = None,
+    ) -> None:
+        self._rate = rate
+        self._volume = volume
+        self._timeout_s = timeout_s
+        self._voices: tuple[Voice, ...] | None = voices
+        self._loaded = False
+        self._lock = threading.Lock()
+
+    @property
+    def device(self) -> str:
+        return "online"
+
+    @property
+    def loaded(self) -> bool:
+        return self._loaded
+
+    @property
+    def voices(self) -> tuple[Voice, ...]:
+        return self._voices if self._voices is not None else self.fallback_voices
+
+    def dependencies_available(self) -> bool:
+        return importlib.util.find_spec("edge_tts") is not None
+
+    def load(self) -> None:
+        if importlib.util.find_spec("edge_tts") is None:
+            raise EngineError("edge-tts is not installed: uv sync in tools/tts")
+        with self._lock:
+            self._loaded = True
+        # Best effort: offline or a slow network must not fail the load, the
+        # fallback voice list already covers the Italian neural voices.
+        try:
+            self.refresh_voices()
+        except EngineError as error:
+            log.warning("%s", error)
+
+    def refresh_voices(self) -> tuple[Voice, ...]:
+        """Query the Italian voices once and remember them."""
+        if self._voices is not None:
+            return self._voices
+        try:
+            raw = asyncio.run(self._list_voices())
+        except Exception as error:  # noqa: BLE001 - offline, DNS, HTTP 5xx
+            raise EngineError(
+                f"edge-tts could not list the voices ({error}); "
+                "the engine needs internet, cached sentences keep working offline"
+            ) from error
+        italian = [_edge_voice(row) for row in raw if _is_italian(row)]
+        found = tuple(sorted((voice for voice in italian if voice is not None), key=_voice_order))
+        with self._lock:
+            self._voices = found or self.fallback_voices
+        return self.voices
+
+    async def _list_voices(self) -> list[Any]:
+        import edge_tts
+
+        return list(await edge_tts.list_voices())
+
+    def synthesize(self, text: str, voice: str) -> np.ndarray:
+        self._validate_voice(voice)
+        self.load()
+        try:
+            payload = asyncio.run(self._download(text, voice))
+        except EngineError:
+            raise
+        except Exception as error:  # noqa: BLE001 - offline, timeout, HTTP error
+            raise EngineError(
+                f"edge-tts synthesis failed: {error}. The edge engine needs internet; "
+                "sentences already in the cache still play offline"
+            ) from error
+        return _decode_audio(payload)
+
+    async def _download(self, text: str, voice: str) -> bytes:
+        import edge_tts
+
+        communicate = edge_tts.Communicate(
+            text,
+            voice,
+            rate=self._rate,
+            volume=self._volume,
+            receive_timeout=self._timeout_s,
+        )
+        payload = bytearray()
+        async for chunk in communicate.stream():
+            if chunk.get("type") == "audio":
+                payload += chunk["data"]
+        if not payload:
+            raise EngineError("edge-tts returned no audio")
+        return bytes(payload)
+
+    def unload(self) -> None:
+        self._loaded = False
+
+    def _validate_voice(self, voice: str) -> None:
+        if voice not in {item.id for item in self.voices}:
+            known = ", ".join(item.id for item in self.voices)
+            raise UnknownVoiceError(f"edge has no voice {voice!r} (known: {known})")
+
+
+def _is_italian(row: Mapping[str, object]) -> bool:
+    locale = str(row.get("Locale", "")).lower()
+    return locale == "it-it"
+
+
+def _edge_voice(row: Mapping[str, object]) -> Voice | None:
+    """One ``edge_tts.list_voices()`` row as a :class:`Voice`, or None."""
+    short = str(row.get("ShortName", "")).strip()
+    if not short:
+        return None
+    return Voice(
+        id=short,
+        name=_friendly_name(short),
+        lang=str(row.get("Locale", EdgeEngine.language)),
+        gender=str(row.get("Gender", "female")).lower(),
+    )
+
+
+def _friendly_name(short_name: str) -> str:
+    """``it-IT-GiuseppeMultilingualNeural`` -> ``Giuseppe Multilingual``."""
+    base = short_name.split("-")[-1]
+    if base.endswith("Neural"):
+        base = base[: -len("Neural")]
+    words = re.findall(r"[A-Z][a-z]+", base) or [base]
+    return " ".join(words)
+
+
+def _voice_order(voice: Voice) -> tuple[str, str]:
+    return (voice.gender, voice.id)
+
+
+def _decode_audio(payload: bytes) -> np.ndarray:
+    """Decode an edge-tts MP3 payload to float32 mono at the service rate."""
+    import io
+
+    import soundfile as sf
+
+    try:
+        data, rate = sf.read(io.BytesIO(payload), dtype="float32", always_2d=True)
+    except Exception as error:  # noqa: BLE001 - a truncated stream, a bad codec
+        raise EngineError(f"edge-tts returned undecodable audio: {error}") from error
+    mono = data.mean(axis=1) if data.shape[1] > 1 else data.reshape(-1)
+    mono = _as_float32(mono)
+    if mono.size == 0:
+        raise EngineError("edge-tts returned no audio")
+    if rate != SAMPLE_RATE:
+        mono = _resample(mono, int(rate), SAMPLE_RATE)
+    return mono
+
+
+def _resample(samples: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
+    """Linear resampling: the engines all end up at 24 kHz without torchaudio."""
+    if samples.size == 0 or from_rate == to_rate or from_rate <= 0:
+        return samples
+    duration = samples.size / from_rate
+    target = max(1, int(round(duration * to_rate)))
+    source_time = np.arange(samples.size, dtype=np.float64) / from_rate
+    target_time = np.arange(target, dtype=np.float64) / to_rate
+    return np.interp(target_time, source_time, samples).astype(np.float32)
+
+
 def _as_float32(audio: object) -> np.ndarray:
     """Convert a torch tensor, a list of floats or an ndarray to float32 mono."""
     if hasattr(audio, "detach"):
@@ -300,10 +506,12 @@ class EngineRegistry:
         xtts_speed: float = 1.0,
         default_engine: str = "kokoro",
         default_voice: str = "if_sara",
+        edge_rate: str = "+0%",
     ) -> None:
         self._engines: dict[str, Engine] = {
             "kokoro": KokoroEngine(device=kokoro_device),
             "xtts": XttsEngine(device=xtts_device, speed=xtts_speed),
+            "edge": EdgeEngine(rate=edge_rate),
         }
         self._errors: dict[str, str] = {}
         self._default_engine = default_engine

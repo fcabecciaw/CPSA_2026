@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { memoryStorage } from "./cognitive/testkit";
 import {
   HttpTtsClient,
+  PICK_KEY,
   VoiceEngine,
   voiceAudioNode,
   type AudioSinkLike,
@@ -394,5 +395,147 @@ describe("R2-V — HTTP client", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it("reads the catalog, sets the default and drives a fill", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const idle = {
+      running: false,
+      engine: "edge",
+      voice: "it-IT-ElsaNeural",
+      total: 3,
+      done: 3,
+      synthesized: 3,
+      cached: 0,
+      failed: 0,
+      error: null,
+      started_at: "2026-11-12T10:00:00+00:00",
+      finished_at: "2026-11-12T10:00:02+00:00",
+      elapsed_s: 2.1,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        requests.push({ url: String(url), init });
+        if (String(url).endsWith("/voices")) {
+          return new Response(
+            JSON.stringify({
+              defaults: { engine: "kokoro", voice: "if_sara" },
+              engines: [{ id: "kokoro", label: "Kokoro 82M", voices: [] }],
+            }),
+            { status: 200 },
+          );
+        }
+        if (String(url).endsWith("/default")) {
+          return new Response(JSON.stringify({ defaults: { engine: "edge", voice: "Elsa" } }), {
+            status: 200,
+          });
+        }
+        if (String(url).endsWith("/pregenerate") && init?.method === "POST") {
+          return new Response(JSON.stringify({ ...idle, running: true, done: 0 }), {
+            status: 202,
+          });
+        }
+        return new Response(JSON.stringify(idle), { status: 200 });
+      }),
+    );
+    try {
+      const client = new HttpTtsClient();
+      const catalog = await client.catalog();
+      expect(catalog?.engines[0].id).toBe("kokoro");
+      expect(await client.setDefault("edge", "it-IT-ElsaNeural")).toEqual({
+        engine: "edge",
+        voice: "Elsa",
+      });
+      const started = await client.pregenerate("edge", "it-IT-ElsaNeural");
+      expect(started?.running).toBe(true);
+      expect((await client.pregenerateStatus())?.done).toBe(3);
+
+      const put = requests.find((request) => request.url.endsWith("/default"));
+      expect(put?.init?.method).toBe("PUT");
+      expect(JSON.parse(String(put?.init?.body))).toEqual({
+        engine: "edge",
+        voice: "it-IT-ElsaNeural",
+      });
+      const post = requests.find(
+        (request) => request.url.endsWith("/pregenerate") && request.init?.method === "POST",
+      );
+      expect(JSON.parse(String(post?.init?.body))).toEqual({
+        engine: "edge",
+        voice: "it-IT-ElsaNeural",
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reports a busy service when the fill is already running", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(
+          JSON.stringify({ error: "already running", job: { running: true, total: 9, done: 2 } }),
+          { status: 409 },
+        );
+      }),
+    );
+    try {
+      const status = await new HttpTtsClient().pregenerate("edge", "it-IT-ElsaNeural");
+      expect(status?.running).toBe(true);
+      expect(status?.done).toBe(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("R2-V — the voice picked in the dashboard", () => {
+  it("stays chosen across a reload, through localStorage", async () => {
+    const pick = memoryStorage();
+    const tts = new FakeTts();
+    const sink = new FakeSink();
+    const voice = new VoiceEngine({
+      synth: fakeSynth(),
+      createUtterance: utterance,
+      storage: memoryStorage(),
+      pickStorage: pick,
+      timer,
+      tts,
+      audio: sink,
+    });
+    await flush();
+
+    voice.chooseVoice("edge", "it-IT-ElsaNeural", "Microsoft Neural (edge-tts) · Elsa");
+    expect(voice.serviceLabel).toBe("Microsoft Neural (edge-tts) · Elsa");
+    expect(JSON.parse(String(pick.getItem(PICK_KEY)))).toEqual({
+      engine: "edge",
+      voice: "it-IT-ElsaNeural",
+      label: "Microsoft Neural (edge-tts) · Elsa",
+    });
+    voice.activate();
+    voice.speak("Ciao", {});
+    await flush();
+    expect(tts.calls.at(-1)).toBe("edge/it-IT-ElsaNeural/Ciao");
+
+    // A reload probes /health again (Kokoro) but keeps the picked voice.
+    const reloaded = new VoiceEngine({
+      synth: fakeSynth(),
+      createUtterance: utterance,
+      storage: memoryStorage(),
+      pickStorage: pick,
+      timer,
+      tts,
+      audio: sink,
+    });
+    await flush();
+    await flush();
+    expect(reloaded.serviceInfo()).toMatchObject({
+      engine: "edge",
+      voice: "it-IT-ElsaNeural",
+    });
+    reloaded.activate();
+    reloaded.speak("Ciao", {});
+    await flush();
+    expect(tts.calls.at(-1)).toBe("edge/it-IT-ElsaNeural/Ciao");
   });
 });

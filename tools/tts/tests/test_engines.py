@@ -85,10 +85,12 @@ def test_registry_rejects_a_default_voice_of_another_engine() -> None:
 def test_registry_info_is_cheap_and_never_loads() -> None:
     registry = EngineRegistry()
     rows = {row["id"]: row for row in registry.info()}
-    assert set(rows) == {"kokoro", "xtts"}
+    assert set(rows) == {"kokoro", "xtts", "edge"}
     assert rows["kokoro"]["loaded"] is False
     assert rows["kokoro"]["available"] is True
     assert rows["xtts"]["available"] is True
+    assert rows["edge"]["available"] is True
+    assert rows["edge"]["device"] == "online"
     assert rows["kokoro"]["device"] == "cpu"
 
 
@@ -109,8 +111,8 @@ def test_as_float32_accepts_torch_tensors() -> None:
 
 def test_settings_read_the_environment(monkeypatch) -> None:
     monkeypatch.setenv("CPSA_TTS_PORT", "9000")
-    monkeypatch.setenv("CPSA_TTS_ENGINE", "xtts")
-    monkeypatch.setenv("CPSA_TTS_VOICE", "sofia_hellen")
+    monkeypatch.setenv("CPSA_TTS_DEFAULT_ENGINE", "xtts")
+    monkeypatch.setenv("CPSA_TTS_DEFAULT_VOICE", "sofia_hellen")
     monkeypatch.setenv("CPSA_TTS_ALLOWED_ORIGINS", "http://localhost:3000, http://x.test")
     monkeypatch.setenv("CPSA_TTS_CACHE_DIR", "/tmp/cpsa-tts-test")
     settings = Settings.from_env()
@@ -119,6 +121,18 @@ def test_settings_read_the_environment(monkeypatch) -> None:
     assert settings.default_voice == "sofia_hellen"
     assert settings.allowed_origins == ("http://localhost:3000", "http://x.test")
     assert str(settings.cache_dir) == "/tmp/cpsa-tts-test"
+    # The persisted default lives inside the cache directory.
+    assert str(settings.defaults_file) == "/tmp/cpsa-tts-test/default.json"
+
+
+def test_settings_accept_the_legacy_engine_names(monkeypatch) -> None:
+    monkeypatch.delenv("CPSA_TTS_DEFAULT_ENGINE", raising=False)
+    monkeypatch.delenv("CPSA_TTS_DEFAULT_VOICE", raising=False)
+    monkeypatch.setenv("CPSA_TTS_ENGINE", "edge")
+    monkeypatch.setenv("CPSA_TTS_VOICE", "it-IT-ElsaNeural")
+    settings = Settings.from_env()
+    assert settings.default_engine == "edge"
+    assert settings.default_voice == "it-IT-ElsaNeural"
 
 
 def test_settings_defaults() -> None:
@@ -126,6 +140,8 @@ def test_settings_defaults() -> None:
     assert settings.host == "127.0.0.1"
     assert settings.port == 8765
     assert settings.default_engine == "kokoro"
+    assert settings.edge_rate == "+0%"
+    assert settings.defaults_file.name == "default.json"
     assert settings.allowed_origins == DEFAULT_ORIGINS
     assert settings.cache_dir.name == "cpsa-tts"
     assert (repo_root() / "web" / "src").is_dir()

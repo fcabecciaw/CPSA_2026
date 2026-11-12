@@ -82,4 +82,6 @@ placeholder.
 - `src/state.ts` — the last snapshot of each topic;
 - `src/protocol.ts` — protocol v1 types and validation (F-K1);
 - `src/labels.ts` — Italian copy and number formatting;
-- `src/mock.ts` — the dev-only stand-in.
+- `src/mock.ts` — the dev-only stand-in;
+- `src/voice.ts` — Italian voice, local TTS client and per-tab selection;
+- `src/voicepicker.ts` — the top-bar voice picker (`v` compares the voices).

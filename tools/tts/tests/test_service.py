@@ -12,8 +12,12 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from cpsa_tts.cache import WavCache
 from cpsa_tts.config import Settings
+from cpsa_tts.defaults import DefaultStore
 from cpsa_tts.engines import EngineError, EngineRegistry, Voice
+from cpsa_tts.phrases import Phrase
+from cpsa_tts.pregenerate import PregenerateJob
 from cpsa_tts.service import create_app
 
 
@@ -68,7 +72,16 @@ def engine() -> FakeEngine:
     return FakeEngine()
 
 
-def make_app(tmp_path: Path, engine: FakeEngine) -> tuple[TestClient, EngineRegistry]:
+ROW_TEXTS = (
+    "Ciao! Che bello vederti.",
+    "Il polpo pensa con i tentacoli.",
+    "Sessanta sguardi in un secondo.",
+)
+
+
+def make_app(
+    tmp_path: Path, engine: FakeEngine, rows: tuple[Phrase, ...] | None = None
+) -> tuple[TestClient, EngineRegistry]:
     settings = Settings(
         cache_dir=tmp_path / "cache",
         default_engine="fake",
@@ -77,7 +90,11 @@ def make_app(tmp_path: Path, engine: FakeEngine) -> tuple[TestClient, EngineRegi
     registry = EngineRegistry()
     registry.register(engine)
     registry.set_defaults("fake", "fake_sara")
-    return TestClient(create_app(settings=settings, registry=registry)), registry
+    cache = WavCache(settings.cache_dir)
+    job = PregenerateJob(cache, phrases=lambda: list(rows or []))
+    return TestClient(
+        create_app(settings=settings, registry=registry, cache=cache, pregenerate=job)
+    ), registry
 
 
 def test_health_reports_defaults_engines_and_cache(tmp_path, engine) -> None:
@@ -237,3 +254,118 @@ def test_concurrent_identical_requests_synthesize_once(tmp_path, engine) -> None
     assert [response.status_code for response in responses] == [200, 200, 200, 200]
     assert {response.content for response in responses} == {responses[0].content}
     assert len(engine.calls) == 1
+
+
+def test_put_default_persists_and_survives_a_restart(tmp_path, engine) -> None:
+    client, _ = make_app(tmp_path, engine)
+    response = client.put("/default", json={"engine": "fake", "voice": "fake_nicola"})
+    assert response.status_code == 200
+    assert response.json()["defaults"] == {"engine": "fake", "voice": "fake_nicola"}
+    assert response.json()["defaults_file"] == str(tmp_path / "cache" / "default.json")
+
+    store = DefaultStore(tmp_path / "cache" / "default.json")
+    assert store.read() == {"engine": "fake", "voice": "fake_nicola"}
+
+    spoken = client.post("/tts", json={"text": "Ciao"})
+    assert spoken.status_code == 200
+    assert spoken.headers["x-tts-voice"] == "fake_nicola"
+
+    # A restart of the service adopts the file, overriding the environment.
+    restarted, _ = make_app(tmp_path, FakeEngine())
+    health = restarted.get("/health").json()
+    assert health["defaults"] == {"engine": "fake", "voice": "fake_nicola"}
+    assert health["defaults_file"].endswith("default.json")
+
+
+def test_put_default_rejects_unknown_engine_or_voice(tmp_path, engine) -> None:
+    client, _ = make_app(tmp_path, engine)
+    assert client.put("/default", json={"engine": "nope", "voice": "x"}).status_code == 400
+    assert client.put("/default", json={"engine": "fake", "voice": "nope"}).status_code == 400
+    assert client.put("/default", json={"engine": "fake"}).status_code == 422
+    assert not (tmp_path / "cache" / "default.json").exists()
+
+
+def test_pregenerate_fills_the_cache_and_reports_progress(tmp_path, engine) -> None:
+    rows = tuple(
+        Phrase(id=f"rulebook.{index:03d}", text=text, source="rulebook", kind="rule")
+        for index, text in enumerate(ROW_TEXTS)
+    )
+    client, _ = make_app(tmp_path, engine, rows)
+    started = client.post("/pregenerate", json={"engine": "fake", "voice": "fake_sara"})
+    assert started.status_code == 202
+    body = started.json()
+    assert body["engine"] == "fake"
+    assert body["voice"] == "fake_sara"
+    assert body["total"] == len(rows)
+
+    deadline = time.monotonic() + 10
+    status = client.get("/pregenerate").json()
+    while status["running"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+        status = client.get("/pregenerate").json()
+    assert status["running"] is False
+    assert status["done"] == len(rows)
+    assert status["synthesized"] == len(rows)
+    assert status["finished_at"] is not None
+
+    health = client.get("/health").json()
+    assert health["cache"]["entries"] == len(rows)
+    assert health["pregenerate"] == {
+        "running": False,
+        "engine": "fake",
+        "voice": "fake_sara",
+        "done": len(rows),
+        "total": len(rows),
+    }
+
+
+def test_pregenerate_fills_one_job_at_a_time(tmp_path, engine) -> None:
+    rows = tuple(
+        Phrase(id=f"rulebook.{index:03d}", text=text, source="rulebook", kind="rule")
+        for index, text in enumerate(ROW_TEXTS)
+    )
+    client, _ = make_app(tmp_path, engine, rows)
+    engine.delay_s = 0.05
+    first = client.post("/pregenerate", json={"engine": "fake", "voice": "fake_sara"})
+    assert first.status_code == 202
+    second = client.post("/pregenerate", json={"engine": "fake", "voice": "fake_nicola"})
+    assert second.status_code == 409
+    assert "already running" in second.json()["error"]
+    assert second.json()["job"]["voice"] == "fake_sara"
+
+
+def test_pregenerate_follows_the_defaults_and_rejects_unknown_engines(tmp_path, engine) -> None:
+    rows = tuple(
+        Phrase(id=f"rulebook.{index:03d}", text=text, source="rulebook", kind="rule")
+        for index, text in enumerate(ROW_TEXTS)
+    )
+    client, _ = make_app(tmp_path, engine, rows)
+    assert client.post("/pregenerate", json={"engine": "nope"}).status_code == 400
+    idle = client.get("/pregenerate").json()
+    assert idle["running"] is False
+    assert idle["total"] == 0
+
+    started = client.post("/pregenerate")
+    assert started.status_code == 202
+    assert started.json()["engine"] == "fake"
+    assert started.json()["voice"] == "fake_sara"
+
+
+def test_cors_allows_the_voice_picker_methods(tmp_path, engine) -> None:
+    # ``PUT /default`` and ``POST /pregenerate`` come from the dashboard origin
+    # on the board, i.e. through Chrome's private-network preflight.
+    client, _ = make_app(tmp_path, engine)
+    for method, path in (("PUT", "/default"), ("POST", "/pregenerate")):
+        response = client.options(
+            path,
+            headers={
+                "Origin": "http://10.42.0.83:8080",
+                "Access-Control-Request-Method": method,
+                "Access-Control-Request-Headers": "content-type",
+                "Access-Control-Request-Private-Network": "true",
+            },
+        )
+        assert response.status_code == 200, path
+        assert response.headers["access-control-allow-origin"] == "http://10.42.0.83:8080"
+        assert response.headers["access-control-allow-private-network"] == "true"
+        assert method in response.headers["access-control-allow-methods"]

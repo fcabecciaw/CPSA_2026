@@ -19,6 +19,7 @@ from typing import Any
 from . import __version__
 from .cache import WavCache, write_wav_atomic
 from .config import Settings, repo_root
+from .defaults import DefaultStore, apply_persisted
 from .engines import Engine, EngineError, EngineRegistry, Voice
 from .phrases import PhrasesDocument, collect, write_phrases
 
@@ -79,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cpsa-tts",
-        description="Local Italian TTS service for the CPSA showcase (Kokoro + XTTS-v2).",
+        description="Local Italian TTS service for the CPSA showcase (Kokoro, XTTS-v2, Edge).",
     )
     parser.add_argument("--version", action="version", version=f"cpsa-tts {__version__}")
     parser.add_argument("--cache-dir", type=Path, help="WAV cache (default ~/.cache/cpsa-tts)")
@@ -157,13 +158,17 @@ def _settings(args: argparse.Namespace) -> Settings:
 
 
 def _registry(settings: Settings) -> EngineRegistry:
-    return EngineRegistry(
+    registry = EngineRegistry(
         kokoro_device=settings.kokoro_device,
         xtts_device=settings.xtts_device,
         xtts_speed=settings.xtts_speed,
         default_engine=settings.default_engine,
         default_voice=settings.default_voice,
+        edge_rate=settings.edge_rate,
     )
+    # The dashboard's last choice wins over the environment, as in the service.
+    apply_persisted(registry, DefaultStore(settings.defaults_file))
+    return registry
 
 
 # --------------------------------------------------------------------------- serve
@@ -380,7 +385,8 @@ def _listen_page(entries: list[dict[str, Any]]) -> str:
         "h2{font-size:1rem;color:#7fe3ff;font-weight:600}audio{width:100%;margin-top:.4rem}"
         "strong{font-weight:600}p{margin:.6rem 0 1.4rem}</style>\n"
         "<h1>CPSA TTS — ascolto comparato</h1>\n"
-        "<p>Kokoro è Apache-2.0 e gira su CPU; XTTS-v2 è CPML (non commerciale) e gira su GPU. "
+        "<p>Kokoro è Apache-2.0 e gira su CPU; XTTS-v2 è CPML (non commerciale) e gira su GPU; "
+        "le voci Microsoft arrivano da edge-tts (online, client non ufficiale). "
         "Le stesse cinque frasi, tutte le voci.</p>\n" + "\n".join(rows) + "\n</html>\n"
     )
 

@@ -5,6 +5,10 @@ Contract used by the dashboard (frozen by R2-V):
 - ``GET  /health``  -> readiness, engines, cache and last-request statistics.
 - ``GET  /voices``  -> engines, licences, devices and selectable voices.
 - ``POST /tts``     -> ``{text, engine?, voice?}`` answered with ``audio/wav``.
+- ``PUT  /default`` -> ``{engine, voice}``: the default used when a request omits
+  them, persisted in ``<cache dir>/default.json``.
+- ``POST /pregenerate`` -> ``{engine?, voice?}`` starts a background fill of the
+  fixed dashboard sentences; ``GET /pregenerate`` reports its progress.
 
 Every synthesized sentence is cached on disk under
 ``~/.cache/cpsa-tts/<sha1(engine, voice, text)>.wav``; a cache hit costs one
@@ -27,6 +31,7 @@ from pydantic import BaseModel, Field
 from . import __version__
 from .cache import WavCache, cache_key, wav_bytes
 from .config import Settings
+from .defaults import DefaultStore, apply_persisted
 from .engines import (
     Engine,
     EngineError,
@@ -35,6 +40,7 @@ from .engines import (
     UnknownVoiceError,
     Voice,
 )
+from .pregenerate import JobRunningError, PregenerateJob
 
 log = logging.getLogger("cpsa_tts.service")
 
@@ -46,6 +52,20 @@ class TtsRequest(BaseModel):
     """Body of ``POST /tts``; ``engine`` and ``voice`` default server-side."""
 
     text: str = Field(min_length=1)
+    engine: str | None = None
+    voice: str | None = None
+
+
+class DefaultRequest(BaseModel):
+    """Body of ``PUT /default``: both fields are required and validated."""
+
+    engine: str = Field(min_length=1)
+    voice: str = Field(min_length=1)
+
+
+class PregenerateRequest(BaseModel):
+    """Body of ``POST /pregenerate``; omitted fields follow the defaults."""
+
     engine: str | None = None
     voice: str | None = None
 
@@ -95,6 +115,8 @@ def create_app(
     settings: Settings | None = None,
     registry: EngineRegistry | None = None,
     cache: WavCache | None = None,
+    defaults_store: DefaultStore | None = None,
+    pregenerate: PregenerateJob | None = None,
 ) -> FastAPI:
     """Build the application; every collaborator can be injected by the tests."""
     settings = settings or Settings.from_env()
@@ -104,8 +126,14 @@ def create_app(
         xtts_speed=settings.xtts_speed,
         default_engine=settings.default_engine,
         default_voice=settings.default_voice,
+        edge_rate=settings.edge_rate,
     )
     wav_cache = cache or WavCache(settings.cache_dir)
+    store = defaults_store or DefaultStore(settings.defaults_file)
+    # A choice made from the dashboard wins over the environment, so a restart
+    # keeps the voice the user picked while comparing.
+    apply_persisted(registry, store)
+    job = pregenerate or PregenerateJob(wav_cache)
     stats = Stats()
     locks = _KeyLocks()
 
@@ -114,7 +142,7 @@ def create_app(
         app.add_middleware(
             CORSMiddleware,
             allow_origins=list(settings.allowed_origins),
-            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_methods=["GET", "POST", "PUT", "OPTIONS"],
             allow_headers=["Content-Type"],
             expose_headers=[
                 "X-TTS-Engine",
@@ -149,6 +177,7 @@ def create_app(
             "service": "cpsa-tts",
             "version": __version__,
             "defaults": registry.defaults(),
+            "defaults_file": str(store.path),
             "engines": {
                 row["id"]: {
                     "available": row["available"],
@@ -163,12 +192,36 @@ def create_app(
                 "entries": wav_cache.entries(),
                 "bytes": wav_cache.size_bytes(),
             },
+            "pregenerate": _job_summary(job.status()),
             "stats": stats.to_dict(),
         }
 
     @app.get("/voices")
     async def voices() -> dict[str, Any]:
         return {"defaults": registry.defaults(), "engines": registry.info()}
+
+    @app.put("/default")
+    async def set_default(body: DefaultRequest) -> dict[str, Any]:
+        """Change the default engine/voice of every request that omits them."""
+        registry.set_defaults(body.engine, body.voice)
+        path = store.write(body.engine, body.voice)
+        log.info("default voice -> %s/%s (%s)", body.engine, body.voice, path)
+        return {"defaults": registry.defaults(), "defaults_file": str(path)}
+
+    @app.post("/pregenerate")
+    async def start_pregenerate(body: PregenerateRequest | None = None) -> JSONResponse:
+        """Fill the cache with the fixed dashboard sentences, in the background."""
+        request_body = body or PregenerateRequest()
+        engine, voice = registry.resolve(request_body.engine, request_body.voice)
+        try:
+            status = job.start(engine, voice)
+        except JobRunningError as error:
+            return JSONResponse({"error": str(error), "job": job.status()}, status_code=409)
+        return JSONResponse(status, status_code=202)
+
+    @app.get("/pregenerate")
+    async def pregenerate_status() -> dict[str, Any]:
+        return job.status()
 
     @app.post("/tts")
     async def synthesize(body: TtsRequest) -> Response:
@@ -229,6 +282,17 @@ def create_app(
         return _wav_response(payload, engine, voice, "miss", elapsed_ms)
 
     return app
+
+
+def _job_summary(status: dict[str, Any]) -> dict[str, Any]:
+    """The few fields ``/health`` needs to show a fill in progress."""
+    return {
+        "running": status["running"],
+        "engine": status["engine"],
+        "voice": status["voice"],
+        "done": status["done"],
+        "total": status["total"],
+    }
 
 
 def _last(engine: Engine, voice: Voice, text: str, synth_ms: float, cache: str) -> dict[str, Any]:

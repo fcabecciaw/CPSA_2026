@@ -30,6 +30,15 @@ def _env_path(name: str, default: Path) -> Path:
     return Path(raw).expanduser() if raw else default
 
 
+def _env_first(names: tuple[str, ...], default: str) -> str:
+    """The first non-empty environment variable of ``names``, else ``default``."""
+    for name in names:
+        raw = os.environ.get(name, "").strip()
+        if raw:
+            return raw
+    return default
+
+
 def _env_origins() -> tuple[str, ...]:
     raw = os.environ.get("CPSA_TTS_ALLOWED_ORIGINS", "").strip()
     if not raw:
@@ -54,6 +63,8 @@ class Settings:
     xtts_device: str = "auto"
     #: XTTS speaking rate; 1.0 is the model default.
     xtts_speed: float = 1.0
+    #: edge-tts speaking rate ("+0%", "-5%", ...).
+    edge_rate: str = "+0%"
     log_level: str = "INFO"
     samples_dir: Path = field(default_factory=lambda: repo_root() / "build" / "tts-samples")
 
@@ -72,12 +83,24 @@ class Settings:
             host=os.environ.get("CPSA_TTS_HOST", defaults.host),
             port=port,
             cache_dir=_env_path("CPSA_TTS_CACHE_DIR", defaults.cache_dir),
-            default_engine=os.environ.get("CPSA_TTS_ENGINE", defaults.default_engine),
-            default_voice=os.environ.get("CPSA_TTS_VOICE", defaults.default_voice),
+            # The bare names are the ones the systemd unit and the README used
+            # before the dashboard could pick a voice; keep accepting them.
+            default_engine=_env_first(
+                ("CPSA_TTS_DEFAULT_ENGINE", "CPSA_TTS_ENGINE"), defaults.default_engine
+            ),
+            default_voice=_env_first(
+                ("CPSA_TTS_DEFAULT_VOICE", "CPSA_TTS_VOICE"), defaults.default_voice
+            ),
             allowed_origins=_env_origins(),
             kokoro_device=os.environ.get("CPSA_TTS_KOKORO_DEVICE", defaults.kokoro_device),
             xtts_device=os.environ.get("CPSA_TTS_XTTS_DEVICE", defaults.xtts_device),
             xtts_speed=speed,
+            edge_rate=os.environ.get("CPSA_TTS_EDGE_RATE", defaults.edge_rate),
             log_level=os.environ.get("CPSA_TTS_LOG_LEVEL", defaults.log_level).upper(),
             samples_dir=_env_path("CPSA_TTS_SAMPLES_DIR", repo_root() / "build" / "tts-samples"),
         )
+
+    @property
+    def defaults_file(self) -> Path:
+        """``<cache dir>/default.json``: the default chosen from the dashboard."""
+        return self.cache_dir / "default.json"

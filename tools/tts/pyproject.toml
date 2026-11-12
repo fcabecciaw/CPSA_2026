@@ -1,7 +1,7 @@
 [project]
 name = "cpsa-tts"
 version = "0.1.0"
-description = "Local Italian text-to-speech HTTP service for the CPSA showcase dashboard (Kokoro + XTTS-v2)."
+description = "Local Italian text-to-speech HTTP service for the CPSA showcase dashboard (Kokoro, XTTS-v2 and Edge neural voices)."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { text = "Apache-2.0" }
@@ -15,6 +15,7 @@ dependencies = [
   "torch>=2.7",
   "torchaudio>=2.7",
   "six>=1.17.0",
+  "edge-tts>=7.0",
 ]
 
 [build-system]

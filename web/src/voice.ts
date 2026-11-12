@@ -88,6 +88,55 @@ export interface TtsServiceInfo {
   label: string;
 }
 
+/** One selectable voice of the local service (``GET /voices``). */
+export interface TtsCatalogVoice {
+  id: string;
+  name: string;
+  lang: string;
+  gender: string;
+  sample_rate?: number;
+}
+
+/** One engine and its voices, as ``GET /voices`` reports them. */
+export interface TtsCatalogEngine {
+  id: string;
+  label: string;
+  licence: string;
+  device: string;
+  available: boolean;
+  loaded: boolean;
+  error: string | null;
+  voices: TtsCatalogVoice[];
+}
+
+/** The whole ``GET /voices`` answer: catalog plus the server-side default. */
+export interface TtsCatalog {
+  defaults: TtsDefaults;
+  engines: TtsCatalogEngine[];
+}
+
+/** The engine/voice used when a ``POST /tts`` omits them. */
+export interface TtsDefaults {
+  engine: string;
+  voice: string;
+}
+
+/** Progress of the background fill behind ``/pregenerate``. */
+export interface PregenerateStatus {
+  running: boolean;
+  engine: string | null;
+  voice: string | null;
+  total: number;
+  done: number;
+  synthesized: number;
+  cached: number;
+  failed: number;
+  error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  elapsed_s: number | null;
+}
+
 /** The local HTTP service (no DOM: the default client is injected in tests). */
 export interface TtsServiceLike {
   probe(): Promise<TtsServiceInfo | null>;
@@ -97,6 +146,14 @@ export interface TtsServiceLike {
     voice: string,
     signal?: AbortSignal,
   ): Promise<ArrayBuffer>;
+}
+
+/** What the voice picker needs from the service (catalog, defaults, fill). */
+export interface TtsVoiceClient {
+  catalog(): Promise<TtsCatalog | null>;
+  setDefault(engine: string, voice: string): Promise<TtsDefaults | null>;
+  pregenerate(engine: string, voice: string): Promise<PregenerateStatus | null>;
+  pregenerateStatus(): Promise<PregenerateStatus | null>;
 }
 
 /** The playback graph; `play` resolves true when the audio actually started. */
@@ -116,6 +173,8 @@ export interface VoiceOptions {
   synth?: SpeechSynthLike | null;
   createUtterance?: (text: string) => UtteranceLike;
   storage?: StorageLike | null;
+  /** Where the voice picked from the dashboard lives (localStorage). */
+  pickStorage?: StorageLike | null;
   timer?: TimerLike | null;
   /** `?voice=1` enables this tab without a click, still needs `unlock()`. */
   enabled?: boolean;
@@ -132,14 +191,32 @@ export interface VoiceOptions {
 
 export const ENABLED_KEY = "cpsa.voice.enabled.v1";
 export const MUTED_KEY = "cpsa.voice.muted.v1";
+/** The engine/voice chosen with the picker, per browser profile. */
+export const PICK_KEY = "cpsa.voice.pick.v1";
 export const TTS_URL = "http://127.0.0.1:8765";
 const WATCHDOG_MS = 8_000;
 const PROBE_TIMEOUT_MS = 750;
+
+/** One voice chosen from the picker, as written to `PICK_KEY`. */
+export interface VoicePick {
+  engine: string;
+  voice: string;
+  label?: string;
+}
 
 function defaultStorage(): StorageLike | null {
   try {
     // Per-tab on purpose: another tab must stay silent (F-E4 #18).
     return typeof sessionStorage === "undefined" ? null : sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function defaultPickStorage(): StorageLike | null {
+  try {
+    // Shared by the profile: reopening the dashboard keeps the chosen voice.
+    return typeof localStorage === "undefined" ? null : localStorage;
   } catch {
     return null;
   }
@@ -185,8 +262,8 @@ export function voiceAudioNode(): AnalyserNode | null {
   return sharedSink?.analyserNode() ?? null;
 }
 
-/** `http://127.0.0.1:8765` client: `/health`, `/voices` and `POST /tts`. */
-export class HttpTtsClient implements TtsServiceLike {
+/** `http://127.0.0.1:8765` client: `/health`, `/voices`, `/tts`, `/default`. */
+export class HttpTtsClient implements TtsServiceLike, TtsVoiceClient {
   private readonly base: string;
 
   constructor(base: string = TTS_URL) {
@@ -235,6 +312,71 @@ export class HttpTtsClient implements TtsServiceLike {
       throw new Error(`tts ${response.status}`);
     }
     return response.arrayBuffer();
+  }
+
+  /** Every engine and voice of the service, for the picker. */
+  async catalog(): Promise<TtsCatalog | null> {
+    try {
+      const response = await fetch(`${this.base}/voices`, { cache: "no-store" });
+      if (!response.ok) {
+        return null;
+      }
+      const body = (await response.json()) as TtsCatalog;
+      return Array.isArray(body.engines) ? body : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Say which voice every request that omits one should use from now on. */
+  async setDefault(engine: string, voice: string): Promise<TtsDefaults | null> {
+    try {
+      const response = await fetch(`${this.base}/default`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ engine, voice }),
+      });
+      if (!response.ok) {
+        return null;
+      }
+      const body = (await response.json()) as { defaults?: TtsDefaults };
+      return body.defaults ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Start filling the cache with the fixed sentences, or report the running job. */
+  async pregenerate(engine: string, voice: string): Promise<PregenerateStatus | null> {
+    try {
+      const response = await fetch(`${this.base}/pregenerate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ engine, voice }),
+      });
+      if (response.status === 409) {
+        const busy = (await response.json()) as { job?: PregenerateStatus };
+        return busy.job ?? null;
+      }
+      if (!response.ok) {
+        return null;
+      }
+      return (await response.json()) as PregenerateStatus;
+    } catch {
+      return null;
+    }
+  }
+
+  async pregenerateStatus(): Promise<PregenerateStatus | null> {
+    try {
+      const response = await fetch(`${this.base}/pregenerate`, { cache: "no-store" });
+      if (!response.ok) {
+        return null;
+      }
+      return (await response.json()) as PregenerateStatus;
+    } catch {
+      return null;
+    }
   }
 
   private async voiceLabel(
@@ -368,6 +510,7 @@ export class VoiceEngine {
   private readonly synth: SpeechSynthLike | null;
   private readonly createUtterance: (text: string) => UtteranceLike;
   private readonly storage: StorageLike | null;
+  private readonly pickStorage: StorageLike | null;
   private readonly timer: TimerLike;
   private readonly watchdogMs: number;
   private readonly preferredVoice: string;
@@ -393,6 +536,8 @@ export class VoiceEngine {
     this.synth = options.synth === undefined ? browserSynth() : options.synth;
     this.createUtterance = options.createUtterance ?? browserUtterance;
     this.storage = options.storage === undefined ? defaultStorage() : options.storage;
+    this.pickStorage =
+      options.pickStorage === undefined ? defaultPickStorage() : options.pickStorage;
     this.timer = options.timer ?? browserTimer();
     this.watchdogMs = options.watchdogMs ?? WATCHDOG_MS;
     this.preferredVoice = (options.preferredVoice ?? "Google italiano").toLowerCase();
@@ -497,6 +642,40 @@ export class VoiceEngine {
     return this.service === null ? null : this.service.label;
   }
 
+  /** The engine/voice this tab would use for the next local sentence. */
+  serviceInfo(): TtsServiceInfo | null {
+    return this.service;
+  }
+
+  /**
+   * Use another voice of the local service for this tab and remember it.
+   *
+   * The picker calls this; the choice survives a reload through localStorage
+   * and is re-applied after every probe.
+   */
+  chooseVoice(engine: string, voice: string, label?: string): void {
+    if (!engine || !voice) {
+      return;
+    }
+    const resolved = label ?? `${engine} · ${voice}`;
+    this.service = {
+      url: this.service?.url ?? this.serviceUrl,
+      engine,
+      voice,
+      label: resolved,
+    };
+    const pick: VoicePick = { engine, voice, label: resolved };
+    try {
+      this.pickStorage?.setItem(PICK_KEY, JSON.stringify(pick));
+    } catch {
+      // A full or blocked storage only loses the preference, not the voice.
+    }
+    if (this.speaking) {
+      this.cancel();
+    }
+    this.onStatusChange?.(this.snapshot());
+  }
+
   snapshot(): VoiceSnapshot {
     let status: VoiceStatus;
     if (this.speaking) {
@@ -548,9 +727,45 @@ export class VoiceEngine {
       return false;
     }
     const info = await this.tts.probe();
-    this.service = info;
+    // A voice chosen while the service was down survives the probe.
+    const pick = this.savedPick();
+    this.service =
+      info === null
+        ? null
+        : pick === null
+          ? info
+          : {
+              ...info,
+              engine: pick.engine,
+              voice: pick.voice,
+              label: pick.label ?? info.label,
+            };
     this.onStatusChange?.(this.snapshot());
     return info !== null;
+  }
+
+  /** The voice chosen by the picker in this browser profile, if any. */
+  private savedPick(): VoicePick | null {
+    try {
+      const raw = this.pickStorage?.getItem(PICK_KEY);
+      if (raw === null || raw === undefined) {
+        return null;
+      }
+      const parsed = JSON.parse(raw) as Partial<VoicePick>;
+      if (typeof parsed.engine !== "string" || typeof parsed.voice !== "string") {
+        return null;
+      }
+      if (!parsed.engine || !parsed.voice) {
+        return null;
+      }
+      return {
+        engine: parsed.engine,
+        voice: parsed.voice,
+        label: typeof parsed.label === "string" ? parsed.label : undefined,
+      };
+    } catch {
+      return null;
+    }
   }
 
   /**
