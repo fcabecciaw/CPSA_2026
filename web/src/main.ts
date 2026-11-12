@@ -19,6 +19,7 @@ import { MetricsTracker } from "./metrics";
 import { ShowcaseView } from "./showcase";
 import { RoomView } from "./room";
 import { DashboardStore } from "./state";
+import { UiModeController } from "./uimode";
 import { FIXED_VOICE, VoiceEngine, voiceAudioNode } from "./voice";
 import { attachVoicePicker } from "./voicepicker";
 import { collectElements, renderAll, renderConnection, renderMetrics, renderNotice } from "./views";
@@ -36,6 +37,7 @@ const videoNote = byId("video-note");
 let video: VideoSource = new VideoFeed(videoImage, videoNote);
 
 const showcase = new ShowcaseView({
+  chips: byId("showcase-chips"),
   countsGroup: byId("showcase-counts-group"),
   counts: byId("showcase-counts"),
   objectsGroup: byId("showcase-objects-group"),
@@ -77,6 +79,16 @@ if (import.meta.env.DEV) {
   (window as unknown as { __cpsaAvatar?: AvatarView }).__cpsaAvatar = avatar;
 }
 const room = new RoomView(byId("room"));
+
+/**
+ * Presentation mode by default; the top-right button and `d` show the debug
+ * readouts (scores, "mente", fps, voice picker), remembered per browser.
+ */
+new UiModeController({
+  root: document.documentElement,
+  button: byId<HTMLButtonElement>("debug-toggle"),
+  params,
+});
 // `?voice=1` marks this tab as the speaking one; the click gate still applies.
 const voice = new VoiceEngine({
   enabled: params.get("voice") === "1",
@@ -90,6 +102,7 @@ attachVoicePicker(byId("voice-picker"), voice);
 const voiceBadge = byId("voice-badge");
 const voiceGate = byId<HTMLButtonElement>("voice-gate");
 const muteToggle = byId<HTMLButtonElement>("mute-toggle");
+const muteLabel = byId("mute-label");
 const voicePaused = byId("voice-paused");
 const showcaseEmpty = byId("showcase-empty");
 const mente = byId("mente");
@@ -273,7 +286,8 @@ function renderVoice(): void {
   voiceGate.hidden = !gate;
   muteToggle.hidden = !snapshot.enabled;
   muteToggle.setAttribute("aria-pressed", String(snapshot.muted));
-  muteToggle.textContent = snapshot.muted ? "Muto" : "Voce";
+  muteLabel.textContent = snapshot.muted ? "Muto" : "Voce";
+  muteToggle.setAttribute("aria-label", snapshot.muted ? "Riattiva la voce" : "Muta la voce");
   voicePaused.hidden = !snapshot.audioSuspended;
 }
 

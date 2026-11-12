@@ -9,10 +9,12 @@
  *   node scripts/shots.mjs                 # every shot at 1280x720
  *   node scripts/shots.mjs --only mood-happy
  *   node scripts/shots.mjs --width 1920 --height 1080
+ *   node scripts/shots.mjs --only demo-present-objects,demo-debug-skeleton --suffix
  *
  * The URL parameters are the dev-only hooks of `main.ts` and `avatar/view.ts`:
  * `?mock=1`, `expression`, `mouth`, `gaze=left|right|up`, `presence`,
- * `view=skeleton` and `bench=1`.
+ * `view=skeleton`, `debug=1|0` (presentation or debug mode for that load) and
+ * `bench=1`. `--suffix` appends the viewport (`-1280x720`) to the file names.
  */
 
 import { spawn } from "node:child_process";
@@ -31,6 +33,17 @@ const BASE = `http://127.0.0.1:${PORT}/`;
 
 /** One shot: URL suffix, how long to let the scene settle, and the file name. */
 const SHOTS = [
+  // The demo itself, presentation (default) and debug modes, both views.
+  { name: "demo-present-objects", query: "mock=1&debug=0", settleMs: 7000 },
+  {
+    name: "demo-present-voice",
+    query: "mock=1&debug=0",
+    click: "#voice-gate",
+    settleMs: 9000,
+  },
+  { name: "demo-present-skeleton", query: "mock=1&debug=0&view=skeleton", settleMs: 7000 },
+  { name: "demo-debug-objects", query: "mock=1&debug=1", settleMs: 7000 },
+  { name: "demo-debug-skeleton", query: "mock=1&debug=1&view=skeleton", settleMs: 7000 },
   // The seven moods of the sphere, each pinned through the dev-only hook.
   { name: "mood-neutral", query: "mock=1&expression=neutral&presence=1", settleMs: 2000 },
   { name: "mood-happy", query: "mock=1&expression=happy&presence=1", settleMs: 2000 },
@@ -131,7 +144,8 @@ try {
     }
     await sleep(shot.settleMs);
     const png = await page.screenshot();
-    const file = join(OUT, `${shot.name}.png`);
+    const suffix = args.suffix ? `-${WIDTH}x${HEIGHT}` : "";
+    const file = join(OUT, `${shot.name}${suffix}.png`);
     await writeFile(file, png);
     const bench = await page.evaluate("JSON.stringify(window.__cpsaBench ?? null)");
     console.log(`${shot.name}: ${file}${bench && bench !== "null" ? ` · bench ${bench}` : ""}`);

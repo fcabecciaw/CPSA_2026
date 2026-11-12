@@ -185,8 +185,15 @@ senza dipendenze per ascoltarle. `--voice`/`--engine` limitano la produzione,
 
 ## Scegliere la voce dalla dashboard
 
-Il modo più rapido per confrontare le voci è la dashboard stessa: in alto a
-destra c'è un selettore **Voce** (`web/src/voicepicker.ts`).
+La voce della demo è fissa: XTTS-v2 **Ana Florence** (`xtts` / `ana_florence`,
+`FIXED_VOICE` in `web/src/voice.ts`). La dashboard la usa finché nel browser non
+è salvata un'altra scelta; prima dell'evento conviene quindi riempire la cache
+con `uv run cpsa-tts pregenerate --engine xtts --voice ana_florence`.
+
+Per confrontare le voci si usa la dashboard stessa in **modalità debug** (pulsante
+in alto a destra o tasto `d`): accanto ai dati tecnici compare il selettore
+**Voce** (`web/src/voicepicker.ts`). In modalità presentazione il selettore è
+nascosto.
 
 - La tendina elenca tutte le voci di `/voices`, raggruppate per motore.
 - **Prova** (o il tasto `v`) passa alla voce successiva e pronuncia una frase di
@@ -249,8 +256,17 @@ riprende al riavvio. Se invece la vuoi fissare nell'unit, aggiungi un
 `speak()` scarica il WAV, lo decodifica e lo riproduce attraverso un
 `AudioContext` con un `AnalyserNode` esposto da `voiceAudioNode()` (la bocca del
 volto legge l'ampiezza da lì). Se il servizio non c'è, o la richiesta fallisce, si
-torna alla Web Speech API. Restano il click gate, il watchdog a 8 s, il mute e la
-regola «una sola scheda parla».
+torna alla Web Speech API. Restano il click gate, il mute e la regola «una sola
+scheda parla».
+
+Nessuna attesa è infinita: `POST /tts` ha 6 s, la decodifica e l'avvio del WAV
+3 s; oltre si passa alla Web Speech API (o a una frase muta per il volto), così
+la voce non resta mai bloccata su «sto parlando». Il watchdog vale 8 s per la Web
+Speech API e la durata del WAV più 1,5 s per il servizio, così un fatto lungo di
+XTTS non viene tagliato. Se l'`AudioContext` è sospeso (per esempio dopo il
+cambio di uscita audio verso la cassa Bluetooth) la frase si chiude e torna il
+pulsante «Attiva la voce»: un clic riprende l'audio. In modalità debug la barra
+mostra «voce: in pausa» finché il contesto resta sospeso.
 
 Nota: `GET /health` è pensato per essere interrogato dal browser della dashboard
 sullo stesso laptop (`127.0.0.1`). Il servizio ascolta solo su loopback: dal

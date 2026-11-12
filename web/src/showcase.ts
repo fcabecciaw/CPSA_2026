@@ -3,9 +3,10 @@
  * booth-facing panel.
  *
  * The boxes and their Italian labels are drawn by the board on the MJPEG
- * stream, so this pane adds what the picture cannot say at a glance: how many
- * objects of each kind are in the frame, and the most confident detections with
- * their score bar. `CalmShowcase` debounces the 10 Hz feed into a calm view
+ * stream, so this pane adds what the picture cannot say at a glance. In
+ * presentation mode that is one chip per kind of object ("persona", with a
+ * small "2×" when there are more); in debug mode the counts and the most
+ * confident detections with their score bar. `CalmShowcase` debounces the 10 Hz feed into a calm view
  * (500 ms text, 5 % scores, stable order, 1 s leave hold), so the panel does not
  * flicker (coordinator feedback, 2026-11-12).
  */
@@ -20,12 +21,19 @@ const MAX_COUNTS = 6;
 const MAX_OBJECTS = 6;
 
 export interface ShowcaseElements {
+  /** Presentation chips: names only, no scores. */
+  chips: HTMLElement;
   countsGroup: HTMLElement;
   counts: HTMLElement;
   objectsGroup: HTMLElement;
   objects: HTMLElement;
   empty: HTMLElement;
   meta: HTMLElement;
+}
+
+interface ChipNode {
+  chip: HTMLElement;
+  badge: HTMLElement;
 }
 
 interface ObjectNode {
@@ -39,6 +47,7 @@ export class ShowcaseView {
   private readonly elements: ShowcaseElements;
   private readonly calm = new CalmShowcase();
   private readonly objectNodes = new Map<string, ObjectNode>();
+  private readonly chipNodes = new Map<string, ChipNode>();
   private more: HTMLElement | null = null;
   private rendered: CalmView | null = null;
 
@@ -86,6 +95,8 @@ export class ShowcaseView {
     if (!visible) {
       clear(counts);
       clear(objects);
+      clear(this.elements.chips);
+      this.chipNodes.clear();
       this.objectNodes.clear();
       this.more = null;
       meta.textContent = "";
@@ -93,11 +104,47 @@ export class ShowcaseView {
     }
 
     renderCounts(counts, countList);
+    this.renderChips(countList);
     this.renderObjects(objectList);
     meta.textContent =
       view?.meta === null || view?.meta === undefined
         ? ""
         : `${view.meta.model} · ${view.meta.width}×${view.meta.height}`;
+  }
+
+  /**
+   * One chip per kind, keyed by label so a chip that stays does not blink:
+   * only new kinds fade in. The count badge appears from two up.
+   */
+  private renderChips(counts: CalmView["counts"]): void {
+    const container = this.elements.chips;
+    const shown = counts.slice(0, MAX_COUNTS);
+    const labels = new Set(shown.map((entry) => entry.label));
+    for (const [label, node] of this.chipNodes) {
+      if (!labels.has(label)) {
+        node.chip.remove();
+        this.chipNodes.delete(label);
+      }
+    }
+    for (const entry of shown) {
+      let node = this.chipNodes.get(entry.label);
+      if (node === undefined) {
+        const chip = el("li", "chip chip-entering");
+        const badge = el("span", "chip-count");
+        chip.append(badge, el("span", "chip-label", entry.label));
+        node = { chip, badge };
+        this.chipNodes.set(entry.label, node);
+        window.setTimeout(() => chip.classList.remove("chip-entering"), 30);
+      }
+      const many = entry.count > 1;
+      node.badge.hidden = !many;
+      node.badge.textContent = many ? `${formatNumber(entry.count, 0)}×` : "";
+      node.chip.setAttribute(
+        "aria-label",
+        many ? `${formatNumber(entry.count, 0)} ${entry.label}` : entry.label,
+      );
+      container.append(node.chip);
+    }
   }
 
   private renderObjects(list: readonly CalmObject[]): void {
@@ -141,6 +188,8 @@ export class ShowcaseView {
   }
 
   private dropAllObjects(): void {
+    clear(this.elements.chips);
+    this.chipNodes.clear();
     for (const node of this.objectNodes.values()) {
       node.row.remove();
     }

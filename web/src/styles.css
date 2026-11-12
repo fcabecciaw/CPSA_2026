@@ -1,28 +1,72 @@
 /*
- * The booth surface: one instrument, two panes.
+ * The booth surface: the camera on the left, ARI on the right.
  *
- * The left pane is the camera, the right pane is what the AI model sees. A
- * single surface split by a hairline keeps the layout slim at 1280×720 and
- * 1920×1080; the cyan is the detector's own light.
+ * One visual language taken from ARI's particle sphere: the cyan → violet →
+ * magenta of its surface over a violet-black night. The video is framed like a
+ * screen with a thin ring in those three colours; ARI lives in a glass panel
+ * lit from behind, speaks in subtitles and names what it sees as chips.
  *
- * System fonts only, no external assets (NFR-07): Ubuntu + Ubuntu Mono where
- * available, the platform's UI and mono stacks elsewhere.
+ * Presentation mode (default) hides every `.debug-only` element; debug mode
+ * (`<html data-ui="debug">`, the top-right button or `d`) shows the scores,
+ * the "mente" strip, fps/latency and the voice picker instead of the chips.
+ *
+ * Fonts are bundled (no internet at the booth): Unbounded for the few display
+ * words, Atkinson Hyperlegible Next for everything read from three metres,
+ * Atkinson Hyperlegible Mono only for the numbers of the debug readouts.
+ * No backdrop-filter: blurring over the live video and the WebGL sphere would
+ * cost frames.
  */
+
+@import "@fontsource-variable/unbounded/index.css";
+@import "@fontsource-variable/atkinson-hyperlegible-next/index.css";
+@import "@fontsource-variable/atkinson-hyperlegible-mono/index.css";
 
 :root {
   color-scheme: dark;
-  --ink: #04080f;
-  --hairline: rgba(122, 190, 230, 0.16);
-  --text: #e7f1fa;
-  --muted: #8fa4b8;
-  --dim: #5f748a;
-  --beam: #4fd6ff;
-  --ok: #74e0a8;
-  --warn: #ffd07a;
-  --danger: #ff8f8f;
+
+  /* The night and the sphere's three lights. */
+  --void: #07061a;
+  --void-raised: #100c2b;
+  --ion: #4fd6ff;
+  --violet: #7a6cff;
+  --plasma: #ff4fd8;
+  --spectrum: linear-gradient(120deg, var(--ion), var(--violet) 52%, var(--plasma));
+
+  /* Text on the night: 15:1, 8.6:1 and 4.8:1 against --void. */
+  --starlight: #f1f0ff;
+  --haze: #b7b4dc;
+  --dusk: #8682b3;
+
+  --glass: rgba(150, 140, 255, 0.07);
+  --glass-strong: rgba(150, 140, 255, 0.12);
+  --rim: rgba(190, 182, 255, 0.16);
+  --rim-strong: rgba(190, 182, 255, 0.3);
+
+  --ok: #6ee7b0;
+  --warn: #ffd27a;
+  --danger: #ff8fa3;
+
+  --display: "Unbounded Variable", "Unbounded", system-ui, sans-serif;
   --font:
-    "Ubuntu", "Aptos", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", sans-serif;
-  --mono: "Ubuntu Mono", ui-monospace, "Cascadia Mono", "DejaVu Sans Mono", monospace;
+    "Atkinson Hyperlegible Next Variable", "Atkinson Hyperlegible Next", system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --mono: "Atkinson Hyperlegible Mono Variable", ui-monospace, "DejaVu Sans Mono", monospace;
+
+  --radius: clamp(16px, 1.3vw, 28px);
+  --gutter: clamp(14px, 1.5vw, 32px);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  /* The camera column: 1.3 parts of 2.3, and its 4:3 frame's height. */
+  --camera-share: 0.5652;
+  --camera-width: calc((100vw - 3 * var(--gutter)) * var(--camera-share));
+  --frame-height: calc(var(--camera-width) * 0.75);
+
+  /* Aliases kept for voicepicker.css. */
+  --text: var(--starlight);
+  --muted: var(--haze);
+  --dim: var(--dusk);
+  --beam: var(--ion);
+  --hairline: var(--rim);
+  --ink: var(--void);
 }
 
 * {
@@ -30,6 +74,11 @@
 }
 
 [hidden] {
+  display: none !important;
+}
+
+[data-ui="presentation"] .debug-only,
+[data-ui="debug"] .presentation-only {
   display: none !important;
 }
 
@@ -41,15 +90,37 @@ body {
 body {
   margin: 0;
   overflow: hidden;
-  background: var(--ink);
-  color: var(--text);
+  background:
+    radial-gradient(60vw 50vh at 78% 30%, rgba(122, 108, 255, 0.16), transparent 70%),
+    radial-gradient(50vw 45vh at 12% 95%, rgba(79, 214, 255, 0.07), transparent 70%),
+    radial-gradient(40vw 40vh at 95% 100%, rgba(255, 79, 216, 0.07), transparent 70%),
+    var(--void);
+  color: var(--starlight);
   font-family: var(--font);
-  font-size: clamp(14px, 0.45vw + 8px, 17px);
-  line-height: 1.35;
+  font-size: clamp(15px, 0.5vw + 8.6px, 19px);
+  line-height: 1.4;
   -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
 }
 
-.sr-only {
+::selection {
+  background: rgba(122, 108, 255, 0.45);
+  color: var(--starlight);
+}
+
+:focus-visible {
+  outline: 2px solid var(--ion);
+  outline-offset: 3px;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+.sr-only,
+[data-ui="presentation"] .conn-text,
+.mute-label {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -60,83 +131,123 @@ body {
   white-space: nowrap;
 }
 
+.icon {
+  width: 1.25em;
+  height: 1.25em;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .app {
   height: 100dvh;
-  display: flex;
-  flex-direction: column;
-  padding: clamp(10px, 0.9vw, 18px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: clamp(10px, 1.4vh, 22px);
+  padding: clamp(12px, 1.6vh, 28px) var(--gutter) var(--gutter);
 }
 
 /* --- the bar ------------------------------------------------------------ */
 
 .topbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  gap: clamp(14px, 1.8vw, 34px);
-  padding: 0 clamp(2px, 0.4vw, 8px) clamp(9px, 0.9vh, 14px);
+  gap: var(--gutter);
+  min-height: clamp(44px, 5.4vh, 64px);
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 0.9em;
+  min-width: 0;
 }
 
 .wordmark {
   margin: 0;
-  font-size: clamp(15px, 0.95vw, 21px);
-  font-weight: 500;
-  letter-spacing: 0.24em;
-  color: var(--text);
+  font-family: var(--display);
+  font-size: clamp(17px, 1.25vw, 26px);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--starlight);
 }
 
-.title {
+.brand-line {
   margin: 0;
-  font-size: 0.92em;
-  font-weight: 400;
-  letter-spacing: 0.02em;
-  color: var(--muted);
+  overflow: hidden;
+  font-size: 0.86em;
+  color: var(--haze);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+/* Oggetti | Scheletro: one track, one luminous thumb that slides. */
 .modes {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px;
-  border: 1px solid var(--hairline);
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 4px;
+  border: 1px solid var(--rim);
   border-radius: 999px;
-  background: rgba(6, 16, 26, 0.7);
+  background: var(--glass);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.modes-thumb {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: calc(50% - 4px);
+  border-radius: 999px;
+  background: linear-gradient(
+    120deg,
+    rgba(79, 214, 255, 0.32),
+    rgba(122, 108, 255, 0.4) 55%,
+    rgba(255, 79, 216, 0.32)
+  );
+  box-shadow:
+    inset 0 0 0 1px rgba(214, 208, 255, 0.35),
+    0 6px 22px -8px rgba(122, 108, 255, 0.8);
+  transition: transform 420ms var(--ease-out);
+}
+
+.modes:has(#mode-skeleton.mode-active) .modes-thumb {
+  transform: translateX(100%);
 }
 
 .mode {
-  padding: 0.28em 0.95em;
-  border: 1px solid transparent;
+  position: relative;
+  z-index: 1;
+  min-width: clamp(104px, 7.6vw, 150px);
+  padding: 0.5em 1.2em;
+  border: 0;
   border-radius: 999px;
   background: transparent;
-  color: var(--dim);
-  font: inherit;
-  font-size: 0.78em;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  color: var(--haze);
+  font-size: clamp(15px, 1vw, 20px);
+  font-weight: 600;
+  letter-spacing: 0.01em;
   cursor: pointer;
-  transition:
-    color 180ms ease,
-    background 180ms ease,
-    box-shadow 180ms ease;
+  transition: color 240ms ease;
 }
 
-.mode:hover {
-  color: var(--text);
-}
-
+.mode:hover,
 .mode-active {
-  border-color: rgba(79, 214, 255, 0.45);
-  background: rgba(79, 214, 255, 0.12);
-  color: var(--text);
-  box-shadow: 0 0 14px rgba(79, 214, 255, 0.16) inset;
+  color: var(--starlight);
 }
 
 .readout {
-  margin-left: auto;
+  justify-self: end;
   display: inline-flex;
   align-items: center;
-  gap: clamp(10px, 1.3vw, 24px);
-  font-family: var(--mono);
-  font-size: 0.88em;
-  color: var(--muted);
+  gap: clamp(10px, 1vw, 20px);
+  min-width: 0;
+  color: var(--haze);
   white-space: nowrap;
 }
 
@@ -144,18 +255,20 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 0.55em;
+  padding: 0.5em;
+  font-size: 0.86em;
 }
 
 .dot {
-  width: 0.55em;
-  height: 0.55em;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
-  background: var(--dim);
+  background: var(--dusk);
 }
 
 .dot-open {
   background: var(--ok);
-  box-shadow: 0 0 10px rgba(116, 224, 168, 0.55);
+  box-shadow: 0 0 0 3px rgba(110, 231, 176, 0.16);
 }
 
 .dot-connecting,
@@ -168,53 +281,115 @@ body {
   background: var(--danger);
 }
 
-.gauge {
-  color: var(--text);
-  font-variant-numeric: tabular-nums;
-}
-
 @keyframes pulse {
   50% {
     opacity: 0.35;
   }
 }
 
-/* --- the status line ---------------------------------------------------- */
-
-.notice {
-  margin: 0 0 clamp(6px, 0.7vh, 10px);
-  padding: 0 clamp(2px, 0.4vw, 8px);
-  font-size: 0.82em;
-  color: var(--muted);
+.gauge {
+  font-family: var(--mono);
+  font-size: 0.86em;
+  color: var(--starlight);
 }
 
-.notice:empty {
+.voice-paused {
+  color: var(--warn);
+}
+
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: clamp(38px, 2.5vw, 50px);
+  height: clamp(38px, 2.5vw, 50px);
+  padding: 0;
+  border: 1px solid var(--rim);
+  border-radius: 50%;
+  background: var(--glass);
+  color: var(--haze);
+  font-size: clamp(15px, 1vw, 20px);
+  cursor: pointer;
+  transition:
+    color 200ms ease,
+    border-color 200ms ease,
+    background 200ms ease;
+}
+
+.icon-button:hover {
+  border-color: var(--rim-strong);
+  color: var(--starlight);
+}
+
+.mute .icon-voice-off,
+.mute[aria-pressed="true"] .icon-voice-on {
+  display: none;
+}
+
+.mute[aria-pressed="true"] .icon-voice-off {
+  display: block;
+}
+
+.mute[aria-pressed="true"] {
+  border-color: rgba(255, 210, 122, 0.45);
+  color: var(--warn);
+}
+
+/* The debug toggle stays quiet until it is on. */
+.debug-toggle {
+  border-color: transparent;
+  background: transparent;
+  color: var(--dusk);
+}
+
+.debug-toggle[aria-pressed="true"] {
+  border-color: rgba(79, 214, 255, 0.5);
+  background: rgba(79, 214, 255, 0.1);
+  color: var(--ion);
+}
+
+/* --- the status toast --------------------------------------------------- */
+
+/* Centred under the camera, in the room the 4:3 frame leaves below it. */
+.notice {
+  position: fixed;
+  bottom: clamp(14px, 2vh, 28px);
+  left: calc(var(--gutter) + var(--camera-width) / 2);
+  z-index: 30;
+  max-width: min(80vw, 60ch);
+  margin: 0;
+  padding: 0.6em 1.2em;
+  border: 1px solid var(--rim);
+  border-radius: 999px;
+  background: rgba(16, 12, 43, 0.92);
+  box-shadow: 0 14px 40px -12px rgba(0, 0, 0, 0.7);
+  font-size: 0.9em;
+  color: var(--haze);
+  text-align: center;
+  transform: translateX(-50%);
+}
+
+.notice:empty,
+[data-ui="presentation"] .notice-info {
   display: none;
 }
 
 .notice-error {
+  border-color: rgba(255, 143, 163, 0.45);
   color: var(--danger);
 }
 
 .notice-warn {
+  border-color: rgba(255, 210, 122, 0.4);
   color: var(--warn);
 }
 
-.notice-info {
-  color: var(--dim);
-}
-
-/* --- the instrument surface --------------------------------------------- */
+/* --- the stage ---------------------------------------------------------- */
 
 .stage {
-  flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  border: 1px solid var(--hairline);
-  border-radius: clamp(10px, 0.9vw, 16px);
-  background: #050b14;
-  overflow: hidden;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  gap: var(--gutter);
 }
 
 .pane {
@@ -223,23 +398,46 @@ body {
   min-height: 0;
 }
 
+/* --- the camera: a 4:3 screen with a thin spectrum ring ----------------- */
+
+/* Frame and ARI's panel share one height and sit centred, like a diptych. */
 .pane-camera {
-  grid-column: 1;
-  grid-row: 1;
-  border-right: 1px solid var(--hairline);
-  background: #050b14;
+  display: grid;
+  place-items: center;
+  container-type: size;
 }
 
-.pane-view {
-  grid-column: 2;
-  grid-row: 1;
+.frame-wrap {
+  position: relative;
+  width: min(100cqw, 133.333cqh);
+  aspect-ratio: 4 / 3;
 }
-
-/* --- the camera pane ---------------------------------------------------- */
 
 .frame {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius);
+  background: #020109;
+  overflow: hidden;
+  box-shadow:
+    0 30px 80px -30px rgba(122, 108, 255, 0.55),
+    0 10px 40px -20px rgba(79, 214, 255, 0.35);
+}
+
+.frame::after {
+  content: "";
   position: absolute;
   inset: 0;
+  z-index: 3;
+  padding: 1.5px;
+  border-radius: inherit;
+  background: var(--spectrum);
+  opacity: 0.75;
+  pointer-events: none;
+  mask:
+    linear-gradient(#000 0 0) content-box exclude,
+    linear-gradient(#000 0 0);
 }
 
 .video {
@@ -256,277 +454,85 @@ body {
   place-content: center;
   margin: 0;
   padding: 1.5em;
+  font-size: clamp(16px, 1.2vw, 24px);
   text-align: center;
-  color: var(--dim);
+  color: var(--haze);
+}
+
+/*
+ * "Cosa vede l'IA": a tab hung on the top edge of the screen, half over the
+ * ring, so it covers as little of the board's own box labels as possible.
+ */
+.frame-title {
+  position: absolute;
+  top: 0;
+  left: clamp(18px, 1.8vw, 36px);
+  z-index: 4;
+  margin: 0;
+  padding: 0.5em 1.05em 0.55em;
+  border-radius: 999px;
+  background: var(--void-raised);
+  box-shadow:
+    inset 0 0 0 1px var(--rim-strong),
+    0 10px 30px -12px rgba(0, 0, 0, 0.9);
+  font-family: var(--display);
+  font-size: clamp(14px, 1.1vw, 23px);
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  line-height: 1.1;
+  color: var(--starlight);
+  white-space: nowrap;
+  transform: translateY(-50%);
+  pointer-events: none;
 }
 
 .frame-badge {
   position: absolute;
-  top: clamp(8px, 1vw, 14px);
-  left: clamp(8px, 1vw, 14px);
-  padding: 0.12em 0.45em;
-  border: 1px solid var(--hairline);
+  top: clamp(14px, 1.4vw, 28px);
+  right: clamp(14px, 1.4vw, 28px);
+  z-index: 2;
+  padding: 0.15em 0.55em;
+  border: 1px solid var(--rim);
   border-radius: 6px;
-  background: rgba(4, 8, 15, 0.6);
-  font-family: var(--mono);
-  font-size: 0.72em;
-  letter-spacing: 0.12em;
-  color: var(--muted);
-}
-
-/* --- the "Cosa vede l'IA" pane ------------------------------------------ */
-
-.view-note {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-content: center;
-  margin: 0;
-  color: var(--dim);
-}
-
-.view-meta {
-  position: absolute;
-  right: 0;
-  bottom: clamp(8px, 0.9vw, 12px);
-  left: 0;
-  margin: 0;
-  text-align: center;
-  font-family: var(--mono);
-  font-size: 0.72em;
-  color: var(--dim);
-}
-
-.showcase {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  gap: clamp(12px, 2vh, 26px);
-  padding: clamp(16px, 2vw, 40px);
-  padding-bottom: clamp(34px, 4.5vh, 56px);
-  overflow: hidden;
-}
-
-.showcase-group {
-  display: flex;
-  flex-direction: column;
-  gap: clamp(4px, 0.8vh, 10px);
-  /* The counts never shrink: on a short pane the detection list clips first. */
-  flex: 0 0 auto;
-}
-
-.showcase-group:last-child {
-  flex: 0 1 auto;
-  min-height: 0;
-}
-
-.showcase-heading {
-  margin: 0;
-  font-size: 0.7em;
-  font-weight: 500;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--dim);
-}
-
-.showcase-counts,
-.showcase-objects {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-}
-
-/* "2 × persona": the counts are the loudest thing in the pane. */
-.showcase-counts {
-  flex: 0 1 auto;
-  gap: clamp(2px, 0.5vh, 8px);
-}
-
-.showcase-count {
-  display: flex;
-  align-items: baseline;
-  gap: 0.3em;
-  min-width: 0;
-  color: var(--text);
-  font-size: clamp(1.6rem, 2.6vw, 2.9rem);
-  font-weight: 300;
-  letter-spacing: -0.015em;
-  line-height: 1.2;
-}
-
-.showcase-count-n {
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-  color: var(--beam);
-}
-
-.showcase-count-x {
-  color: var(--dim);
-  font-size: 0.6em;
-}
-
-.showcase-count-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* The detections sit under the counts, separated by a hairline. */
-.showcase-objects {
-  flex: 0 1 auto;
-  gap: clamp(7px, 1.1vh, 14px);
-  padding-top: clamp(10px, 1.4vh, 18px);
-  border-top: 1px solid var(--hairline);
-}
-
-.showcase-object {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: baseline;
-  gap: 0.3em 0.8em;
-  font-size: clamp(0.9rem, 1.05vw, 1.15rem);
-}
-
-/* The head is a grid wrapper only: label left, score right. */
-.showcase-object-head {
-  display: contents;
-}
-
-.showcase-object-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text);
-}
-
-.showcase-object-score {
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 0.92em;
-  color: var(--muted);
-}
-
-.showcase-bar {
-  grid-column: 1 / -1;
-  height: 4px;
-  border-radius: 999px;
-  background: rgba(122, 190, 230, 0.13);
-  overflow: hidden;
-}
-
-.showcase-bar-fill {
-  display: block;
-  height: 100%;
-  width: calc(var(--score, 0) * 100%);
-  border-radius: inherit;
-  background: linear-gradient(90deg, rgba(79, 214, 255, 0.4), var(--beam));
-}
-
-.showcase-more {
-  color: var(--dim);
-  font-size: 0.85em;
-}
-
-/* --- narrow screens ----------------------------------------------------- */
-
-@media (max-width: 900px) {
-  .stage {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 4fr) minmax(0, 5fr);
-  }
-
-  .pane-camera {
-    grid-row: 1;
-    border-right: 0;
-    border-bottom: 1px solid var(--hairline);
-  }
-
-  .pane-view {
-    grid-row: 2;
-  }
-
-  .conn-text {
-    display: none;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .dot-connecting,
-  .dot-reconnecting {
-    animation: none;
-  }
-}
-
-/* --- the holographic face and the voice (C1) ---------------------------- */
-
-.mute {
-  padding: 0.25em 0.7em;
-  border: 1px solid var(--hairline);
-  border-radius: 999px;
-  background: rgba(79, 214, 255, 0.06);
-  color: var(--muted);
+  background: rgba(7, 6, 26, 0.7);
   font-family: var(--mono);
   font-size: 0.78em;
-  letter-spacing: 0.06em;
-  cursor: pointer;
+  color: var(--haze);
 }
 
-.mute[aria-pressed="true"] {
-  border-color: rgba(255, 208, 122, 0.5);
-  color: var(--warn);
-}
+/* --- ARI's panel -------------------------------------------------------- */
 
 .pane-showcase {
+  align-self: center;
   display: flex;
   flex-direction: column;
+  height: min(100%, var(--frame-height));
   min-height: 0;
+  padding: clamp(10px, 1.4vh, 24px) clamp(14px, 1.4vw, 30px) clamp(14px, 2vh, 30px);
+  border: 1px solid var(--rim);
+  border-radius: var(--radius);
+  background:
+    radial-gradient(70% 55% at 50% 40%, rgba(122, 108, 255, 0.2), transparent 72%),
+    radial-gradient(60% 40% at 50% 100%, rgba(255, 79, 216, 0.08), transparent 70%),
+    linear-gradient(180deg, rgba(150, 140, 255, 0.07), rgba(16, 12, 43, 0.5));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 30px 80px -40px rgba(0, 0, 0, 0.8);
+  overflow: hidden;
 }
 
 .hologram {
   position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
-  align-items: center;
-  gap: clamp(8px, 1vw, 18px);
-  flex: 0 0 auto;
-  height: clamp(190px, 31vh, 320px);
-  padding: clamp(8px, 1vw, 16px) clamp(14px, 1.6vw, 26px) clamp(4px, 0.6vh, 8px);
-  border-bottom: 1px solid var(--hairline);
-  background:
-    radial-gradient(ellipse at 30% 45%, rgba(79, 214, 255, 0.12), transparent 62%),
-    linear-gradient(180deg, rgba(79, 214, 255, 0.04), transparent 70%);
-  overflow: hidden;
-}
-
-.hologram::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: repeating-linear-gradient(
-    to bottom,
-    rgba(79, 214, 255, 0.055) 0,
-    rgba(79, 214, 255, 0.055) 1px,
-    transparent 1px,
-    transparent 4px
-  );
-  mix-blend-mode: screen;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .hologram-avatar {
   position: relative;
-  min-width: 0;
-  height: 100%;
+  flex: 1 1 auto;
   min-height: 0;
-  border-radius: 14px;
-  overflow: hidden;
   transition: opacity 320ms ease;
 }
 
@@ -542,182 +548,195 @@ body {
   inset: 0;
   display: grid;
   place-items: center;
-  font-family: var(--mono);
-  font-size: 0.72em;
-  color: var(--dim);
+  color: var(--dusk);
 }
 
+/* Under the sphere, never over it: only the voice gate shows here. */
 .hologram-info {
-  position: relative;
   z-index: 1;
   display: flex;
+  flex: none;
   flex-direction: column;
-  align-items: flex-start;
-  gap: clamp(4px, 0.7vh, 10px);
-  min-width: 0;
+  align-items: center;
+  gap: 0.4em;
+  padding-top: clamp(6px, 1vh, 14px);
 }
 
 .hologram-id {
   margin: 0;
-  font-size: clamp(14px, 1.05vw, 20px);
-  font-weight: 500;
-  letter-spacing: 0.26em;
-  color: var(--beam);
-}
-
-.hologram-id span {
-  color: var(--dim);
-  font-weight: 400;
-  letter-spacing: 0.12em;
+  font-family: var(--display);
+  font-size: clamp(14px, 0.95vw, 19px);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--ion);
 }
 
 .voice-badge {
   margin: 0;
   font-family: var(--mono);
-  font-size: 0.72em;
-  color: var(--muted);
+  font-size: 0.8em;
+  color: var(--haze);
 }
 
-.voice-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5em;
+.voice-badge[data-status="no-voice"],
+.voice-badge[data-status="unsupported"] {
+  color: var(--warn);
 }
 
+/* The one call to action of the page: before the first click ARI is silent. */
 .voice-gate {
-  padding: 0.4em 0.9em;
-  border: 1px solid rgba(79, 214, 255, 0.55);
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6em;
+  padding: 0.75em 1.6em;
+  border: 0;
   border-radius: 999px;
-  background: rgba(79, 214, 255, 0.1);
-  color: var(--text);
-  font: inherit;
-  font-size: 0.82em;
+  background: linear-gradient(120deg, rgba(79, 214, 255, 0.22), rgba(122, 108, 255, 0.3));
+  color: var(--starlight);
+  font-size: clamp(16px, 1.2vw, 24px);
+  font-weight: 600;
   cursor: pointer;
-  box-shadow: 0 0 18px rgba(79, 214, 255, 0.12) inset;
+  box-shadow:
+    inset 0 0 0 1px rgba(214, 208, 255, 0.45),
+    0 12px 34px -12px rgba(122, 108, 255, 0.9);
+  transition: background 200ms ease;
+}
+
+.voice-gate::before {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border: 1px solid rgba(79, 214, 255, 0.5);
+  border-radius: inherit;
+  opacity: 0;
+  animation: gate-ring 2.6s var(--ease-out) infinite;
+  pointer-events: none;
 }
 
 .voice-gate:hover {
-  background: rgba(79, 214, 255, 0.18);
+  background: linear-gradient(120deg, rgba(79, 214, 255, 0.32), rgba(122, 108, 255, 0.42));
 }
 
+@keyframes gate-ring {
+  0% {
+    opacity: 0.9;
+    transform: scale(0.96);
+  }
+
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(1.08);
+  }
+}
+
+/* ARI's sentence, as subtitles: the line people read from the back. */
 .bubble {
-  position: relative;
-  margin: 0 clamp(14px, 1.6vw, 26px) clamp(6px, 0.8vh, 10px);
-  padding: clamp(8px, 1vh, 12px) clamp(12px, 1.2vw, 18px);
-  min-height: 2.5em;
-  border: 1px solid rgba(79, 214, 255, 0.28);
-  border-radius: 12px;
-  background:
-    linear-gradient(180deg, rgba(79, 214, 255, 0.08), rgba(4, 8, 15, 0.35));
-  color: #dff6ff;
-  font-size: clamp(0.95rem, 1.1vw, 1.25rem);
-  line-height: 1.35;
-  box-shadow: 0 0 26px rgba(79, 214, 255, 0.08);
-  transition: opacity 260ms ease;
-}
-
-.bubble::before {
-  content: "";
-  position: absolute;
-  top: -7px;
-  left: 22px;
-  width: 12px;
-  height: 12px;
-  border-top: 1px solid rgba(79, 214, 255, 0.28);
-  border-left: 1px solid rgba(79, 214, 255, 0.28);
-  background: #071019;
-  transform: rotate(45deg);
+  flex: none;
+  display: grid;
+  place-content: center;
+  min-height: 2.7em;
+  margin: clamp(4px, 0.8vh, 12px) auto 0;
+  max-width: 30ch;
+  font-size: clamp(20px, 1.75vw, 38px);
+  font-weight: 600;
+  line-height: 1.28;
+  letter-spacing: -0.005em;
+  text-align: center;
+  text-wrap: balance;
+  color: var(--starlight);
+  text-shadow: 0 2px 18px rgba(7, 6, 26, 0.9);
+  transition:
+    opacity 420ms var(--ease-out),
+    transform 420ms var(--ease-out),
+    filter 420ms var(--ease-out);
 }
 
 .bubble-empty {
   opacity: 0;
-  visibility: hidden;
+  transform: translateY(6px);
+  filter: blur(4px);
 }
 
-.pane-showcase .showcase {
-  position: static;
-  inset: auto;
-  flex: 1;
-  min-height: 0;
-  padding: clamp(4px, 0.6vh, 8px) clamp(16px, 1.8vw, 30px) clamp(6px, 1vh, 12px);
-}
+/* --- what ARI sees: chips in presentation, lists in debug --------------- */
 
-.pane-showcase .showcase-count {
-  font-size: clamp(1.3rem, 1.9vw, 2.3rem);
-}
-
-.pane-showcase .showcase-objects {
-  gap: clamp(6px, 0.9vh, 11px);
-}
-
-.pane-showcase .view-note {
-  position: static;
-  inset: auto;
-  flex: 1;
-  display: grid;
-  place-content: center;
-  min-height: 0;
-}
-
-.pane-showcase .view-meta {
-  position: static;
-  margin: 0;
-  padding-bottom: clamp(4px, 0.6vh, 8px);
-}
-
-/* The ~0.5 s swap of the board's single model: a pill over the pane body. */
-.pane-showcase .view-switching {
-  position: absolute;
-  left: 50%;
-  bottom: clamp(56px, 13vh, 108px);
-  z-index: 2;
+.showcase {
   flex: none;
-  display: inline-flex;
-  place-content: center;
-  width: auto;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
-  padding: 0.38em 0.95em;
-  border: 1px solid rgba(79, 214, 255, 0.34);
+  padding-top: clamp(10px, 1.8vh, 26px);
+}
+
+.showcase-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: clamp(8px, 0.7vw, 14px);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.showcase-chips:empty {
+  display: none;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0.42em 1em;
+  border: 1px solid var(--rim-strong);
   border-radius: 999px;
-  background: rgba(4, 8, 15, 0.86);
-  color: var(--beam);
-  font-family: var(--mono);
+  background: var(--glass-strong);
+  font-size: clamp(17px, 1.4vw, 30px);
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--starlight);
+  transition:
+    opacity 360ms var(--ease-out),
+    transform 360ms var(--ease-out);
+}
+
+.chip-entering {
+  opacity: 0;
+  transform: translateY(6px) scale(0.96);
+}
+
+.chip-count {
+  padding: 0.1em 0.45em;
+  border-radius: 999px;
+  background: linear-gradient(120deg, var(--ion), var(--violet));
   font-size: 0.72em;
-  letter-spacing: 0.04em;
-  white-space: nowrap;
-  transform: translateX(-50%);
-  pointer-events: none;
-  animation: switching-pulse 900ms ease-in-out infinite;
+  font-weight: 700;
+  color: var(--void);
 }
 
-@keyframes switching-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-
-  50% {
-    opacity: 0.5;
-  }
+.view-note {
+  margin: 0;
+  font-size: clamp(16px, 1.25vw, 26px);
+  text-align: center;
+  color: var(--haze);
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .pane-showcase .view-switching {
-    animation: none;
-  }
+/* Skeleton view: ARI steps back and the room takes the panel. */
+.pane-showcase:has(#room:not([hidden])) .hologram {
+  flex: 0 0 34%;
 }
 
 .room-view {
   position: relative;
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
-  margin: 0 clamp(14px, 1.6vw, 26px) clamp(6px, 1vh, 12px);
-  border: 1px solid var(--hairline);
-  border-radius: 12px;
+  margin-top: clamp(8px, 1.2vh, 18px);
+  border: 1px solid var(--rim);
+  border-radius: calc(var(--radius) * 0.7);
   overflow: hidden;
   background:
-    radial-gradient(ellipse at 50% 120%, rgba(122, 108, 255, 0.16), transparent 62%),
-    linear-gradient(180deg, rgba(79, 214, 255, 0.05), transparent 70%);
+    radial-gradient(ellipse at 50% 120%, rgba(122, 108, 255, 0.2), transparent 62%),
+    rgba(7, 6, 26, 0.45);
 }
 
 .room-canvas {
@@ -726,28 +745,178 @@ body {
   height: 100%;
 }
 
-.mente {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4em 1.2em;
-  margin: 0 clamp(14px, 1.6vw, 26px);
-  padding-top: clamp(4px, 0.6vh, 8px);
-  border-top: 1px solid var(--hairline);
-  font-family: var(--mono);
-  font-size: 0.68em;
-  color: var(--dim);
+/* The ~0.5 s single-model swap: a pill over the panel. */
+.view-switching {
+  position: absolute;
+  bottom: clamp(18px, 4vh, 48px);
+  left: 50%;
+  z-index: 2;
+  margin: 0;
+  padding: 0.5em 1.2em;
+  border: 1px solid rgba(79, 214, 255, 0.4);
+  border-radius: 999px;
+  background: rgba(7, 6, 26, 0.9);
+  color: var(--ion);
+  font-size: 0.95em;
+  white-space: nowrap;
+  transform: translateX(-50%);
+  pointer-events: none;
+  animation: switching-pulse 900ms ease-in-out infinite;
 }
 
-.mente-key {
-  color: rgba(79, 214, 255, 0.55);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+@keyframes switching-pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* --- debug mode --------------------------------------------------------- */
+
+/* The operator needs room for the lists more than a tidy diptych. */
+[data-ui="debug"] .pane-showcase {
+  height: 100%;
+}
+
+/* Debug: the voice readouts to the left of a smaller sphere. */
+[data-ui="debug"] .hologram {
+  flex: 0 0 clamp(150px, 30%, 320px);
+  flex-direction: row-reverse;
+  gap: clamp(10px, 1vw, 20px);
+}
+
+[data-ui="debug"] .hologram-info {
+  justify-content: center;
+  align-items: flex-start;
+  max-width: 48%;
+  padding-top: 0;
+}
+
+[data-ui="debug"] .hologram-info .voice-gate {
+  font-size: 0.9em;
+}
+
+[data-ui="debug"] .bubble {
+  max-width: none;
+  min-height: 2.6em;
+  font-size: clamp(16px, 1.15vw, 23px);
+}
+
+[data-ui="debug"] .showcase {
+  flex: 1 1 auto;
+  gap: clamp(10px, 1.6vh, 22px);
+  overflow: hidden;
+}
+
+[data-ui="debug"] .view-note {
+  flex: 1;
+  display: grid;
+  place-content: center;
+}
+
+.showcase-group {
+  display: flex;
+  flex-direction: column;
+  gap: clamp(4px, 0.8vh, 10px);
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+.showcase-group:last-of-type {
+  flex: 0 1 auto;
+}
+
+.showcase-heading {
+  margin: 0;
+  font-size: 0.82em;
+  font-weight: 600;
+  color: var(--dusk);
+}
+
+.showcase-counts,
+.showcase-objects {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  list-style: none;
+}
+
+.showcase-counts {
+  gap: clamp(2px, 0.4vh, 6px);
+}
+
+.showcase-count {
+  display: flex;
+  align-items: baseline;
+  gap: 0.3em;
+  min-width: 0;
+  font-size: clamp(1.25rem, 1.7vw, 2.1rem);
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.showcase-count-n {
+  font-family: var(--mono);
+  color: var(--ion);
+}
+
+.showcase-count-x {
+  font-size: 0.6em;
+  color: var(--dusk);
+}
+
+.showcase-count-label,
+.showcase-object-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.showcase-objects {
+  gap: clamp(6px, 0.9vh, 11px);
+  padding-top: clamp(8px, 1.2vh, 16px);
+  border-top: 1px solid var(--rim);
 }
 
 .showcase-object {
-  opacity: 1;
-  transform: translateY(0);
-  transition: opacity 300ms ease, transform 300ms ease;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 0.3em 0.8em;
+  font-size: clamp(0.95rem, 1.05vw, 1.2rem);
+  transition:
+    opacity 300ms ease,
+    transform 300ms ease;
+}
+
+.showcase-object-head {
+  display: contents;
+}
+
+.showcase-object-score {
+  font-family: var(--mono);
+  font-size: 0.92em;
+  color: var(--haze);
+}
+
+.showcase-bar {
+  grid-column: 1 / -1;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(190, 182, 255, 0.12);
+  overflow: hidden;
+}
+
+.showcase-bar-fill {
+  display: block;
+  width: calc(var(--score, 0) * 100%);
+  height: 100%;
+  border-radius: inherit;
+  background: var(--spectrum);
+  transition: width 300ms ease;
 }
 
 .showcase-object-entering {
@@ -759,45 +928,80 @@ body {
   opacity: 0;
 }
 
-.showcase-bar-fill {
-  transition: width 300ms ease, background 300ms ease;
+.showcase-more {
+  font-size: 0.85em;
+  color: var(--dusk);
 }
 
+.mente {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3em 1.2em;
+  margin: clamp(6px, 1vh, 12px) 0 0;
+  padding-top: clamp(6px, 0.8vh, 10px);
+  border-top: 1px solid var(--rim);
+  font-family: var(--mono);
+  font-size: 0.78em;
+  color: var(--haze);
+}
+
+.mente-key {
+  color: var(--ion);
+}
+
+.view-meta {
+  margin: 0.4em 0 0;
+  font-family: var(--mono);
+  font-size: 0.75em;
+  text-align: center;
+  color: var(--dusk);
+}
+
+/* --- narrow screens ----------------------------------------------------- */
+
 @media (max-width: 900px) {
-  .hologram {
-    grid-template-columns: minmax(0, 1fr);
-    height: clamp(150px, 24vh, 230px);
+  .topbar {
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 
   .modes {
+    grid-row: 2;
+    grid-column: 1 / -1;
+    justify-self: center;
+  }
+
+  .brand-line {
     display: none;
   }
 
-  .hologram-info {
-    position: absolute;
-    right: clamp(10px, 2vw, 20px);
-    bottom: clamp(6px, 1vh, 12px);
-    align-items: flex-end;
+  .stage {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 4fr) minmax(0, 5fr);
   }
 
-  .hologram-id {
-    display: none;
+  .pane-showcase {
+    height: auto;
+    align-self: stretch;
+  }
+
+  .notice {
+    left: 50%;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .dot-connecting,
+  .dot-reconnecting,
+  .view-switching,
+  .voice-gate::before {
+    animation: none;
+  }
+
+  .modes-thumb,
+  .bubble,
+  .chip,
   .showcase-object,
   .showcase-bar-fill {
-    animation: none;
     transition: none;
   }
-}
-
-.voice-badge[data-status="no-voice"],
-.voice-badge[data-status="unsupported"] {
-  color: var(--warn);
-}
-
-.voice-paused {
-  color: var(--warn);
 }
